@@ -17,6 +17,8 @@ const BATCH_CG_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CG_F
 const BATCH_CONTAINER_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CONTAINER_FETCH_CONCURRENCY || '4', 10);
 const BATCH_METADATA_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_METADATA_FETCH_CONCURRENCY || '8', 10);
 const MAX_BATCH_ERRORS = Number.parseInt(process.env.ZENIUS_MAX_BATCH_ERRORS || '100', 10);
+const DEFAULT_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_CHUNK_SIZE || '8', 10);
+const MAX_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_MAX_CHUNK_SIZE || '20', 10);
 const KNOWN_REQUEST_HEADERS = new Set([
   'accept',
   'accept-language',
@@ -162,6 +164,35 @@ function pushBatchError(errors, errorInfo) {
   }
 
   errors.push(errorInfo);
+}
+
+function normalizeCgIdList(rawValue) {
+  if (!Array.isArray(rawValue)) {
+    return [];
+  }
+
+  return unique(
+    rawValue
+      .map((value) => String(value || '').trim())
+      .filter((value) => /^\d+$/.test(value))
+  );
+}
+
+function normalizeChunkOffset(rawValue) {
+  const parsed = Number.parseInt(rawValue, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 0;
+  }
+  return parsed;
+}
+
+function normalizeChunkLimit(rawValue) {
+  if (rawValue === null || rawValue === undefined || rawValue === '') {
+    return null;
+  }
+
+  const parsed = clampPositiveInt(rawValue, clampPositiveInt(DEFAULT_BATCH_CHAIN_CHUNK_SIZE, 8));
+  return Math.min(parsed, clampPositiveInt(MAX_BATCH_CHAIN_CHUNK_SIZE, 20));
 }
 
 function extractCgId(pathUrl) {
@@ -460,10 +491,32 @@ async function getJson(endpoint, {
       });
 
       if (response.status >= 200 && response.status < 300) {
-        if (!response.data || response.data.ok === false) {
-          throw new Error(`API returned non-ok payload for ${endpoint}: ${JSON.stringify(response.data)}`);
+        const payload = response.data;
+        const isObjectPayload = payload && typeof payload === 'object' && !Array.isArray(payload);
+        const payloadOk = isObjectPayload && payload.ok !== false;
+
+        if (payloadOk) {
+          return payload;
         }
-        return response.data;
+
+        const payloadErrorText = isObjectPayload ? String(payload.error || '').toLowerCase() : '';
+        const looksTransientPayload = payload === ''
+          || payload === null
+          || payload === undefined
+          || typeof payload === 'string'
+          || (isObjectPayload
+            && payload.ok === false
+            && (payloadErrorText.includes('503')
+              || payloadErrorText.includes('tempor')
+              || payloadErrorText.includes('service unavailable')));
+
+        if (looksTransientPayload && attempt < maxRetries) {
+          const delayMs = retryBaseDelay * (2 ** attempt) + Math.floor(Math.random() * 250);
+          await sleep(delayMs);
+          continue;
+        }
+
+        throw new Error(`API returned non-ok payload for ${endpoint}: ${JSON.stringify(payload)}`);
       }
 
       const isRetryable = RETRYABLE_UPSTREAM_STATUS.has(response.status);
@@ -507,11 +560,34 @@ async function getCgByShortId(id, options) {
 }
 
 async function resolveLeafCgIds({ rootCgId, targetCgSelector, options }) {
-  const rootPayload = await getCgByShortId(rootCgId, options);
+  const targetCgId = normalizeTargetCgId(targetCgSelector);
+  const errors = [];
+  let rootPayload;
+
+  try {
+    rootPayload = await getCgByShortId(rootCgId, options);
+  } catch (error) {
+    pushBatchError(errors, {
+      stage: 'cgroup-root',
+      urlShortId: rootCgId,
+      message: error.message
+    });
+
+    if (targetCgId) {
+      return {
+        targetCgId,
+        leafCgIds: [targetCgId],
+        traversal: [{ source: rootCgId, next: targetCgId, isParent: null }],
+        errors
+      };
+    }
+
+    throw error;
+  }
+
   const rootContainers = Array.isArray(rootPayload?.value?.['cgs-containers'])
     ? rootPayload.value['cgs-containers']
     : [];
-  const targetCgId = normalizeTargetCgId(targetCgSelector);
 
   const matchedRootContainers = rootContainers.filter((item) => {
     const itemCgId = extractCgId(item?.['path-url']);
@@ -526,6 +602,22 @@ async function resolveLeafCgIds({ rootCgId, targetCgSelector, options }) {
         .map((item) => extractCgId(item?.['path-url']))
         .filter(Boolean)
     );
+
+    if (targetCgId) {
+      pushBatchError(errors, {
+        stage: 'cgroup-root-match',
+        urlShortId: targetCgId,
+        message: `targetCgId=${targetCgId} not present under root ${rootCgId}, using target as direct leaf candidate`
+      });
+
+      return {
+        targetCgId,
+        leafCgIds: [targetCgId],
+        traversal: [{ source: rootCgId, next: targetCgId, isParent: null }],
+        errors
+      };
+    }
+
     throw new Error(
       `No cgs-containers matching /cg/:ID for root id ${rootCgId}. `
       + `targetCgId=${targetCgId || 'auto'} available=[${availableCgIds.join(', ')}]`
@@ -564,14 +656,31 @@ async function resolveLeafCgIds({ rootCgId, targetCgSelector, options }) {
       continue;
     }
 
-    const batchPayloads = await Promise.all(
+    const batchPayloads = await Promise.allSettled(
       batchIds.map((currentCgId) => cgFetchLimit(async () => ({
         currentCgId,
         payload: await getCgByShortId(currentCgId, options)
       })))
     );
 
-    for (const { currentCgId, payload } of batchPayloads) {
+    for (let i = 0; i < batchPayloads.length; i += 1) {
+      const result = batchPayloads[i];
+      const currentCgId = batchIds[i];
+      if (!currentCgId) {
+        continue;
+      }
+
+      if (result.status !== 'fulfilled') {
+        pushBatchError(errors, {
+          stage: 'cgroup-traversal',
+          urlShortId: currentCgId,
+          message: result.reason?.message || String(result.reason)
+        });
+        leafCgIds.push(currentCgId);
+        continue;
+      }
+
+      const payload = result.value.payload;
       const value = payload?.value || {};
       const valueIsParent = parseBoolean(value['is-parent']);
       const containers = Array.isArray(value['cgs-containers']) ? value['cgs-containers'] : [];
@@ -611,7 +720,8 @@ async function resolveLeafCgIds({ rootCgId, targetCgSelector, options }) {
   return {
     targetCgId,
     leafCgIds: unique(leafCgIds),
-    traversal
+    traversal,
+    errors
   };
 }
 
@@ -684,17 +794,38 @@ async function buildBatchChain({
   targetCgSelector,
   parentContainerName,
   requestContext,
-  refererPath
+  refererPath,
+  leafCgIds,
+  containerOffset,
+  containerLimit
 }) {
   const normalizedRootCgId = normalizeCgId(rootCgId, DEFAULT_BATCH_ROOT_CGROUP_ID);
   const options = { requestContext, refererPath };
-  const leaf = await resolveLeafCgIds({
-    rootCgId: normalizedRootCgId,
-    targetCgSelector,
-    options
-  });
-
   const errors = [];
+  const preResolvedLeafCgIds = normalizeCgIdList(leafCgIds);
+  let leaf;
+
+  if (preResolvedLeafCgIds.length > 0) {
+    leaf = {
+      targetCgId: normalizeTargetCgId(targetCgSelector),
+      leafCgIds: preResolvedLeafCgIds,
+      traversal: [],
+      errors: []
+    };
+  } else {
+    leaf = await resolveLeafCgIds({
+      rootCgId: normalizedRootCgId,
+      targetCgSelector,
+      options
+    });
+  }
+
+  if (Array.isArray(leaf.errors) && leaf.errors.length > 0) {
+    for (const errorInfo of leaf.errors) {
+      pushBatchError(errors, errorInfo);
+    }
+  }
+
   const containerFetchLimit = pLimit(clampPositiveInt(BATCH_CONTAINER_FETCH_CONCURRENCY, 4));
   const metadataFetchLimit = pLimit(clampPositiveInt(BATCH_METADATA_FETCH_CONCURRENCY, 8));
 
@@ -734,9 +865,16 @@ async function buildBatchChain({
 
   const mergedContainers = Array.from(containerByShortId.values());
   const pathParentName = sanitizePathSegment(parentContainerName, 'unknown-parent');
+  const totalContainers = mergedContainers.length;
+  const normalizedOffset = normalizeChunkOffset(containerOffset);
+  const normalizedLimit = normalizeChunkLimit(containerLimit);
+  const chunkEnd = normalizedLimit === null
+    ? totalContainers
+    : Math.min(totalContainers, normalizedOffset + normalizedLimit);
+  const containersToProcess = mergedContainers.slice(normalizedOffset, chunkEnd);
 
   const details = await Promise.all(
-    mergedContainers.map((container) => containerFetchLimit(async () => {
+    containersToProcess.map((container) => containerFetchLimit(async () => {
       const containerName = container.name || container['url-short-id'];
       const containerPath = buildContainerPath(pathParentName, containerName);
 
@@ -809,11 +947,17 @@ async function buildBatchChain({
     leafCgId: leaf.leafCgIds[0] || null,
     leafCgIds: leaf.leafCgIds,
     traversal: leaf.traversal,
+    totalContainers,
+    containerOffset: normalizedOffset,
+    containerLimit: normalizedLimit,
+    processedContainerCount: details.length,
+    hasMoreContainers: chunkEnd < totalContainers,
+    nextContainerOffset: chunkEnd < totalContainers ? chunkEnd : null,
     containerList: {
       urlShortId: leaf.leafCgIds[0] || null,
       urlShortIds: leaf.leafCgIds,
-      totalContainers: mergedContainers.length,
-      items: mergedContainers
+      totalContainers,
+      items: normalizedLimit === null ? mergedContainers : containersToProcess
     },
     containerDetails: details,
     errors
@@ -976,7 +1120,10 @@ const zeniusController = {
         targetCgSelector: req.body?.targetCgSelector,
         parentContainerName: req.body?.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
         requestContext,
-        refererPath: req.body?.refererPath
+        refererPath: req.body?.refererPath,
+        leafCgIds: req.body?.leafCgIds,
+        containerOffset: req.body?.containerOffset,
+        containerLimit: req.body?.containerLimit
       });
 
       res.json({
@@ -999,7 +1146,10 @@ const zeniusController = {
         targetCgSelector: req.body?.targetCgSelector,
         parentContainerName: req.body?.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
         requestContext,
-        refererPath: req.body?.refererPath
+        refererPath: req.body?.refererPath,
+        leafCgIds: req.body?.leafCgIds,
+        containerOffset: req.body?.containerOffset,
+        containerLimit: req.body?.containerLimit
       });
 
       const queued = [];
@@ -1091,6 +1241,12 @@ const zeniusController = {
           leafCgId: chain.leafCgId,
           leafCgIds: chain.leafCgIds,
           traversal: chain.traversal,
+          totalContainers: chain.totalContainers,
+          containerOffset: chain.containerOffset,
+          containerLimit: chain.containerLimit,
+          processedContainerCount: chain.processedContainerCount,
+          hasMoreContainers: chain.hasMoreContainers,
+          nextContainerOffset: chain.nextContainerOffset,
           parentContainerName: chain.parentContainerName,
           queuedCount: queued.length,
           skippedCount: skipped.length,

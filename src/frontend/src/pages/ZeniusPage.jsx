@@ -24,6 +24,8 @@ import {
 import { PROVIDERS } from '../config/providers';
 
 const HEADERS_STORAGE_KEY = 'zenius-headers-raw';
+const BATCH_CHAIN_CHUNK_SIZE = 8;
+const BATCH_DOWNLOAD_CHUNK_SIZE = 6;
 
 function formatDuration(seconds) {
   if (!Number.isFinite(seconds) || seconds <= 0) {
@@ -155,6 +157,8 @@ export default function ZeniusPage() {
   const [batchFolderPrefix, setBatchFolderPrefix] = useState('');
   const [batchChain, setBatchChain] = useState(null);
   const [batchResult, setBatchResult] = useState(null);
+  const [batchBuildProgress, setBatchBuildProgress] = useState(null);
+  const [batchQueueProgress, setBatchQueueProgress] = useState(null);
 
   const detailsMutation = useZeniusInstanceDetails();
   const downloadMutation = useZeniusDownload();
@@ -283,19 +287,78 @@ export default function ZeniusPage() {
   const handleGetBatchChain = async (event) => {
     event.preventDefault();
 
-    try {
-      const result = await batchChainMutation.mutateAsync({
-        rootCgId: batchRootCgId,
-        targetCgSelector: batchTargetCgSelector,
-        parentContainerName: batchParentContainerName,
-        headersRaw,
-        refererPath
-      });
+    let aggregate = null;
 
-      setBatchChain(result);
-      setBatchResult(null);
-    } catch (error) {
+    try {
       setBatchChain(null);
+      setBatchResult(null);
+      setBatchBuildProgress({ processed: 0, total: null });
+
+      let nextOffset = 0;
+      let hasMore = true;
+      let knownLeafCgIds = null;
+
+      while (hasMore) {
+        const result = await batchChainMutation.mutateAsync({
+          rootCgId: batchRootCgId,
+          targetCgSelector: batchTargetCgSelector,
+          parentContainerName: batchParentContainerName,
+          headersRaw,
+          refererPath,
+          leafCgIds: knownLeafCgIds,
+          containerOffset: nextOffset,
+          containerLimit: BATCH_CHAIN_CHUNK_SIZE
+        });
+
+        if (!aggregate) {
+          aggregate = {
+            ...result,
+            containerDetails: [...(result.containerDetails || [])],
+            errors: [...(result.errors || [])]
+          };
+        } else {
+          aggregate = {
+            ...aggregate,
+            ...result,
+            containerDetails: [
+              ...(aggregate.containerDetails || []),
+              ...(result.containerDetails || [])
+            ],
+            errors: [
+              ...(aggregate.errors || []),
+              ...(result.errors || [])
+            ]
+          };
+        }
+
+        knownLeafCgIds = Array.isArray(result.leafCgIds) && result.leafCgIds.length > 0
+          ? result.leafCgIds
+          : knownLeafCgIds;
+
+        const total = Number.isFinite(Number(result.totalContainers))
+          ? Number(result.totalContainers)
+          : Number.isFinite(Number(aggregate?.totalContainers))
+            ? Number(aggregate.totalContainers)
+            : null;
+
+        setBatchBuildProgress({
+          processed: aggregate.containerDetails.length,
+          total
+        });
+        setBatchChain(aggregate);
+
+        hasMore = Boolean(result.hasMoreContainers);
+        nextOffset = Number.isFinite(Number(result.nextContainerOffset))
+          ? Number(result.nextContainerOffset)
+          : 0;
+      }
+
+      setBatchBuildProgress(null);
+    } catch (error) {
+      if (!aggregate) {
+        setBatchChain(null);
+      }
+      setBatchBuildProgress(null);
       console.error('Failed to fetch zenius batch chain:', error);
     }
   };
@@ -303,21 +366,93 @@ export default function ZeniusPage() {
   const handleBatchDownload = async (event) => {
     event.preventDefault();
 
-    try {
-      const result = await batchDownloadMutation.mutateAsync({
-        rootCgId: batchRootCgId,
-        targetCgSelector: batchTargetCgSelector,
-        parentContainerName: batchParentContainerName,
-        headersRaw,
-        refererPath,
-        folderId: normalizedBatchFolderPrefix || null,
-        providers: selectedProviders.length > 0 ? selectedProviders : null
-      });
+    let aggregateResult = null;
 
-      setBatchResult(result?.data || null);
+    try {
+      setBatchResult(null);
+      setBatchQueueProgress({ processed: 0, total: null });
+
+      let nextOffset = 0;
+      let hasMore = true;
+      let knownLeafCgIds = Array.isArray(batchChain?.leafCgIds) ? batchChain.leafCgIds : null;
+
+      while (hasMore) {
+        const result = await batchDownloadMutation.mutateAsync({
+          rootCgId: batchRootCgId,
+          targetCgSelector: batchTargetCgSelector,
+          parentContainerName: batchParentContainerName,
+          headersRaw,
+          refererPath,
+          folderId: normalizedBatchFolderPrefix || null,
+          providers: selectedProviders.length > 0 ? selectedProviders : null,
+          leafCgIds: knownLeafCgIds,
+          containerOffset: nextOffset,
+          containerLimit: BATCH_DOWNLOAD_CHUNK_SIZE
+        });
+
+        const data = result?.data || {};
+        if (!aggregateResult) {
+          aggregateResult = {
+            ...data,
+            queued: [...(data.queued || [])],
+            skipped: [...(data.skipped || [])],
+            chainErrors: [...(data.chainErrors || [])],
+            queuedCount: Number(data.queuedCount || 0),
+            skippedCount: Number(data.skippedCount || 0)
+          };
+        } else {
+          aggregateResult = {
+            ...aggregateResult,
+            ...data,
+            queued: [
+              ...(aggregateResult.queued || []),
+              ...(data.queued || [])
+            ],
+            skipped: [
+              ...(aggregateResult.skipped || []),
+              ...(data.skipped || [])
+            ],
+            chainErrors: [
+              ...(aggregateResult.chainErrors || []),
+              ...(data.chainErrors || [])
+            ],
+            queuedCount: Number(aggregateResult.queuedCount || 0) + Number(data.queuedCount || 0),
+            skippedCount: Number(aggregateResult.skippedCount || 0) + Number(data.skippedCount || 0)
+          };
+        }
+
+        knownLeafCgIds = Array.isArray(data.leafCgIds) && data.leafCgIds.length > 0
+          ? data.leafCgIds
+          : knownLeafCgIds;
+
+        const total = Number.isFinite(Number(data.totalContainers))
+          ? Number(data.totalContainers)
+          : Number.isFinite(Number(aggregateResult?.totalContainers))
+            ? Number(aggregateResult.totalContainers)
+            : null;
+        const processedContainers = Number.isFinite(Number(data.nextContainerOffset))
+          ? Number(data.nextContainerOffset)
+          : (Number.isFinite(Number(data.totalContainers)) ? Number(data.totalContainers) : 0);
+
+        setBatchQueueProgress({
+          processed: processedContainers,
+          total
+        });
+        setBatchResult(aggregateResult);
+
+        hasMore = Boolean(data.hasMoreContainers);
+        nextOffset = Number.isFinite(Number(data.nextContainerOffset))
+          ? Number(data.nextContainerOffset)
+          : 0;
+      }
+
+      setBatchQueueProgress(null);
       setBatchChain((prev) => prev || null);
     } catch (error) {
-      setBatchResult(null);
+      if (!aggregateResult) {
+        setBatchResult(null);
+      }
+      setBatchQueueProgress(null);
       console.error('Failed to queue zenius batch download:', error);
     }
   };
@@ -622,6 +757,22 @@ export default function ZeniusPage() {
             )}
           </button>
         </div>
+
+        {batchBuildProgress && (
+          <div className="card p-3 border-sky-500/30 bg-sky-500/5">
+            <p className="text-xs text-sky-300">
+              Build chain bertahap: {batchBuildProgress.processed} / {batchBuildProgress.total ?? '?'} container selesai diproses.
+            </p>
+          </div>
+        )}
+
+        {batchQueueProgress && (
+          <div className="card p-3 border-emerald-500/30 bg-emerald-500/5">
+            <p className="text-xs text-emerald-300">
+              Queue batch bertahap: {batchQueueProgress.processed} / {batchQueueProgress.total ?? '?'} container sudah diproses.
+            </p>
+          </div>
+        )}
 
         {batchChain && (
           <div className="space-y-3">

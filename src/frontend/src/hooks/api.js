@@ -255,16 +255,22 @@ export const useZeniusBatchChain = () => {
     targetCgSelector,
     parentContainerName,
     headersRaw,
-    refererPath
+    refererPath,
+    leafCgIds,
+    containerOffset,
+    containerLimit
   }) => {
     const response = await api.post('/api/zenius/batch-chain', {
       rootCgId,
       targetCgSelector,
       parentContainerName,
       headersRaw,
-      refererPath
+      refererPath,
+      leafCgIds,
+      containerOffset,
+      containerLimit
     }, {
-      timeout: 60000
+      timeout: 90000
     });
 
     return response.data.data;
@@ -279,7 +285,10 @@ export const useZeniusBatchDownload = () => {
     headersRaw,
     refererPath,
     folderId,
-    providers
+    providers,
+    leafCgIds,
+    containerOffset,
+    containerLimit
   }) => {
     const response = await api.post('/api/zenius/batch-download', {
       rootCgId,
@@ -288,7 +297,10 @@ export const useZeniusBatchDownload = () => {
       headersRaw,
       refererPath,
       folderId,
-      providers
+      providers,
+      leafCgIds,
+      containerOffset,
+      containerLimit
     }, {
       timeout: 90000
     });
