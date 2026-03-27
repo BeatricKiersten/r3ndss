@@ -608,58 +608,51 @@ async function buildBatchChain({
     options
   });
 
-  const containerItems = [];
-  for (const leafCgId of leaf.leafCgIds) {
-    const list = await getContainerListWithDetails(leafCgId, options);
-    for (const item of list.items) {
-      containerItems.push({
-        ...item,
-        sourceLeafCgId: leafCgId
-      });
-    }
-  }
+  const containerLists = await Promise.all(
+    leaf.leafCgIds.map(leafCgId => getContainerListWithDetails(leafCgId, options))
+  );
 
   const containerByShortId = new Map();
-  for (const item of containerItems) {
-    const key = String(item['url-short-id'] || '').trim();
-    if (!key || containerByShortId.has(key)) continue;
-    containerByShortId.set(key, item);
+  for (let i = 0; i < leaf.leafCgIds.length; i++) {
+    const leafCgId = leaf.leafCgIds[i];
+    for (const item of containerLists[i].items) {
+      const key = String(item['url-short-id'] || '').trim();
+      if (!key || containerByShortId.has(key)) continue;
+      containerByShortId.set(key, { ...item, sourceLeafCgId: leafCgId });
+    }
   }
 
   const mergedContainers = Array.from(containerByShortId.values());
   const pathParentName = sanitizePathSegment(parentContainerName, 'unknown-parent');
 
-  const details = [];
-  for (const container of mergedContainers) {
-    const containerName = container.name || container['url-short-id'];
-    const containerPath = buildContainerPath(pathParentName, containerName);
-    const videoDetails = await getVideoInstanceDetails(container['url-short-id'], options);
+  const details = await Promise.all(
+    mergedContainers.map(async (container) => {
+      const containerName = container.name || container['url-short-id'];
+      const containerPath = buildContainerPath(pathParentName, containerName);
+      const videoDetails = await getVideoInstanceDetails(container['url-short-id'], options);
 
-    const instancesWithMetadata = [];
-    for (const video of videoDetails) {
-      const metadata = await fetchInstanceMetadata(video.urlShortId, options);
-      const outputName = sanitizeOutputName(
-        metadata.name || video.name || `zenius-${video.urlShortId}`,
-        `zenius-${video.urlShortId}`
+      const instancesWithMetadata = await Promise.all(
+        videoDetails.map(async (video) => {
+          const metadata = await fetchInstanceMetadata(video.urlShortId, options);
+          const outputName = sanitizeOutputName(
+            metadata.name || video.name || `zenius-${video.urlShortId}`,
+            `zenius-${video.urlShortId}`
+          );
+          return { ...video, path: containerPath, outputName, metadata };
+        })
       );
-      instancesWithMetadata.push({
-        ...video,
-        path: containerPath,
-        outputName,
-        metadata
-      });
-    }
 
-    details.push({
-      containerUrlShortId: container['url-short-id'],
-      containerName: container.name,
-      containerType: container.type,
-      containerPathUrl: container['path-url'],
-      sourceLeafCgId: container.sourceLeafCgId || null,
-      path: containerPath,
-      videoInstances: instancesWithMetadata
-    });
-  }
+      return {
+        containerUrlShortId: container['url-short-id'],
+        containerName: container.name,
+        containerType: container.type,
+        containerPathUrl: container['path-url'],
+        sourceLeafCgId: container.sourceLeafCgId || null,
+        path: containerPath,
+        videoInstances: instancesWithMetadata
+      };
+    })
+  );
 
   return {
     rootCgId: normalizedRootCgId,
