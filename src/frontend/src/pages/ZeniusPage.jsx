@@ -642,6 +642,14 @@ export default function ZeniusPage() {
               </div>
             </div>
 
+            {Array.isArray(batchChain.errors) && batchChain.errors.length > 0 && (
+              <div className="card p-3 border-amber-500/30 bg-amber-500/5">
+                <p className="text-xs text-amber-300">
+                  Batch chain selesai dengan {batchChain.errors.length} error upstream. Data yang berhasil tetap ditampilkan.
+                </p>
+              </div>
+            )}
+
             <div>
               <p className="text-sm text-[#aaa] mb-2">Preview Queue</p>
               <div className="max-h-72 overflow-auto rounded-lg border border-[#222] bg-[#0d0d0d]">

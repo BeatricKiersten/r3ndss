@@ -1,5 +1,6 @@
 const axios = require('axios');
 const path = require('path');
+const pLimit = require('p-limit');
 
 const config = require('../config');
 const { db, videoProcessor, uploaderService } = require('../services/runtime');
@@ -8,6 +9,14 @@ const ZENIUS_BASE_URL = 'https://www.zenius.net';
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0';
 const DEFAULT_BATCH_ROOT_CGROUP_ID = '34';
 const DEFAULT_BATCH_PARENT_CONTAINER_NAME = 'Pengantar Keterampilan Matematika Dasar';
+const RETRYABLE_UPSTREAM_STATUS = new Set([429, 500, 502, 503, 504]);
+const UPSTREAM_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_TIMEOUT_MS || '12000', 10);
+const UPSTREAM_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_UPSTREAM_MAX_RETRIES || '3', 10);
+const UPSTREAM_RETRY_BASE_DELAY_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_RETRY_BASE_DELAY_MS || '500', 10);
+const BATCH_CG_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CG_FETCH_CONCURRENCY || '4', 10);
+const BATCH_CONTAINER_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CONTAINER_FETCH_CONCURRENCY || '4', 10);
+const BATCH_METADATA_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_METADATA_FETCH_CONCURRENCY || '8', 10);
+const MAX_BATCH_ERRORS = Number.parseInt(process.env.ZENIUS_MAX_BATCH_ERRORS || '100', 10);
 const KNOWN_REQUEST_HEADERS = new Set([
   'accept',
   'accept-language',
@@ -121,6 +130,38 @@ function parseBoolean(value) {
     if (normalized === '0') return false;
   }
   return null;
+}
+
+function clampPositiveInt(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return parsed;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function bodyPreview(data) {
+  if (typeof data === 'string') {
+    return data.slice(0, 500);
+  }
+
+  try {
+    return JSON.stringify(data).slice(0, 500);
+  } catch {
+    return String(data).slice(0, 500);
+  }
+}
+
+function pushBatchError(errors, errorInfo) {
+  if (!Array.isArray(errors) || errors.length >= clampPositiveInt(MAX_BATCH_ERRORS, 100)) {
+    return;
+  }
+
+  errors.push(errorInfo);
 }
 
 function extractCgId(pathUrl) {
@@ -406,24 +447,54 @@ async function getJson(endpoint, {
   );
   const headers = buildUpstreamHeaders({ requestContext, referer });
 
-  const response = await axios.get(endpoint, {
-    headers,
-    timeout: 30000,
-    validateStatus: () => true
-  });
+  const timeoutMs = clampPositiveInt(UPSTREAM_TIMEOUT_MS, 12000);
+  const maxRetries = clampPositiveInt(UPSTREAM_MAX_RETRIES, 3);
+  const retryBaseDelay = clampPositiveInt(UPSTREAM_RETRY_BASE_DELAY_MS, 500);
 
-  if (response.status < 200 || response.status >= 300) {
-    const bodyPreview = typeof response.data === 'string'
-      ? response.data.slice(0, 500)
-      : JSON.stringify(response.data).slice(0, 500);
-    throw new Error(`Request failed (${response.status}) for ${endpoint}. Body: ${bodyPreview}`);
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    try {
+      const response = await axios.get(endpoint, {
+        headers,
+        timeout: timeoutMs,
+        validateStatus: () => true
+      });
+
+      if (response.status >= 200 && response.status < 300) {
+        if (!response.data || response.data.ok === false) {
+          throw new Error(`API returned non-ok payload for ${endpoint}: ${JSON.stringify(response.data)}`);
+        }
+        return response.data;
+      }
+
+      const isRetryable = RETRYABLE_UPSTREAM_STATUS.has(response.status);
+      if (isRetryable && attempt < maxRetries) {
+        const delayMs = retryBaseDelay * (2 ** attempt) + Math.floor(Math.random() * 250);
+        await sleep(delayMs);
+        continue;
+      }
+
+      throw new Error(`Request failed (${response.status}) for ${endpoint}. Body: ${bodyPreview(response.data)}`);
+    } catch (error) {
+      const status = error?.response?.status;
+      const isRetryableStatus = typeof status === 'number' && RETRYABLE_UPSTREAM_STATUS.has(status);
+      const isRetryableNetwork = !status && (
+        error?.code === 'ECONNABORTED'
+        || error?.code === 'ETIMEDOUT'
+        || error?.code === 'ECONNRESET'
+        || error?.code === 'EAI_AGAIN'
+      );
+
+      if ((isRetryableStatus || isRetryableNetwork) && attempt < maxRetries) {
+        const delayMs = retryBaseDelay * (2 ** attempt) + Math.floor(Math.random() * 250);
+        await sleep(delayMs);
+        continue;
+      }
+
+      throw error;
+    }
   }
 
-  if (!response.data || response.data.ok === false) {
-    throw new Error(`API returned non-ok payload for ${endpoint}: ${JSON.stringify(response.data)}`);
-  }
-
-  return response.data;
+  throw new Error(`Request failed after retries for ${endpoint}`);
 }
 
 async function getCgByShortId(id, options) {
@@ -476,44 +547,59 @@ async function resolveLeafCgIds({ rootCgId, targetCgSelector, options }) {
   const visited = new Set([rootCgId]);
   const queue = [...startCgIds];
   const leafCgIds = [];
+  const cgFetchLimit = pLimit(clampPositiveInt(BATCH_CG_FETCH_CONCURRENCY, 4));
 
   while (queue.length > 0) {
-    const currentCgId = queue.shift();
-    if (!currentCgId) continue;
+    const batchIds = [];
+    while (queue.length > 0 && batchIds.length < clampPositiveInt(BATCH_CG_FETCH_CONCURRENCY, 4)) {
+      const currentCgId = queue.shift();
+      if (!currentCgId || visited.has(currentCgId)) {
+        continue;
+      }
+      visited.add(currentCgId);
+      batchIds.push(currentCgId);
+    }
 
-    if (visited.has(currentCgId)) {
+    if (batchIds.length === 0) {
       continue;
     }
-    visited.add(currentCgId);
 
-    const payload = await getCgByShortId(currentCgId, options);
-    const value = payload?.value || {};
-    const valueIsParent = parseBoolean(value['is-parent']);
-    const containers = Array.isArray(value['cgs-containers']) ? value['cgs-containers'] : [];
-    const nextItems = unique(
-      containers
-        .map((item) => {
-          const nextId = extractCgId(item?.['path-url']);
-          if (nextId) {
-            traversal.push({
-              source: value['url-short-id'] || currentCgId,
-              next: nextId,
-              isParent: parseBoolean(item?.['is-parent'])
-            });
-          }
-          return nextId;
-        })
-        .filter(Boolean)
+    const batchPayloads = await Promise.all(
+      batchIds.map((currentCgId) => cgFetchLimit(async () => ({
+        currentCgId,
+        payload: await getCgByShortId(currentCgId, options)
+      })))
     );
 
-    if (nextItems.length === 0 || valueIsParent === false) {
-      leafCgIds.push(currentCgId);
-      continue;
-    }
+    for (const { currentCgId, payload } of batchPayloads) {
+      const value = payload?.value || {};
+      const valueIsParent = parseBoolean(value['is-parent']);
+      const containers = Array.isArray(value['cgs-containers']) ? value['cgs-containers'] : [];
+      const nextItems = unique(
+        containers
+          .map((item) => {
+            const nextId = extractCgId(item?.['path-url']);
+            if (nextId) {
+              traversal.push({
+                source: value['url-short-id'] || currentCgId,
+                next: nextId,
+                isParent: parseBoolean(item?.['is-parent'])
+              });
+            }
+            return nextId;
+          })
+          .filter(Boolean)
+      );
 
-    for (const nextId of nextItems) {
-      if (!visited.has(nextId)) {
-        queue.push(nextId);
+      if (nextItems.length === 0 || valueIsParent === false) {
+        leafCgIds.push(currentCgId);
+        continue;
+      }
+
+      for (const nextId of nextItems) {
+        if (!visited.has(nextId)) {
+          queue.push(nextId);
+        }
       }
     }
   }
@@ -608,38 +694,99 @@ async function buildBatchChain({
     options
   });
 
-  const containerLists = await Promise.all(
-    leaf.leafCgIds.map(leafCgId => getContainerListWithDetails(leafCgId, options))
+  const errors = [];
+  const containerFetchLimit = pLimit(clampPositiveInt(BATCH_CONTAINER_FETCH_CONCURRENCY, 4));
+  const metadataFetchLimit = pLimit(clampPositiveInt(BATCH_METADATA_FETCH_CONCURRENCY, 8));
+
+  const containerItems = [];
+  const containerListResults = await Promise.allSettled(
+    leaf.leafCgIds.map((leafCgId) => containerFetchLimit(async () => ({
+      leafCgId,
+      list: await getContainerListWithDetails(leafCgId, options)
+    })))
   );
 
-  const containerByShortId = new Map();
-  for (let i = 0; i < leaf.leafCgIds.length; i++) {
-    const leafCgId = leaf.leafCgIds[i];
-    for (const item of containerLists[i].items) {
-      const key = String(item['url-short-id'] || '').trim();
-      if (!key || containerByShortId.has(key)) continue;
-      containerByShortId.set(key, { ...item, sourceLeafCgId: leafCgId });
+  containerListResults.forEach((result, index) => {
+    const leafCgId = leaf.leafCgIds[index];
+    if (result.status !== 'fulfilled') {
+      pushBatchError(errors, {
+        stage: 'container-list',
+        urlShortId: leafCgId,
+        message: result.reason?.message || String(result.reason)
+      });
+      return;
     }
+
+    for (const item of result.value.list.items) {
+      containerItems.push({
+        ...item,
+        sourceLeafCgId: leafCgId
+      });
+    }
+  });
+
+  const containerByShortId = new Map();
+  for (const item of containerItems) {
+    const key = String(item['url-short-id'] || '').trim();
+    if (!key || containerByShortId.has(key)) continue;
+    containerByShortId.set(key, item);
   }
 
   const mergedContainers = Array.from(containerByShortId.values());
   const pathParentName = sanitizePathSegment(parentContainerName, 'unknown-parent');
 
   const details = await Promise.all(
-    mergedContainers.map(async (container) => {
+    mergedContainers.map((container) => containerFetchLimit(async () => {
       const containerName = container.name || container['url-short-id'];
       const containerPath = buildContainerPath(pathParentName, containerName);
-      const videoDetails = await getVideoInstanceDetails(container['url-short-id'], options);
+
+      let videoDetails = [];
+      try {
+        videoDetails = await getVideoInstanceDetails(container['url-short-id'], options);
+      } catch (error) {
+        pushBatchError(errors, {
+          stage: 'container-details',
+          urlShortId: container['url-short-id'],
+          message: error.message
+        });
+      }
 
       const instancesWithMetadata = await Promise.all(
-        videoDetails.map(async (video) => {
-          const metadata = await fetchInstanceMetadata(video.urlShortId, options);
-          const outputName = sanitizeOutputName(
-            metadata.name || video.name || `zenius-${video.urlShortId}`,
-            `zenius-${video.urlShortId}`
-          );
-          return { ...video, path: containerPath, outputName, metadata };
-        })
+        videoDetails.map((video) => metadataFetchLimit(async () => {
+          try {
+            const metadata = await fetchInstanceMetadata(video.urlShortId, options);
+            const outputName = sanitizeOutputName(
+              metadata.name || video.name || `zenius-${video.urlShortId}`,
+              `zenius-${video.urlShortId}`
+            );
+
+            return {
+              ...video,
+              path: containerPath,
+              outputName,
+              metadata
+            };
+          } catch (error) {
+            pushBatchError(errors, {
+              stage: 'instance-details',
+              urlShortId: video.urlShortId,
+              message: error.message
+            });
+
+            const outputName = sanitizeOutputName(
+              video.name || `zenius-${video.urlShortId}`,
+              `zenius-${video.urlShortId}`
+            );
+
+            return {
+              ...video,
+              path: containerPath,
+              outputName,
+              metadata: null,
+              metadataError: error.message
+            };
+          }
+        }))
       );
 
       return {
@@ -651,7 +798,7 @@ async function buildBatchChain({
         path: containerPath,
         videoInstances: instancesWithMetadata
       };
-    })
+    }))
   );
 
   return {
@@ -668,7 +815,8 @@ async function buildBatchChain({
       totalContainers: mergedContainers.length,
       items: mergedContainers
     },
-    containerDetails: details
+    containerDetails: details,
+    errors
   };
 }
 
@@ -948,6 +1096,7 @@ const zeniusController = {
           skippedCount: skipped.length,
           queued,
           skipped,
+          chainErrors: Array.isArray(chain.errors) ? chain.errors : [],
           providers: selectedProviders,
           cleanupLocalFile: true,
           baseFolderInput

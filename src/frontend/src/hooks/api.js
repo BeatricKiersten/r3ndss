@@ -263,6 +263,8 @@ export const useZeniusBatchChain = () => {
       parentContainerName,
       headersRaw,
       refererPath
+    }, {
+      timeout: 60000
     });
 
     return response.data.data;
@@ -287,6 +289,8 @@ export const useZeniusBatchDownload = () => {
       refererPath,
       folderId,
       providers
+    }, {
+      timeout: 90000
     });
 
     return response.data;
