@@ -26,6 +26,7 @@ import { PROVIDERS } from '../config/providers';
 const HEADERS_STORAGE_KEY = 'zenius-headers-raw';
 const BATCH_CHAIN_CHUNK_SIZE = 8;
 const BATCH_DOWNLOAD_CHUNK_SIZE = 6;
+const BATCH_REQUEST_BUDGET_MS = 24000;
 
 function formatDuration(seconds) {
   if (!Number.isFinite(seconds) || seconds <= 0) {
@@ -157,6 +158,7 @@ export default function ZeniusPage() {
   const [batchFolderPrefix, setBatchFolderPrefix] = useState('');
   const [batchChain, setBatchChain] = useState(null);
   const [batchResult, setBatchResult] = useState(null);
+  const [batchSessionId, setBatchSessionId] = useState(null);
   const [batchBuildProgress, setBatchBuildProgress] = useState(null);
   const [batchQueueProgress, setBatchQueueProgress] = useState(null);
 
@@ -288,27 +290,38 @@ export default function ZeniusPage() {
     event.preventDefault();
 
     let aggregate = null;
+    let currentSessionId = null;
+    let iteration = 0;
 
     try {
       setBatchChain(null);
       setBatchResult(null);
+      setBatchSessionId(null);
       setBatchBuildProgress({ processed: 0, total: null });
 
       let nextOffset = 0;
       let hasMore = true;
-      let knownLeafCgIds = null;
 
       while (hasMore) {
+        iteration += 1;
+        if (iteration > 60) {
+          break;
+        }
+
         const result = await batchChainMutation.mutateAsync({
           rootCgId: batchRootCgId,
           targetCgSelector: batchTargetCgSelector,
           parentContainerName: batchParentContainerName,
           headersRaw,
           refererPath,
-          leafCgIds: knownLeafCgIds,
+          sessionId: currentSessionId,
           containerOffset: nextOffset,
-          containerLimit: BATCH_CHAIN_CHUNK_SIZE
+          containerLimit: currentSessionId ? BATCH_CHAIN_CHUNK_SIZE : Math.max(2, Math.floor(BATCH_CHAIN_CHUNK_SIZE / 2)),
+          timeBudgetMs: BATCH_REQUEST_BUDGET_MS
         });
+
+        currentSessionId = result.sessionId || currentSessionId;
+        setBatchSessionId(currentSessionId);
 
         if (!aggregate) {
           aggregate = {
@@ -320,20 +333,14 @@ export default function ZeniusPage() {
           aggregate = {
             ...aggregate,
             ...result,
+            sessionId: currentSessionId || aggregate.sessionId || null,
             containerDetails: [
               ...(aggregate.containerDetails || []),
               ...(result.containerDetails || [])
             ],
-            errors: [
-              ...(aggregate.errors || []),
-              ...(result.errors || [])
-            ]
+            errors: [...(result.errors || aggregate.errors || [])]
           };
         }
-
-        knownLeafCgIds = Array.isArray(result.leafCgIds) && result.leafCgIds.length > 0
-          ? result.leafCgIds
-          : knownLeafCgIds;
 
         const total = Number.isFinite(Number(result.totalContainers))
           ? Number(result.totalContainers)
@@ -367,6 +374,8 @@ export default function ZeniusPage() {
     event.preventDefault();
 
     let aggregateResult = null;
+    let currentSessionId = batchSessionId || batchChain?.sessionId || null;
+    let iteration = 0;
 
     try {
       setBatchResult(null);
@@ -374,9 +383,13 @@ export default function ZeniusPage() {
 
       let nextOffset = 0;
       let hasMore = true;
-      let knownLeafCgIds = Array.isArray(batchChain?.leafCgIds) ? batchChain.leafCgIds : null;
 
       while (hasMore) {
+        iteration += 1;
+        if (iteration > 60) {
+          break;
+        }
+
         const result = await batchDownloadMutation.mutateAsync({
           rootCgId: batchRootCgId,
           targetCgSelector: batchTargetCgSelector,
@@ -385,12 +398,16 @@ export default function ZeniusPage() {
           refererPath,
           folderId: normalizedBatchFolderPrefix || null,
           providers: selectedProviders.length > 0 ? selectedProviders : null,
-          leafCgIds: knownLeafCgIds,
+          sessionId: currentSessionId,
           containerOffset: nextOffset,
-          containerLimit: BATCH_DOWNLOAD_CHUNK_SIZE
+          containerLimit: BATCH_DOWNLOAD_CHUNK_SIZE,
+          timeBudgetMs: BATCH_REQUEST_BUDGET_MS
         });
 
         const data = result?.data || {};
+        currentSessionId = data.sessionId || currentSessionId;
+        setBatchSessionId(currentSessionId);
+
         if (!aggregateResult) {
           aggregateResult = {
             ...data,
@@ -404,6 +421,7 @@ export default function ZeniusPage() {
           aggregateResult = {
             ...aggregateResult,
             ...data,
+            sessionId: currentSessionId || aggregateResult.sessionId || null,
             queued: [
               ...(aggregateResult.queued || []),
               ...(data.queued || [])
@@ -412,18 +430,11 @@ export default function ZeniusPage() {
               ...(aggregateResult.skipped || []),
               ...(data.skipped || [])
             ],
-            chainErrors: [
-              ...(aggregateResult.chainErrors || []),
-              ...(data.chainErrors || [])
-            ],
+            chainErrors: [...(data.chainErrors || aggregateResult.chainErrors || [])],
             queuedCount: Number(aggregateResult.queuedCount || 0) + Number(data.queuedCount || 0),
             skippedCount: Number(aggregateResult.skippedCount || 0) + Number(data.skippedCount || 0)
           };
         }
-
-        knownLeafCgIds = Array.isArray(data.leafCgIds) && data.leafCgIds.length > 0
-          ? data.leafCgIds
-          : knownLeafCgIds;
 
         const total = Number.isFinite(Number(data.totalContainers))
           ? Number(data.totalContainers)
@@ -447,6 +458,7 @@ export default function ZeniusPage() {
       }
 
       setBatchQueueProgress(null);
+      setBatchSessionId(currentSessionId);
       setBatchChain((prev) => prev || null);
     } catch (error) {
       if (!aggregateResult) {

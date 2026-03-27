@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { randomUUID } = require('crypto');
 const path = require('path');
 const pLimit = require('p-limit');
 
@@ -15,10 +16,16 @@ const UPSTREAM_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_UPSTREAM_MAX_RET
 const UPSTREAM_RETRY_BASE_DELAY_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_RETRY_BASE_DELAY_MS || '500', 10);
 const BATCH_CG_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CG_FETCH_CONCURRENCY || '4', 10);
 const BATCH_CONTAINER_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CONTAINER_FETCH_CONCURRENCY || '4', 10);
-const BATCH_METADATA_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_METADATA_FETCH_CONCURRENCY || '8', 10);
 const MAX_BATCH_ERRORS = Number.parseInt(process.env.ZENIUS_MAX_BATCH_ERRORS || '100', 10);
 const DEFAULT_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_CHUNK_SIZE || '8', 10);
 const MAX_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_MAX_CHUNK_SIZE || '20', 10);
+const DEFAULT_BATCH_REQUEST_BUDGET_MS = Number.parseInt(process.env.ZENIUS_BATCH_REQUEST_BUDGET_MS || '24000', 10);
+const MAX_BATCH_REQUEST_BUDGET_MS = Number.parseInt(process.env.ZENIUS_BATCH_REQUEST_MAX_BUDGET_MS || '28000', 10);
+const BATCH_SESSION_TTL_MS = Number.parseInt(process.env.ZENIUS_BATCH_SESSION_TTL_MS || '900000', 10);
+const BATCH_UPSTREAM_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_BATCH_UPSTREAM_TIMEOUT_MS || '7000', 10);
+const BATCH_UPSTREAM_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_BATCH_UPSTREAM_MAX_RETRIES || '1', 10);
+const BATCH_DEADLINE_GUARD_MS = Number.parseInt(process.env.ZENIUS_BATCH_DEADLINE_GUARD_MS || '1200', 10);
+const batchChainSessions = new Map();
 const KNOWN_REQUEST_HEADERS = new Set([
   'accept',
   'accept-language',
@@ -166,18 +173,6 @@ function pushBatchError(errors, errorInfo) {
   errors.push(errorInfo);
 }
 
-function normalizeCgIdList(rawValue) {
-  if (!Array.isArray(rawValue)) {
-    return [];
-  }
-
-  return unique(
-    rawValue
-      .map((value) => String(value || '').trim())
-      .filter((value) => /^\d+$/.test(value))
-  );
-}
-
 function normalizeChunkOffset(rawValue) {
   const parsed = Number.parseInt(rawValue, 10);
   if (!Number.isFinite(parsed) || parsed < 0) {
@@ -193,6 +188,75 @@ function normalizeChunkLimit(rawValue) {
 
   const parsed = clampPositiveInt(rawValue, clampPositiveInt(DEFAULT_BATCH_CHAIN_CHUNK_SIZE, 8));
   return Math.min(parsed, clampPositiveInt(MAX_BATCH_CHAIN_CHUNK_SIZE, 20));
+}
+
+function normalizeBatchRequestBudgetMs(rawValue) {
+  const fallback = clampPositiveInt(DEFAULT_BATCH_REQUEST_BUDGET_MS, 24000);
+  const parsed = clampPositiveInt(rawValue, fallback);
+  return Math.min(parsed, clampPositiveInt(MAX_BATCH_REQUEST_BUDGET_MS, 28000));
+}
+
+function shouldStopForDeadline(deadlineAt, guardMs = BATCH_DEADLINE_GUARD_MS) {
+  if (!deadlineAt) return false;
+  return Date.now() >= (deadlineAt - clampPositiveInt(guardMs, 1200));
+}
+
+function normalizeSessionId(rawValue) {
+  const value = String(rawValue || '').trim();
+  return value || null;
+}
+
+function createBatchChainSession({ rootCgId, targetCgSelector, parentContainerName }) {
+  const now = Date.now();
+  return {
+    id: randomUUID(),
+    createdAt: now,
+    updatedAt: now,
+    expiresAt: now + clampPositiveInt(BATCH_SESSION_TTL_MS, 900000),
+    rootCgId,
+    targetCgSelector: String(targetCgSelector || '').trim() || null,
+    targetCgId: normalizeTargetCgId(targetCgSelector),
+    parentContainerName: sanitizePathSegment(parentContainerName, 'unknown-parent'),
+    discoveryInitialized: false,
+    discoveryDone: false,
+    visitedCgIds: new Set([rootCgId]),
+    queueCgIds: [],
+    leafCgIds: [],
+    leafCgIdSet: new Set(),
+    leafCursor: 0,
+    traversal: [],
+    containerByShortId: new Map(),
+    errors: []
+  };
+}
+
+function touchBatchChainSession(session) {
+  const now = Date.now();
+  session.updatedAt = now;
+  session.expiresAt = now + clampPositiveInt(BATCH_SESSION_TTL_MS, 900000);
+}
+
+function cleanupExpiredBatchChainSessions() {
+  const now = Date.now();
+  for (const [sessionId, session] of batchChainSessions.entries()) {
+    if (!session || session.expiresAt <= now) {
+      batchChainSessions.delete(sessionId);
+    }
+  }
+}
+
+function addLeafCgId(session, cgId) {
+  if (!cgId || !/^\d+$/.test(String(cgId).trim())) {
+    return;
+  }
+
+  const normalized = String(cgId).trim();
+  if (session.leafCgIdSet.has(normalized)) {
+    return;
+  }
+
+  session.leafCgIdSet.add(normalized);
+  session.leafCgIds.push(normalized);
 }
 
 function extractCgId(pathUrl) {
@@ -469,7 +533,10 @@ async function getJson(endpoint, {
   requestContext,
   urlShortId,
   refererPath,
-  fallbackRefererPath = ''
+  fallbackRefererPath = '',
+  timeoutMs,
+  maxRetries,
+  deadlineAt
 }) {
   const referer = resolveReferer(
     urlShortId,
@@ -478,15 +545,24 @@ async function getJson(endpoint, {
   );
   const headers = buildUpstreamHeaders({ requestContext, referer });
 
-  const timeoutMs = clampPositiveInt(UPSTREAM_TIMEOUT_MS, 12000);
-  const maxRetries = clampPositiveInt(UPSTREAM_MAX_RETRIES, 3);
+  const requestTimeoutMs = clampPositiveInt(timeoutMs, clampPositiveInt(UPSTREAM_TIMEOUT_MS, 12000));
+  const requestMaxRetries = clampPositiveInt(maxRetries, clampPositiveInt(UPSTREAM_MAX_RETRIES, 3));
   const retryBaseDelay = clampPositiveInt(UPSTREAM_RETRY_BASE_DELAY_MS, 500);
 
-  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+  for (let attempt = 0; attempt <= requestMaxRetries; attempt += 1) {
     try {
+      const remainingMs = deadlineAt ? deadlineAt - Date.now() : null;
+      if (remainingMs !== null && remainingMs <= clampPositiveInt(BATCH_DEADLINE_GUARD_MS, 1200)) {
+        throw new Error(`Batch request time budget reached before fetching ${endpoint}`);
+      }
+
+      const effectiveTimeoutMs = remainingMs !== null
+        ? Math.max(1000, Math.min(requestTimeoutMs, remainingMs - 500))
+        : requestTimeoutMs;
+
       const response = await axios.get(endpoint, {
         headers,
-        timeout: timeoutMs,
+        timeout: effectiveTimeoutMs,
         validateStatus: () => true
       });
 
@@ -510,7 +586,7 @@ async function getJson(endpoint, {
               || payloadErrorText.includes('tempor')
               || payloadErrorText.includes('service unavailable')));
 
-        if (looksTransientPayload && attempt < maxRetries) {
+        if (looksTransientPayload && attempt < requestMaxRetries && !shouldStopForDeadline(deadlineAt, 1500)) {
           const delayMs = retryBaseDelay * (2 ** attempt) + Math.floor(Math.random() * 250);
           await sleep(delayMs);
           continue;
@@ -537,7 +613,7 @@ async function getJson(endpoint, {
         || error?.code === 'EAI_AGAIN'
       );
 
-      if ((isRetryableStatus || isRetryableNetwork) && attempt < maxRetries) {
+      if ((isRetryableStatus || isRetryableNetwork) && attempt < requestMaxRetries && !shouldStopForDeadline(deadlineAt, 1500)) {
         const delayMs = retryBaseDelay * (2 ** attempt) + Math.floor(Math.random() * 250);
         await sleep(delayMs);
         continue;
@@ -557,172 +633,6 @@ async function getCgByShortId(id, options) {
     urlShortId: id,
     fallbackRefererPath: `/cg/${id}`
   });
-}
-
-async function resolveLeafCgIds({ rootCgId, targetCgSelector, options }) {
-  const targetCgId = normalizeTargetCgId(targetCgSelector);
-  const errors = [];
-  let rootPayload;
-
-  try {
-    rootPayload = await getCgByShortId(rootCgId, options);
-  } catch (error) {
-    pushBatchError(errors, {
-      stage: 'cgroup-root',
-      urlShortId: rootCgId,
-      message: error.message
-    });
-
-    if (targetCgId) {
-      return {
-        targetCgId,
-        leafCgIds: [targetCgId],
-        traversal: [{ source: rootCgId, next: targetCgId, isParent: null }],
-        errors
-      };
-    }
-
-    throw error;
-  }
-
-  const rootContainers = Array.isArray(rootPayload?.value?.['cgs-containers'])
-    ? rootPayload.value['cgs-containers']
-    : [];
-
-  const matchedRootContainers = rootContainers.filter((item) => {
-    const itemCgId = extractCgId(item?.['path-url']);
-    if (!itemCgId) return false;
-    if (!targetCgId) return true;
-    return itemCgId === targetCgId;
-  });
-
-  if (matchedRootContainers.length === 0) {
-    const availableCgIds = unique(
-      rootContainers
-        .map((item) => extractCgId(item?.['path-url']))
-        .filter(Boolean)
-    );
-
-    if (targetCgId) {
-      pushBatchError(errors, {
-        stage: 'cgroup-root-match',
-        urlShortId: targetCgId,
-        message: `targetCgId=${targetCgId} not present under root ${rootCgId}, using target as direct leaf candidate`
-      });
-
-      return {
-        targetCgId,
-        leafCgIds: [targetCgId],
-        traversal: [{ source: rootCgId, next: targetCgId, isParent: null }],
-        errors
-      };
-    }
-
-    throw new Error(
-      `No cgs-containers matching /cg/:ID for root id ${rootCgId}. `
-      + `targetCgId=${targetCgId || 'auto'} available=[${availableCgIds.join(', ')}]`
-    );
-  }
-
-  const startCgIds = unique(
-    matchedRootContainers
-      .map((item) => extractCgId(item?.['path-url']))
-      .filter(Boolean)
-  );
-
-  const traversal = matchedRootContainers.map((item) => ({
-    source: rootCgId,
-    next: extractCgId(item?.['path-url']),
-    isParent: parseBoolean(item?.['is-parent'])
-  })).filter((item) => item.next);
-
-  const visited = new Set([rootCgId]);
-  const queue = [...startCgIds];
-  const leafCgIds = [];
-  const cgFetchLimit = pLimit(clampPositiveInt(BATCH_CG_FETCH_CONCURRENCY, 4));
-
-  while (queue.length > 0) {
-    const batchIds = [];
-    while (queue.length > 0 && batchIds.length < clampPositiveInt(BATCH_CG_FETCH_CONCURRENCY, 4)) {
-      const currentCgId = queue.shift();
-      if (!currentCgId || visited.has(currentCgId)) {
-        continue;
-      }
-      visited.add(currentCgId);
-      batchIds.push(currentCgId);
-    }
-
-    if (batchIds.length === 0) {
-      continue;
-    }
-
-    const batchPayloads = await Promise.allSettled(
-      batchIds.map((currentCgId) => cgFetchLimit(async () => ({
-        currentCgId,
-        payload: await getCgByShortId(currentCgId, options)
-      })))
-    );
-
-    for (let i = 0; i < batchPayloads.length; i += 1) {
-      const result = batchPayloads[i];
-      const currentCgId = batchIds[i];
-      if (!currentCgId) {
-        continue;
-      }
-
-      if (result.status !== 'fulfilled') {
-        pushBatchError(errors, {
-          stage: 'cgroup-traversal',
-          urlShortId: currentCgId,
-          message: result.reason?.message || String(result.reason)
-        });
-        leafCgIds.push(currentCgId);
-        continue;
-      }
-
-      const payload = result.value.payload;
-      const value = payload?.value || {};
-      const valueIsParent = parseBoolean(value['is-parent']);
-      const containers = Array.isArray(value['cgs-containers']) ? value['cgs-containers'] : [];
-      const nextItems = unique(
-        containers
-          .map((item) => {
-            const nextId = extractCgId(item?.['path-url']);
-            if (nextId) {
-              traversal.push({
-                source: value['url-short-id'] || currentCgId,
-                next: nextId,
-                isParent: parseBoolean(item?.['is-parent'])
-              });
-            }
-            return nextId;
-          })
-          .filter(Boolean)
-      );
-
-      if (nextItems.length === 0 || valueIsParent === false) {
-        leafCgIds.push(currentCgId);
-        continue;
-      }
-
-      for (const nextId of nextItems) {
-        if (!visited.has(nextId)) {
-          queue.push(nextId);
-        }
-      }
-    }
-  }
-
-  if (leafCgIds.length === 0) {
-    throw new Error(`No leaf cgroup found for root id ${rootCgId}`);
-  }
-
-  return {
-    targetCgId,
-    leafCgIds: unique(leafCgIds),
-    traversal,
-    errors
-  };
 }
 
 async function getContainerListWithDetails(urlShortId, options) {
@@ -789,178 +699,396 @@ async function fetchInstanceMetadata(urlShortId, options) {
   };
 }
 
+async function initializeBatchChainSessionDiscovery(session, options) {
+  if (session.discoveryInitialized) {
+    return;
+  }
+
+  let rootPayload;
+  try {
+    rootPayload = await getCgByShortId(session.rootCgId, options);
+  } catch (error) {
+    pushBatchError(session.errors, {
+      stage: 'cgroup-root',
+      urlShortId: session.rootCgId,
+      message: error.message
+    });
+
+    if (session.targetCgId) {
+      addLeafCgId(session, session.targetCgId);
+      session.traversal.push({ source: session.rootCgId, next: session.targetCgId, isParent: null });
+      session.discoveryInitialized = true;
+      return;
+    }
+
+    throw error;
+  }
+
+  const rootContainers = Array.isArray(rootPayload?.value?.['cgs-containers'])
+    ? rootPayload.value['cgs-containers']
+    : [];
+
+  const matchedRootContainers = rootContainers.filter((item) => {
+    const itemCgId = extractCgId(item?.['path-url']);
+    if (!itemCgId) return false;
+    if (!session.targetCgId) return true;
+    return itemCgId === session.targetCgId;
+  });
+
+  if (matchedRootContainers.length === 0) {
+    const availableCgIds = unique(
+      rootContainers
+        .map((item) => extractCgId(item?.['path-url']))
+        .filter(Boolean)
+    );
+
+    if (session.targetCgId) {
+      pushBatchError(session.errors, {
+        stage: 'cgroup-root-match',
+        urlShortId: session.targetCgId,
+        message: `targetCgId=${session.targetCgId} not present under root ${session.rootCgId}, using target as direct leaf candidate`
+      });
+      addLeafCgId(session, session.targetCgId);
+      session.traversal.push({ source: session.rootCgId, next: session.targetCgId, isParent: null });
+      session.discoveryInitialized = true;
+      return;
+    }
+
+    throw new Error(
+      `No cgs-containers matching /cg/:ID for root id ${session.rootCgId}. `
+      + `targetCgId=${session.targetCgId || 'auto'} available=[${availableCgIds.join(', ')}]`
+    );
+  }
+
+  const startCgIds = unique(
+    matchedRootContainers
+      .map((item) => extractCgId(item?.['path-url']))
+      .filter(Boolean)
+  );
+
+  for (const item of matchedRootContainers) {
+    const next = extractCgId(item?.['path-url']);
+    if (!next) continue;
+    session.traversal.push({
+      source: session.rootCgId,
+      next,
+      isParent: parseBoolean(item?.['is-parent'])
+    });
+  }
+
+  for (const startCgId of startCgIds) {
+    if (!session.visitedCgIds.has(startCgId)) {
+      session.queueCgIds.push(startCgId);
+    }
+  }
+
+  session.discoveryInitialized = true;
+}
+
+async function advanceBatchChainSessionDiscovery(session, options, deadlineAt) {
+  await initializeBatchChainSessionDiscovery(session, options);
+
+  const cgConcurrency = clampPositiveInt(BATCH_CG_FETCH_CONCURRENCY, 4);
+  const cgFetchLimit = pLimit(cgConcurrency);
+
+  while (session.queueCgIds.length > 0 && !shouldStopForDeadline(deadlineAt, 2000)) {
+    const batchIds = [];
+    while (session.queueCgIds.length > 0 && batchIds.length < cgConcurrency) {
+      const currentCgId = session.queueCgIds.shift();
+      if (!currentCgId || session.visitedCgIds.has(currentCgId)) {
+        continue;
+      }
+      session.visitedCgIds.add(currentCgId);
+      batchIds.push(currentCgId);
+    }
+
+    if (batchIds.length === 0) {
+      continue;
+    }
+
+    const batchPayloads = await Promise.allSettled(
+      batchIds.map((currentCgId) => cgFetchLimit(async () => ({
+        currentCgId,
+        payload: await getCgByShortId(currentCgId, options)
+      })))
+    );
+
+    for (let i = 0; i < batchPayloads.length; i += 1) {
+      const result = batchPayloads[i];
+      const currentCgId = batchIds[i];
+      if (!currentCgId) {
+        continue;
+      }
+
+      if (result.status !== 'fulfilled') {
+        pushBatchError(session.errors, {
+          stage: 'cgroup-traversal',
+          urlShortId: currentCgId,
+          message: result.reason?.message || String(result.reason)
+        });
+        addLeafCgId(session, currentCgId);
+        continue;
+      }
+
+      const payload = result.value.payload;
+      const value = payload?.value || {};
+      const valueIsParent = parseBoolean(value['is-parent']);
+      const containers = Array.isArray(value['cgs-containers']) ? value['cgs-containers'] : [];
+      const nextItems = unique(
+        containers
+          .map((item) => {
+            const nextId = extractCgId(item?.['path-url']);
+            if (nextId) {
+              session.traversal.push({
+                source: value['url-short-id'] || currentCgId,
+                next: nextId,
+                isParent: parseBoolean(item?.['is-parent'])
+              });
+            }
+            return nextId;
+          })
+          .filter(Boolean)
+      );
+
+      if (nextItems.length === 0 || valueIsParent === false) {
+        addLeafCgId(session, currentCgId);
+        continue;
+      }
+
+      for (const nextId of nextItems) {
+        if (!session.visitedCgIds.has(nextId)) {
+          session.queueCgIds.push(nextId);
+        }
+      }
+    }
+  }
+
+  const containerConcurrency = clampPositiveInt(BATCH_CONTAINER_FETCH_CONCURRENCY, 4);
+  const containerFetchLimit = pLimit(containerConcurrency);
+
+  while (session.leafCursor < session.leafCgIds.length && !shouldStopForDeadline(deadlineAt, 2000)) {
+    const leafBatch = session.leafCgIds.slice(session.leafCursor, session.leafCursor + containerConcurrency);
+    if (leafBatch.length === 0) {
+      break;
+    }
+
+    const containerListResults = await Promise.allSettled(
+      leafBatch.map((leafCgId) => containerFetchLimit(async () => ({
+        leafCgId,
+        list: await getContainerListWithDetails(leafCgId, options)
+      })))
+    );
+
+    for (let i = 0; i < containerListResults.length; i += 1) {
+      const result = containerListResults[i];
+      const leafCgId = leafBatch[i];
+      if (result.status !== 'fulfilled') {
+        pushBatchError(session.errors, {
+          stage: 'container-list',
+          urlShortId: leafCgId,
+          message: result.reason?.message || String(result.reason)
+        });
+        continue;
+      }
+
+      for (const item of result.value.list.items) {
+        const key = String(item?.['url-short-id'] || '').trim();
+        if (!key || session.containerByShortId.has(key)) {
+          continue;
+        }
+
+        session.containerByShortId.set(key, {
+          ...item,
+          sourceLeafCgId: leafCgId
+        });
+      }
+    }
+
+    session.leafCursor += leafBatch.length;
+  }
+
+  session.discoveryDone = session.queueCgIds.length === 0 && session.leafCursor >= session.leafCgIds.length;
+}
+
+async function buildBatchContainerDetail({ container, pathParentName, options, session, deadlineAt }) {
+  const containerName = container.name || container['url-short-id'];
+  const containerPath = buildContainerPath(pathParentName, containerName);
+
+  let videoDetails = [];
+  try {
+    videoDetails = await getVideoInstanceDetails(container['url-short-id'], options);
+  } catch (error) {
+    pushBatchError(session.errors, {
+      stage: 'container-details',
+      urlShortId: container['url-short-id'],
+      message: error.message
+    });
+  }
+
+  const instancesWithMetadata = [];
+  for (const video of videoDetails) {
+    if (shouldStopForDeadline(deadlineAt, 1500)) {
+      break;
+    }
+
+    try {
+      const metadata = await fetchInstanceMetadata(video.urlShortId, options);
+      const outputName = sanitizeOutputName(
+        metadata.name || video.name || `zenius-${video.urlShortId}`,
+        `zenius-${video.urlShortId}`
+      );
+
+      instancesWithMetadata.push({
+        ...video,
+        path: containerPath,
+        outputName,
+        metadata
+      });
+    } catch (error) {
+      pushBatchError(session.errors, {
+        stage: 'instance-details',
+        urlShortId: video.urlShortId,
+        message: error.message
+      });
+
+      const outputName = sanitizeOutputName(
+        video.name || `zenius-${video.urlShortId}`,
+        `zenius-${video.urlShortId}`
+      );
+
+      instancesWithMetadata.push({
+        ...video,
+        path: containerPath,
+        outputName,
+        metadata: null,
+        metadataError: error.message
+      });
+    }
+  }
+
+  return {
+    containerUrlShortId: container['url-short-id'],
+    containerName: container.name,
+    containerType: container.type,
+    containerPathUrl: container['path-url'],
+    sourceLeafCgId: container.sourceLeafCgId || null,
+    path: containerPath,
+    videoInstances: instancesWithMetadata,
+    partial: instancesWithMetadata.length < videoDetails.length
+  };
+}
+
 async function buildBatchChain({
   rootCgId,
   targetCgSelector,
   parentContainerName,
   requestContext,
   refererPath,
-  leafCgIds,
+  sessionId,
   containerOffset,
-  containerLimit
+  containerLimit,
+  timeBudgetMs
 }) {
+  cleanupExpiredBatchChainSessions();
+
   const normalizedRootCgId = normalizeCgId(rootCgId, DEFAULT_BATCH_ROOT_CGROUP_ID);
-  const options = { requestContext, refererPath };
-  const errors = [];
-  const preResolvedLeafCgIds = normalizeCgIdList(leafCgIds);
-  let leaf;
+  const normalizedParentContainerName = sanitizePathSegment(parentContainerName, 'unknown-parent');
+  const normalizedTargetSelector = String(targetCgSelector || '').trim() || null;
 
-  if (preResolvedLeafCgIds.length > 0) {
-    leaf = {
-      targetCgId: normalizeTargetCgId(targetCgSelector),
-      leafCgIds: preResolvedLeafCgIds,
-      traversal: [],
-      errors: []
-    };
-  } else {
-    leaf = await resolveLeafCgIds({
+  let session = null;
+  const normalizedSessionId = normalizeSessionId(sessionId);
+  if (normalizedSessionId && batchChainSessions.has(normalizedSessionId)) {
+    const existingSession = batchChainSessions.get(normalizedSessionId);
+    const sameContext = existingSession
+      && existingSession.rootCgId === normalizedRootCgId
+      && String(existingSession.targetCgSelector || '') === String(normalizedTargetSelector || '')
+      && existingSession.parentContainerName === normalizedParentContainerName;
+
+    if (sameContext) {
+      session = existingSession;
+    }
+  }
+
+  if (!session) {
+    session = createBatchChainSession({
       rootCgId: normalizedRootCgId,
-      targetCgSelector,
-      options
+      targetCgSelector: normalizedTargetSelector,
+      parentContainerName: normalizedParentContainerName
     });
+    batchChainSessions.set(session.id, session);
   }
 
-  if (Array.isArray(leaf.errors) && leaf.errors.length > 0) {
-    for (const errorInfo of leaf.errors) {
-      pushBatchError(errors, errorInfo);
-    }
-  }
+  touchBatchChainSession(session);
 
-  const containerFetchLimit = pLimit(clampPositiveInt(BATCH_CONTAINER_FETCH_CONCURRENCY, 4));
-  const metadataFetchLimit = pLimit(clampPositiveInt(BATCH_METADATA_FETCH_CONCURRENCY, 8));
+  const deadlineAt = Date.now() + normalizeBatchRequestBudgetMs(timeBudgetMs);
+  const options = {
+    requestContext,
+    refererPath,
+    deadlineAt,
+    timeoutMs: clampPositiveInt(BATCH_UPSTREAM_TIMEOUT_MS, 7000),
+    maxRetries: clampPositiveInt(BATCH_UPSTREAM_MAX_RETRIES, 1)
+  };
 
-  const containerItems = [];
-  const containerListResults = await Promise.allSettled(
-    leaf.leafCgIds.map((leafCgId) => containerFetchLimit(async () => ({
-      leafCgId,
-      list: await getContainerListWithDetails(leafCgId, options)
-    })))
-  );
+  await advanceBatchChainSessionDiscovery(session, options, deadlineAt);
 
-  containerListResults.forEach((result, index) => {
-    const leafCgId = leaf.leafCgIds[index];
-    if (result.status !== 'fulfilled') {
-      pushBatchError(errors, {
-        stage: 'container-list',
-        urlShortId: leafCgId,
-        message: result.reason?.message || String(result.reason)
-      });
-      return;
-    }
+  touchBatchChainSession(session);
 
-    for (const item of result.value.list.items) {
-      containerItems.push({
-        ...item,
-        sourceLeafCgId: leafCgId
-      });
-    }
-  });
-
-  const containerByShortId = new Map();
-  for (const item of containerItems) {
-    const key = String(item['url-short-id'] || '').trim();
-    if (!key || containerByShortId.has(key)) continue;
-    containerByShortId.set(key, item);
-  }
-
-  const mergedContainers = Array.from(containerByShortId.values());
-  const pathParentName = sanitizePathSegment(parentContainerName, 'unknown-parent');
+  const mergedContainers = Array.from(session.containerByShortId.values());
   const totalContainers = mergedContainers.length;
-  const normalizedOffset = normalizeChunkOffset(containerOffset);
-  const normalizedLimit = normalizeChunkLimit(containerLimit);
-  const chunkEnd = normalizedLimit === null
-    ? totalContainers
-    : Math.min(totalContainers, normalizedOffset + normalizedLimit);
-  const containersToProcess = mergedContainers.slice(normalizedOffset, chunkEnd);
+  const normalizedOffset = Math.min(normalizeChunkOffset(containerOffset), totalContainers);
+  const normalizedLimit = normalizeChunkLimit(containerLimit) || clampPositiveInt(DEFAULT_BATCH_CHAIN_CHUNK_SIZE, 8);
+  const pathParentName = session.parentContainerName;
 
-  const details = await Promise.all(
-    containersToProcess.map((container) => containerFetchLimit(async () => {
-      const containerName = container.name || container['url-short-id'];
-      const containerPath = buildContainerPath(pathParentName, containerName);
+  const details = [];
+  let cursor = normalizedOffset;
+  while (
+    cursor < totalContainers
+    && details.length < normalizedLimit
+    && !shouldStopForDeadline(deadlineAt, 1600)
+  ) {
+    const container = mergedContainers[cursor];
+    const detail = await buildBatchContainerDetail({
+      container,
+      pathParentName,
+      options,
+      session,
+      deadlineAt
+    });
+    details.push(detail);
+    cursor += 1;
+  }
 
-      let videoDetails = [];
-      try {
-        videoDetails = await getVideoInstanceDetails(container['url-short-id'], options);
-      } catch (error) {
-        pushBatchError(errors, {
-          stage: 'container-details',
-          urlShortId: container['url-short-id'],
-          message: error.message
-        });
-      }
-
-      const instancesWithMetadata = await Promise.all(
-        videoDetails.map((video) => metadataFetchLimit(async () => {
-          try {
-            const metadata = await fetchInstanceMetadata(video.urlShortId, options);
-            const outputName = sanitizeOutputName(
-              metadata.name || video.name || `zenius-${video.urlShortId}`,
-              `zenius-${video.urlShortId}`
-            );
-
-            return {
-              ...video,
-              path: containerPath,
-              outputName,
-              metadata
-            };
-          } catch (error) {
-            pushBatchError(errors, {
-              stage: 'instance-details',
-              urlShortId: video.urlShortId,
-              message: error.message
-            });
-
-            const outputName = sanitizeOutputName(
-              video.name || `zenius-${video.urlShortId}`,
-              `zenius-${video.urlShortId}`
-            );
-
-            return {
-              ...video,
-              path: containerPath,
-              outputName,
-              metadata: null,
-              metadataError: error.message
-            };
-          }
-        }))
-      );
-
-      return {
-        containerUrlShortId: container['url-short-id'],
-        containerName: container.name,
-        containerType: container.type,
-        containerPathUrl: container['path-url'],
-        sourceLeafCgId: container.sourceLeafCgId || null,
-        path: containerPath,
-        videoInstances: instancesWithMetadata
-      };
-    }))
-  );
+  const hasMoreKnownContainers = cursor < totalContainers;
+  const hasMoreContainers = hasMoreKnownContainers || !session.discoveryDone;
+  const nextContainerOffset = hasMoreContainers ? cursor : null;
 
   return {
-    rootCgId: normalizedRootCgId,
-    targetCgSelector: targetCgSelector || null,
-    targetCgId: leaf.targetCgId,
+    sessionId: session.id,
+    rootCgId: session.rootCgId,
+    targetCgSelector: session.targetCgSelector,
+    targetCgId: session.targetCgId,
     parentContainerName: pathParentName,
-    leafCgId: leaf.leafCgIds[0] || null,
-    leafCgIds: leaf.leafCgIds,
-    traversal: leaf.traversal,
+    leafCgId: session.leafCgIds[0] || null,
+    leafCgIds: session.leafCgIds,
+    traversal: session.traversal,
+    discoveredLeafCount: session.leafCgIds.length,
+    discoveryQueueRemaining: session.queueCgIds.length,
+    discoveryDone: session.discoveryDone,
     totalContainers,
     containerOffset: normalizedOffset,
     containerLimit: normalizedLimit,
     processedContainerCount: details.length,
-    hasMoreContainers: chunkEnd < totalContainers,
-    nextContainerOffset: chunkEnd < totalContainers ? chunkEnd : null,
+    hasMoreContainers,
+    nextContainerOffset,
     containerList: {
-      urlShortId: leaf.leafCgIds[0] || null,
-      urlShortIds: leaf.leafCgIds,
+      urlShortId: session.leafCgIds[0] || null,
+      urlShortIds: session.leafCgIds,
       totalContainers,
-      items: normalizedLimit === null ? mergedContainers : containersToProcess
+      items: mergedContainers.slice(normalizedOffset, cursor)
     },
     containerDetails: details,
-    errors
+    errors: session.errors,
+    timeBudgetMs: normalizeBatchRequestBudgetMs(timeBudgetMs)
   };
 }
 
@@ -1121,9 +1249,10 @@ const zeniusController = {
         parentContainerName: req.body?.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
         requestContext,
         refererPath: req.body?.refererPath,
-        leafCgIds: req.body?.leafCgIds,
+        sessionId: req.body?.sessionId,
         containerOffset: req.body?.containerOffset,
-        containerLimit: req.body?.containerLimit
+        containerLimit: req.body?.containerLimit,
+        timeBudgetMs: req.body?.timeBudgetMs
       });
 
       res.json({
@@ -1147,9 +1276,10 @@ const zeniusController = {
         parentContainerName: req.body?.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
         requestContext,
         refererPath: req.body?.refererPath,
-        leafCgIds: req.body?.leafCgIds,
+        sessionId: req.body?.sessionId,
         containerOffset: req.body?.containerOffset,
-        containerLimit: req.body?.containerLimit
+        containerLimit: req.body?.containerLimit,
+        timeBudgetMs: req.body?.timeBudgetMs
       });
 
       const queued = [];
@@ -1235,12 +1365,16 @@ const zeniusController = {
         success: true,
         message: 'Zenius batch download queued',
         data: {
+          sessionId: chain.sessionId,
           rootCgId: chain.rootCgId,
           targetCgSelector: chain.targetCgSelector,
           targetCgId: chain.targetCgId,
           leafCgId: chain.leafCgId,
           leafCgIds: chain.leafCgIds,
           traversal: chain.traversal,
+          discoveredLeafCount: chain.discoveredLeafCount,
+          discoveryQueueRemaining: chain.discoveryQueueRemaining,
+          discoveryDone: chain.discoveryDone,
           totalContainers: chain.totalContainers,
           containerOffset: chain.containerOffset,
           containerLimit: chain.containerLimit,
