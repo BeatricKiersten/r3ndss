@@ -80,6 +80,9 @@ export const useWebSocketStore = create((set, get) => ({
   progress: {},
 
   connect: () => {
+    const { socket } = get();
+    if (socket?.readyState === WebSocket.OPEN) return;
+
     const ws = new WebSocket(WS_URL);
 
     ws.onopen = () => {

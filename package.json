@@ -8,7 +8,7 @@
     "start:full": "npm run build && node src/server.js",
     "dev": "nodemon src/server.js",
     "frontend": "npm --prefix src/frontend run dev",
-    "build": "npm --prefix src/frontend install && npm --prefix src/frontend run build",
+    "build": "npm --prefix src/frontend install --include=dev && npm --prefix src/frontend run build",
     "dev:all": "concurrently \"npm run dev\" \"npm run frontend\"",
     "db:migrate:json": "node src/scripts/migrate-json-to-mysql.js",
     "lint": "eslint src/",
