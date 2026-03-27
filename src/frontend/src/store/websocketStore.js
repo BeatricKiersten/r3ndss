@@ -65,7 +65,7 @@ function getSeekStreamingUrl(fileId) {
 
 const WS_URL =
   import.meta.env.VITE_WS_URL ||
-  `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname}:3001`;
+  `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
 
 export const useWebSocketStore = create((set, get) => ({
   socket: null,

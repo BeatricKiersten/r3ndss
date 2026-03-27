@@ -20,7 +20,7 @@ const { db, eventEmitter, uploaderService } = require('./services/runtime');
 
 const app = express();
 const server = createServer(app);
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ server, path: '/ws' });
 
 app.use(cors({
   origin: config.frontendUrl,
