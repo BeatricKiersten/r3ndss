@@ -1,0 +1,3099 @@
+{
+  "folders": [
+    {
+      "id": "root",
+      "name": "Root",
+      "parentId": null,
+      "createdAt": "2026-03-04T17:50:52.776Z",
+      "updatedAt": "2026-03-04T17:50:52.776Z"
+    },
+    {
+      "id": "d9ed38ca-a5b1-4a78-868a-ea782b9827dd",
+      "name": "test",
+      "parentId": "root",
+      "path": "undefined/test",
+      "createdAt": "2026-03-04T20:33:40.746Z",
+      "updatedAt": "2026-03-04T20:33:40.746Z"
+    },
+    {
+      "id": "42126308-fb71-47ed-9cd7-0492b1dbe927",
+      "name": "My",
+      "parentId": "root",
+      "path": "undefined/My",
+      "createdAt": "2026-03-04T21:53:31.623Z",
+      "updatedAt": "2026-03-04T21:53:31.623Z"
+    },
+    {
+      "id": "1c652e80-a8b5-4987-91a8-f932eccc6b2a",
+      "name": "a",
+      "parentId": "root",
+      "path": "undefined/a",
+      "createdAt": "2026-03-04T21:54:29.705Z",
+      "updatedAt": "2026-03-04T21:54:29.705Z"
+    },
+    {
+      "id": "c008e872-d11a-49e1-bcef-56363384e573",
+      "name": "me",
+      "parentId": "42126308-fb71-47ed-9cd7-0492b1dbe927",
+      "path": "undefined/My/me",
+      "createdAt": "2026-03-04T22:01:48.825Z",
+      "updatedAt": "2026-03-04T22:01:48.825Z"
+    }
+  ],
+  "files": [
+    {
+      "id": "083d5b4a-a383-45f0-92e0-797baf2c97b9",
+      "folderId": "42126308-fb71-47ed-9cd7-0492b1dbe927",
+      "name": "video_1772653645131.mp4",
+      "originalUrl": "https://dcu9c0dztvf91.cloudfront.net/production/0/38/7686/03876866de5548a78f13f40c7b07371e.1.m3u8?Expires=1772654700&Signature=MNOwaglxCKmEXjOtmWIvhwyiMov7K8E0VD2U2xkr9bxS6isnrMcX-Sdc64KJo-mcOA5jTQSpRWvw7fBbzW8tLlYuAD8rM~b~DFl0ZSyCtbiSPxMhGAIzZZKx60me9-M1oHFBEjKvJgEKnuvmOyp4OWRBhAZ5RN8IXQ~m9~sDaYhukSQIMuPVjOPepNL6-28-RH3Q4aWFuR5l60b21pjo5LJgSmPvSmNFIs2Q0wOwhlL5uHh5g8DDywkNrNUWOmrdBQTgTxKb9NdUWQXvdyJOVE03ICLtnPTqCRdPlYm85LW8PKeJFqIpxEsrAUCQgj6DdkIzADpo7tlnTw3Arg7nVA__&Key-Pair-Id=K2PMCCGIKK2UV0",
+      "localPath": "uploads/video_1772653645131.mp4",
+      "size": 7477829,
+      "duration": 112.7561,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 100,
+        "upload": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "catbox": {
+          "status": "completed",
+          "url": "https://files.catbox.moe/qboisx.mp4",
+          "fileId": "qboisx.mp4",
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": [],
+          "updatedAt": "2026-03-04T19:47:46.417Z"
+        },
+        "seekstreaming": {
+          "status": "failed",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": "Cancelled by user",
+          "urlHistory": [],
+          "updatedAt": "2026-03-10T17:36:04.359Z"
+        }
+      },
+      "syncStatus": 25,
+      "canDelete": false,
+      "createdAt": "2026-03-04T19:47:25.134Z",
+      "updatedAt": "2026-03-10T17:36:04.359Z"
+    },
+    {
+      "id": "5adbbfbf-ff7e-4369-b20c-17e4ddb8f105",
+      "folderId": "root",
+      "name": "test.mp4",
+      "originalUrl": "https://dcu9c0dztvf91.cloudfront.net/production/e/54/5c40/e545c40fb14f4e628c2d64c6917fb574.0.m3u8?Expires=1772665800&Signature=SJHzWNhCHNSApsgmikohj8nU6VetcMXx-ZW0Tq4PBu3TAnq-3um1ui4h3Kqy8W2gEn4DjHTJP7xu7Cm9HdQmFmOILXCASKeOiEcI4jZfr88l-gycc7WUTqKv0JHbbWsYzpwRzbJ6cgxM8X04NI6Lcrv7Qgltvq8yvxdEr1Xa3PpBJHgYb79ju-zEo1HWp5zdHU0QhwAQ00TbYQq2r-HA-YUKilSexW5WrlD7k2cqqciUyK7IoWr2~jQBv8lKXdljVEQa9flYK85uKH-4scB4y3yzALxn6aEleUVG~1vzWS14BdYimewYkw4-55j-ByylKuvIEAbA1emEL2shJahCCw__&Key-Pair-Id=K2PMCCGIKK2UV0",
+      "localPath": "uploads/test.mp4",
+      "size": 35357840,
+      "duration": 224.064,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 100,
+        "upload": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "catbox": {
+          "status": "completed",
+          "url": "https://files.catbox.moe/xy7n33.mp4",
+          "fileId": "xy7n33.mp4",
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": [],
+          "updatedAt": "2026-03-05T16:33:20.281Z"
+        },
+        "seekstreaming": {
+          "status": "completed",
+          "url": "https://seekstreaming.com/v/ks5hh",
+          "fileId": "ks5hh",
+          "embedUrl": "https://seekstreaming.embedseek.com/#ks5hh",
+          "error": null,
+          "urlHistory": [
+            {
+              "url": "https://seekstreaming.com/v/9ebjz",
+              "fileId": "9ebjz",
+              "embedUrl": "https://seekstreaming.embedseek.com/#9ebjz",
+              "archivedAt": "2026-03-17T19:29:15.625Z"
+            },
+            {
+              "url": "https://seekstreaming.com/v/mzn1i",
+              "fileId": "mzn1i",
+              "embedUrl": "https://seekstreaming.embedseek.com/#mzn1i",
+              "archivedAt": "2026-03-17T19:29:38.353Z"
+            },
+            {
+              "url": "https://seekstreaming.com/v/gymn5",
+              "fileId": "gymn5",
+              "embedUrl": "https://seekstreaming.embedseek.com/#gymn5",
+              "archivedAt": "2026-03-17T19:30:03.557Z"
+            },
+            {
+              "url": "https://seekstreaming.com/v/tju6r",
+              "fileId": "tju6r",
+              "embedUrl": "https://seekstreaming.embedseek.com/#tju6r",
+              "archivedAt": "2026-03-17T19:31:05.735Z"
+            },
+            {
+              "url": "https://seekstreaming.com/v/vdyz9",
+              "fileId": "vdyz9",
+              "embedUrl": "https://seekstreaming.embedseek.com/#vdyz9",
+              "archivedAt": "2026-03-17T19:31:07.862Z"
+            },
+            {
+              "url": "https://seekstreaming.com/v/5a3cy",
+              "fileId": "5a3cy",
+              "embedUrl": "https://seekstreaming.embedseek.com/#5a3cy",
+              "archivedAt": "2026-03-17T19:31:38.251Z"
+            },
+            {
+              "url": "https://seekstreaming.com/v/8cliv",
+              "fileId": "8cliv",
+              "embedUrl": "https://seekstreaming.embedseek.com/#8cliv",
+              "archivedAt": "2026-03-17T19:32:02.184Z"
+            },
+            {
+              "url": "https://seekstreaming.com/v/iuhsq",
+              "fileId": "iuhsq",
+              "embedUrl": "https://seekstreaming.embedseek.com/#iuhsq",
+              "archivedAt": "2026-03-17T19:32:24.822Z"
+            },
+            {
+              "url": "https://seekstreaming.com/v/39ctx",
+              "fileId": "39ctx",
+              "embedUrl": "https://seekstreaming.embedseek.com/#39ctx",
+              "archivedAt": "2026-03-17T19:32:59.698Z"
+            },
+            {
+              "url": "https://seekstreaming.com/v/h6sak",
+              "fileId": "h6sak",
+              "embedUrl": "https://seekstreaming.embedseek.com/#h6sak",
+              "archivedAt": "2026-03-17T19:33:19.614Z"
+            },
+            {
+              "url": "https://seekstreaming.com/v/nr1fg",
+              "fileId": "nr1fg",
+              "embedUrl": "https://seekstreaming.embedseek.com/#nr1fg",
+              "archivedAt": "2026-03-17T19:33:42.121Z"
+            },
+            {
+              "url": "https://seekstreaming.com/v/o1ewb",
+              "fileId": "o1ewb",
+              "embedUrl": "https://seekstreaming.embedseek.com/#o1ewb",
+              "archivedAt": "2026-03-17T19:34:37.073Z"
+            },
+            {
+              "url": "https://seekstreaming.com/v/h6sai",
+              "fileId": "h6sai",
+              "embedUrl": "https://seekstreaming.embedseek.com/#h6sai",
+              "archivedAt": "2026-03-17T19:34:54.938Z"
+            },
+            {
+              "url": "https://seekstreaming.com/v/jvgmp",
+              "fileId": "jvgmp",
+              "embedUrl": "https://seekstreaming.embedseek.com/#jvgmp",
+              "archivedAt": "2026-03-17T19:35:17.806Z"
+            },
+            {
+              "url": "https://seekstreaming.com/v/iuhsi",
+              "fileId": "iuhsi",
+              "embedUrl": "https://seekstreaming.embedseek.com/#iuhsi",
+              "archivedAt": "2026-03-17T19:35:39.147Z"
+            },
+            {
+              "url": "https://seekstreaming.com/v/bwjeo",
+              "fileId": "bwjeo",
+              "embedUrl": "https://seekstreaming.embedseek.com/#bwjeo",
+              "archivedAt": "2026-03-17T19:36:59.570Z"
+            }
+          ],
+          "updatedAt": "2026-03-17T19:36:59.570Z"
+        }
+      },
+      "syncStatus": 50,
+      "canDelete": false,
+      "createdAt": "2026-03-04T22:15:44.341Z",
+      "updatedAt": "2026-03-17T19:36:59.570Z"
+    },
+    {
+      "id": "2b3414cf-302b-4edb-ad6d-5621ea9b799b",
+      "folderId": "root",
+      "name": "bvbv",
+      "originalUrl": "https://files.catbox.moe/xy7n33.mp4",
+      "localPath": "uploads/1773766468297-bvbv",
+      "size": 0,
+      "duration": 0,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "catbox": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "seekstreaming": {
+          "status": "completed",
+          "url": "https://seekstreaming.com/v/ug6p1",
+          "fileId": "ug6p1",
+          "embedUrl": "https://seekstreaming.embedseek.com/#ug6p1",
+          "error": null,
+          "urlHistory": [
+            {
+              "url": "https://seekstreaming.com/v/5a3cp",
+              "fileId": "5a3cp",
+              "embedUrl": "https://seekstreaming.embedseek.com/#5a3cp",
+              "archivedAt": "2026-03-17T19:28:51.528Z"
+            }
+          ],
+          "updatedAt": "2026-03-17T19:28:51.528Z"
+        }
+      },
+      "syncStatus": 25,
+      "canDelete": false,
+      "createdAt": "2026-03-17T16:54:28.298Z",
+      "updatedAt": "2026-03-17T19:28:51.528Z"
+    },
+    {
+      "id": "113e8667-7aef-428f-8ccf-a9076f9d3161",
+      "folderId": "root",
+      "name": "mys",
+      "originalUrl": "https://files.catbox.moe/xy7n33.mp4",
+      "localPath": "uploads/1773782758951-mys",
+      "size": 0,
+      "duration": 0,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "failed",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": "Failed to get Voe.sx upload server",
+          "urlHistory": [],
+          "updatedAt": "2026-03-17T21:27:30.192Z"
+        },
+        "catbox": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "seekstreaming": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        }
+      },
+      "syncStatus": 0,
+      "canDelete": false,
+      "createdAt": "2026-03-17T21:25:58.957Z",
+      "updatedAt": "2026-03-17T21:27:30.193Z"
+    },
+    {
+      "id": "23cc3648-f22e-448c-93fa-f37437807a97",
+      "folderId": "root",
+      "name": "asdasdas",
+      "originalUrl": "https://files.catbox.moe/xy7n33.mp4",
+      "localPath": "uploads/1773783121050-asdasdas",
+      "size": 0,
+      "duration": 0,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "failed",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": "Cancelled by user",
+          "urlHistory": [],
+          "updatedAt": "2026-03-17T21:32:35.362Z"
+        },
+        "catbox": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "seekstreaming": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        }
+      },
+      "syncStatus": 0,
+      "canDelete": false,
+      "createdAt": "2026-03-17T21:32:01.056Z",
+      "updatedAt": "2026-03-17T21:32:35.362Z"
+    },
+    {
+      "id": "0ecc3d78-8f76-4750-91f5-328725eb5110",
+      "folderId": "root",
+      "name": "sadasd",
+      "originalUrl": "https://files.catbox.moe/xy7n33.mp4",
+      "localPath": "uploads/1773783162313-sadasd",
+      "size": 0,
+      "duration": 0,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "failed",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": "Cancelled by user",
+          "urlHistory": [],
+          "updatedAt": "2026-03-17T22:21:53.217Z"
+        },
+        "catbox": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "seekstreaming": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        }
+      },
+      "syncStatus": 0,
+      "canDelete": false,
+      "createdAt": "2026-03-17T21:32:42.318Z",
+      "updatedAt": "2026-03-17T22:21:53.217Z"
+    },
+    {
+      "id": "527f4d2b-4d89-439e-b5e5-dbc0cdb74437",
+      "folderId": "root",
+      "name": "safa",
+      "originalUrl": "https://files.catbox.moe/xy7n33.mp4",
+      "localPath": "uploads/1773786124837-safa",
+      "size": 0,
+      "duration": 0,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "uploading",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": [],
+          "updatedAt": "2026-03-17T22:22:04.854Z"
+        },
+        "catbox": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "seekstreaming": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        }
+      },
+      "syncStatus": 0,
+      "canDelete": false,
+      "createdAt": "2026-03-17T22:22:04.842Z",
+      "updatedAt": "2026-03-17T22:22:04.854Z"
+    },
+    {
+      "id": "c029eaaf-dd61-4ee1-b82b-d8ef9da65a20",
+      "folderId": "root",
+      "name": "tes.mp4",
+      "originalUrl": null,
+      "localPath": null,
+      "size": 1570024,
+      "duration": 0,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 0,
+        "upload": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "completed",
+          "url": "https://voe.sx/e/dhlzxcjposki",
+          "fileId": "dhlzxcjposki",
+          "embedUrl": "https://voe.sx/e/dhlzxcjposki",
+          "error": null,
+          "urlHistory": [
+            {
+              "url": "https://voe.sx/e/3hvwcizctmyu",
+              "fileId": "3hvwcizctmyu",
+              "embedUrl": "https://voe.sx/e/3hvwcizctmyu",
+              "archivedAt": "2026-03-17T22:46:21.688Z"
+            },
+            {
+              "url": "https://voe.sx/e/njtjogwnjvtn",
+              "fileId": "njtjogwnjvtn",
+              "embedUrl": "https://voe.sx/e/njtjogwnjvtn",
+              "archivedAt": "2026-03-17T22:46:22.056Z"
+            }
+          ],
+          "updatedAt": "2026-03-23T16:46:55.146Z"
+        },
+        "catbox": {
+          "status": "completed",
+          "url": "https://files.catbox.moe/o01afx.mp4",
+          "fileId": "o01afx.mp4",
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": [],
+          "updatedAt": "2026-03-23T16:46:12.972Z"
+        },
+        "seekstreaming": {
+          "status": "completed",
+          "url": "https://seekstreaming.com/v/8cltq",
+          "fileId": "8cltq",
+          "embedUrl": "https://seekstream.embedseek.com/#8cltq",
+          "error": null,
+          "urlHistory": [
+            {
+              "url": "https://seekstreaming.com/v/5a39d",
+              "fileId": "5a39d",
+              "embedUrl": "https://seekstream.embedseek.com/#5a39d",
+              "archivedAt": "2026-03-17T22:46:23.142Z"
+            }
+          ],
+          "updatedAt": "2026-03-17T22:46:23.142Z"
+        }
+      },
+      "syncStatus": 75,
+      "canDelete": false,
+      "createdAt": "2026-03-17T22:46:16.168Z",
+      "updatedAt": "2026-03-23T16:46:55.146Z"
+    },
+    {
+      "id": "f39bbe4b-4456-487d-b553-a8e879e15b8d",
+      "folderId": "root",
+      "name": "test2.mp4",
+      "originalUrl": null,
+      "localPath": null,
+      "size": 1570024,
+      "duration": 0,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 0,
+        "upload": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "completed",
+          "url": "https://voe.sx/e/row7arsxnzdg",
+          "fileId": "row7arsxnzdg",
+          "embedUrl": "https://voe.sx/e/row7arsxnzdg",
+          "error": null,
+          "urlHistory": [
+            {
+              "url": "https://voe.sx/e/ibfpnsl0qfjq",
+              "fileId": "ibfpnsl0qfjq",
+              "embedUrl": "https://voe.sx/e/ibfpnsl0qfjq",
+              "archivedAt": "2026-03-17T23:31:42.712Z"
+            },
+            {
+              "url": "https://voe.sx/e/klgocylk7jrt",
+              "fileId": "klgocylk7jrt",
+              "embedUrl": "https://voe.sx/e/klgocylk7jrt",
+              "archivedAt": "2026-03-17T23:31:42.719Z"
+            },
+            {
+              "url": "https://voe.sx/e/ukx3n0lzsm2p",
+              "fileId": "ukx3n0lzsm2p",
+              "embedUrl": "https://voe.sx/e/ukx3n0lzsm2p",
+              "archivedAt": "2026-03-17T23:31:46.281Z"
+            }
+          ],
+          "updatedAt": "2026-03-17T23:31:50.161Z"
+        },
+        "catbox": {
+          "status": "completed",
+          "url": "https://files.catbox.moe/br96nd.mp4",
+          "fileId": "br96nd.mp4",
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": [
+            {
+              "url": "https://files.catbox.moe/bl31ao.mp4",
+              "fileId": "bl31ao.mp4",
+              "embedUrl": null,
+              "archivedAt": "2026-03-17T23:31:57.261Z"
+            },
+            {
+              "url": "https://files.catbox.moe/bl31ao.mp4",
+              "fileId": "bl31ao.mp4",
+              "embedUrl": null,
+              "archivedAt": "2026-03-17T23:32:12.269Z"
+            }
+          ],
+          "updatedAt": "2026-03-19T01:27:12.319Z"
+        },
+        "seekstreaming": {
+          "status": "completed",
+          "url": "https://seekstreaming.com/v/mznk6",
+          "fileId": "mznk6",
+          "embedUrl": "https://seekstream.embedseek.com/#mznk6",
+          "error": null,
+          "urlHistory": [
+            {
+              "url": "https://seekstreaming.com/v/9ebyi",
+              "fileId": "9ebyi",
+              "embedUrl": "https://seekstream.embedseek.com/#9ebyi",
+              "archivedAt": "2026-03-17T23:31:47.099Z"
+            }
+          ],
+          "updatedAt": "2026-03-17T23:31:47.099Z"
+        }
+      },
+      "syncStatus": 75,
+      "canDelete": false,
+      "createdAt": "2026-03-17T23:31:38.181Z",
+      "updatedAt": "2026-03-19T01:27:12.319Z"
+    },
+    {
+      "id": "33a1d00a-2f4f-403d-ad78-196418b0376c",
+      "folderId": "root",
+      "name": "file_example_MP4_480_1_5MG.mp4",
+      "originalUrl": null,
+      "localPath": null,
+      "size": 1570024,
+      "duration": 0,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 0,
+        "upload": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "completed",
+          "url": "https://voe.sx/e/afnkhgnmjx6y",
+          "fileId": "afnkhgnmjx6y",
+          "embedUrl": "https://voe.sx/e/afnkhgnmjx6y",
+          "error": null,
+          "urlHistory": [],
+          "updatedAt": "2026-03-19T03:10:37.719Z"
+        },
+        "catbox": {
+          "status": "completed",
+          "url": "https://files.catbox.moe/bl31ao.mp4",
+          "fileId": "bl31ao.mp4",
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": [],
+          "updatedAt": "2026-03-19T03:10:37.324Z"
+        },
+        "seekstreaming": {
+          "status": "failed",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": "ENOENT: no such file or directory, stat 'uploads/1773889833076-file_example_MP4_480_1_5MG.mp4'",
+          "urlHistory": [
+            {
+              "url": "https://seekstreaming.com/v/aobzc",
+              "fileId": "aobzc",
+              "embedUrl": "https://seekstream.embedseek.com/#aobzc",
+              "archivedAt": "2026-03-19T03:10:53.498Z"
+            }
+          ],
+          "updatedAt": "2026-03-19T03:11:25.731Z"
+        }
+      },
+      "syncStatus": 50,
+      "canDelete": false,
+      "createdAt": "2026-03-19T03:10:33.111Z",
+      "updatedAt": "2026-03-19T03:11:25.731Z"
+    },
+    {
+      "id": "6dd5e25a-cd85-4ab6-a985-3ea59d052f01",
+      "folderId": "root",
+      "name": "file_example_MP4_480_1_5MG.mp4",
+      "originalUrl": null,
+      "localPath": null,
+      "size": 1570024,
+      "duration": 0,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 0,
+        "upload": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "completed",
+          "url": "https://voe.sx/e/9ck8l7vk8bb7",
+          "fileId": "9ck8l7vk8bb7",
+          "embedUrl": "https://voe.sx/e/9ck8l7vk8bb7",
+          "error": null,
+          "urlHistory": [
+            {
+              "url": "https://voe.sx/e/04nkkwntglbf",
+              "fileId": "04nkkwntglbf",
+              "embedUrl": "https://voe.sx/e/04nkkwntglbf",
+              "archivedAt": "2026-03-19T22:10:49.535Z"
+            }
+          ],
+          "updatedAt": "2026-03-19T22:10:49.535Z"
+        },
+        "catbox": {
+          "status": "completed",
+          "url": "https://files.catbox.moe/bl31ao.mp4",
+          "fileId": "bl31ao.mp4",
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": [
+            {
+              "url": "https://files.catbox.moe/bl31ao.mp4",
+              "fileId": "bl31ao.mp4",
+              "embedUrl": null,
+              "archivedAt": "2026-03-19T22:10:47.284Z"
+            }
+          ],
+          "updatedAt": "2026-03-19T22:10:51.566Z"
+        },
+        "seekstreaming": {
+          "status": "completed",
+          "url": "https://seekstreaming.com/v/efy8k",
+          "fileId": "efy8k",
+          "embedUrl": "https://seekstream.embedseek.com/#efy8k",
+          "error": null,
+          "urlHistory": [],
+          "updatedAt": "2026-03-19T22:10:49.330Z"
+        }
+      },
+      "syncStatus": 75,
+      "canDelete": false,
+      "createdAt": "2026-03-19T22:10:44.198Z",
+      "updatedAt": "2026-03-19T22:10:51.566Z"
+    },
+    {
+      "id": "db665ffb-c4fb-4039-8dc6-21c2544bef4a",
+      "folderId": "root",
+      "name": "pixel.mp4",
+      "originalUrl": null,
+      "localPath": null,
+      "size": 1570024,
+      "duration": 0,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 0,
+        "upload": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "catbox": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "seekstreaming": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        }
+      },
+      "syncStatus": 25,
+      "canDelete": false,
+      "createdAt": "2026-03-19T22:28:21.211Z",
+      "updatedAt": "2026-03-19T22:28:21.872Z"
+    },
+    {
+      "id": "e57d1b69-e665-437d-b032-8584726de25e",
+      "folderId": "root",
+      "name": "vz.mp4",
+      "originalUrl": null,
+      "localPath": null,
+      "size": 1570024,
+      "duration": 0,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 0,
+        "upload": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "catbox": {
+          "status": "completed",
+          "url": "https://files.catbox.moe/bl31ao.mp4",
+          "fileId": "bl31ao.mp4",
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": [],
+          "updatedAt": "2026-03-19T22:34:12.822Z"
+        },
+        "seekstreaming": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        }
+      },
+      "syncStatus": 25,
+      "canDelete": false,
+      "createdAt": "2026-03-19T22:34:09.163Z",
+      "updatedAt": "2026-03-19T22:35:21.242Z"
+    },
+    {
+      "id": "3fd71e5a-6a7b-4a97-93e7-0ba252f12958",
+      "folderId": "root",
+      "name": "bb.mp4",
+      "originalUrl": null,
+      "localPath": null,
+      "size": 1570024,
+      "duration": 0,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 0,
+        "upload": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "catbox": {
+          "status": "completed",
+          "url": "https://files.catbox.moe/bl31ao.mp4",
+          "fileId": "bl31ao.mp4",
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": [],
+          "updatedAt": "2026-03-20T18:51:37.650Z"
+        },
+        "seekstreaming": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        }
+      },
+      "syncStatus": 50,
+      "canDelete": false,
+      "createdAt": "2026-03-20T18:51:32.221Z",
+      "updatedAt": "2026-03-20T18:51:37.650Z"
+    },
+    {
+      "id": "92ff0e5d-088e-4ec2-9821-e83740d40904",
+      "folderId": "root",
+      "name": "file_example_MP4_480_1_5MG.mp4",
+      "originalUrl": null,
+      "localPath": null,
+      "size": 1570024,
+      "duration": 0,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 0,
+        "upload": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "completed",
+          "url": "https://voe.sx/e/c72knalrpzwx",
+          "fileId": "c72knalrpzwx",
+          "embedUrl": "https://voe.sx/e/c72knalrpzwx",
+          "error": null,
+          "urlHistory": [],
+          "updatedAt": "2026-03-20T18:59:44.923Z"
+        },
+        "catbox": {
+          "status": "completed",
+          "url": "https://files.catbox.moe/bl31ao.mp4",
+          "fileId": "bl31ao.mp4",
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": [],
+          "updatedAt": "2026-03-20T18:59:43.958Z"
+        },
+        "seekstreaming": {
+          "status": "failed",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": "ENOENT: no such file or directory, stat 'uploads/1774033179407-file_example_MP4_480_1_5MG.mp4'",
+          "urlHistory": [
+            {
+              "url": "https://seekstreaming.com/v/kstfm",
+              "fileId": "kstfm",
+              "embedUrl": "https://seekstream.embedseek.com/#kstfm",
+              "archivedAt": "2026-03-20T18:59:47.287Z"
+            },
+            {
+              "url": "https://seekstreaming.com/v/wqrbt",
+              "fileId": "wqrbt",
+              "embedUrl": "https://seekstream.embedseek.com/#wqrbt",
+              "archivedAt": "2026-03-20T18:59:51.186Z"
+            }
+          ],
+          "updatedAt": "2026-03-20T18:59:58.023Z"
+        }
+      },
+      "syncStatus": 50,
+      "canDelete": false,
+      "createdAt": "2026-03-20T18:59:39.581Z",
+      "updatedAt": "2026-03-20T18:59:58.023Z"
+    },
+    {
+      "id": "8d2b8c99-f150-4cac-b1d6-490d795709dc",
+      "folderId": "root",
+      "name": "file_example_MP4_480_1_5MG.mp4",
+      "originalUrl": null,
+      "localPath": null,
+      "size": 1570024,
+      "duration": 0,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 0,
+        "upload": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "completed",
+          "url": "https://voe.sx/e/4fgzgici2ig2",
+          "fileId": "4fgzgici2ig2",
+          "embedUrl": "https://voe.sx/e/4fgzgici2ig2",
+          "error": null,
+          "urlHistory": [
+            {
+              "url": "https://voe.sx/e/tnkfa5thnxbc",
+              "fileId": "tnkfa5thnxbc",
+              "embedUrl": "https://voe.sx/e/tnkfa5thnxbc",
+              "archivedAt": "2026-03-20T19:35:14.489Z"
+            }
+          ],
+          "updatedAt": "2026-03-20T19:35:14.489Z"
+        },
+        "catbox": {
+          "status": "failed",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": "ENOENT: no such file or directory, stat 'uploads/1774035308649-file_example_MP4_480_1_5MG.mp4'",
+          "urlHistory": [
+            {
+              "url": "https://files.catbox.moe/bl31ao.mp4",
+              "fileId": "bl31ao.mp4",
+              "embedUrl": null,
+              "archivedAt": "2026-03-20T19:35:17.974Z"
+            }
+          ],
+          "updatedAt": "2026-03-20T19:35:26.550Z"
+        },
+        "seekstreaming": {
+          "status": "completed",
+          "url": "https://seekstreaming.com/v/o1y68",
+          "fileId": "o1y68",
+          "embedUrl": "https://seekstream.embedseek.com/#o1y68",
+          "error": null,
+          "urlHistory": [],
+          "updatedAt": "2026-03-20T19:35:15.726Z"
+        }
+      },
+      "syncStatus": 50,
+      "canDelete": false,
+      "createdAt": "2026-03-20T19:35:08.663Z",
+      "updatedAt": "2026-03-20T19:35:26.550Z"
+    },
+    {
+      "id": "4986be23-235d-4486-8ee5-652939de98f0",
+      "folderId": "root",
+      "name": "file_example_MP4_480_1_5MG.mp4",
+      "originalUrl": null,
+      "localPath": null,
+      "size": 1570024,
+      "duration": 0,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 0,
+        "upload": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "completed",
+          "url": "https://voe.sx/e/0tvabhvtwefd",
+          "fileId": "0tvabhvtwefd",
+          "embedUrl": "https://voe.sx/e/0tvabhvtwefd",
+          "error": null,
+          "urlHistory": [
+            {
+              "url": "https://voe.sx/e/eqfpb34vc5if",
+              "fileId": "eqfpb34vc5if",
+              "embedUrl": "https://voe.sx/e/eqfpb34vc5if",
+              "archivedAt": "2026-03-20T19:45:58.135Z"
+            }
+          ],
+          "updatedAt": "2026-03-20T19:45:58.135Z"
+        },
+        "catbox": {
+          "status": "completed",
+          "url": "https://files.catbox.moe/bl31ao.mp4",
+          "fileId": "bl31ao.mp4",
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": [
+            {
+              "url": "https://files.catbox.moe/bl31ao.mp4",
+              "fileId": "bl31ao.mp4",
+              "embedUrl": null,
+              "archivedAt": "2026-03-20T19:45:55.945Z"
+            }
+          ],
+          "updatedAt": "2026-03-20T19:45:58.769Z"
+        },
+        "seekstreaming": {
+          "status": "completed",
+          "url": "https://seekstreaming.com/v/ugesu",
+          "fileId": "ugesu",
+          "embedUrl": "https://seekstream.embedseek.com/#ugesu",
+          "error": null,
+          "urlHistory": [],
+          "updatedAt": "2026-03-20T19:45:58.146Z"
+        }
+      },
+      "syncStatus": 75,
+      "canDelete": false,
+      "createdAt": "2026-03-20T19:45:53.067Z",
+      "updatedAt": "2026-03-20T19:45:58.778Z"
+    },
+    {
+      "id": "354bffcd-147f-4406-8224-7b18ccfaaea4",
+      "folderId": "root",
+      "name": "file_example_MP4_480_1_5MG.mp4",
+      "originalUrl": null,
+      "localPath": null,
+      "size": 1570024,
+      "duration": 0,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 0,
+        "upload": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "catbox": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "seekstreaming": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        }
+      },
+      "syncStatus": 25,
+      "canDelete": false,
+      "createdAt": "2026-03-20T20:03:38.660Z",
+      "updatedAt": "2026-03-20T20:03:42.586Z"
+    },
+    {
+      "id": "401c2603-cf63-4142-bf58-3bc62826c61e",
+      "folderId": "root",
+      "name": "test.mp4",
+      "originalUrl": null,
+      "localPath": null,
+      "size": 0,
+      "duration": 0,
+      "status": "uploading",
+      "progress": {
+        "download": 0,
+        "processing": 0
+      },
+      "providers": {
+        "backblaze": {
+          "status": "pending",
+          "url": null,
+          "fileId": null,
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": []
+        },
+        "voesx": {
+          "status": "completed",
+          "url": "https://voe.sx/e/h6mfohtvjreu",
+          "fileId": "h6mfohtvjreu",
+          "embedUrl": "https://voe.sx/e/h6mfohtvjreu",
+          "error": null,
+          "urlHistory": [],
+          "updatedAt": "2026-03-23T16:51:39.517Z"
+        },
+        "catbox": {
+          "status": "completed",
+          "url": "https://files.catbox.moe/o01afx.mp4",
+          "fileId": "o01afx.mp4",
+          "embedUrl": null,
+          "error": null,
+          "urlHistory": [],
+          "updatedAt": "2026-03-23T16:51:01.623Z"
+        },
+        "seekstreaming": {
+          "status": "completed",
+          "url": "https://seekstreaming.com/v/ugesu",
+          "fileId": "ugesu",
+          "embedUrl": "https://seekstream.embedseek.com/#ugesu",
+          "error": null,
+          "urlHistory": [],
+          "updatedAt": "2026-03-23T09:23:33.477Z"
+        }
+      },
+      "syncStatus": 75,
+      "canDelete": false,
+      "createdAt": "2026-03-23T09:23:33.470Z",
+      "updatedAt": "2026-03-23T16:51:39.517Z"
+    }
+  ],
+  "jobs": [
+    {
+      "id": "6c2f47ad-d59d-4857-8b55-354d9711a452",
+      "type": "process",
+      "fileId": "083d5b4a-a383-45f0-92e0-797baf2c97b9",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 0,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "hlsUrl": "https://dcu9c0dztvf91.cloudfront.net/production/0/38/7686/03876866de5548a78f13f40c7b07371e.1.m3u8?Expires=1772654700&Signature=MNOwaglxCKmEXjOtmWIvhwyiMov7K8E0VD2U2xkr9bxS6isnrMcX-Sdc64KJo-mcOA5jTQSpRWvw7fBbzW8tLlYuAD8rM~b~DFl0ZSyCtbiSPxMhGAIzZZKx60me9-M1oHFBEjKvJgEKnuvmOyp4OWRBhAZ5RN8IXQ~m9~sDaYhukSQIMuPVjOPepNL6-28-RH3Q4aWFuR5l60b21pjo5LJgSmPvSmNFIs2Q0wOwhlL5uHh5g8DDywkNrNUWOmrdBQTgTxKb9NdUWQXvdyJOVE03ICLtnPTqCRdPlYm85LW8PKeJFqIpxEsrAUCQgj6DdkIzADpo7tlnTw3Arg7nVA__&Key-Pair-Id=K2PMCCGIKK2UV0",
+        "outputPath": "uploads/video_1772653645131.mp4",
+        "tempPlaylistPath": "uploads/playlist_0dd649b5-04d3-4438-992e-5adf5fdc5d1e.m3u8",
+        "hasDecryption": false,
+        "fileSize": 7477829,
+        "duration": 112.7561
+      },
+      "createdAt": "2026-03-04T19:47:25.138Z",
+      "updatedAt": "2026-03-04T19:47:37.521Z",
+      "startedAt": null,
+      "completedAt": "2026-03-04T19:47:37.521Z"
+    },
+    {
+      "id": "ede42bd9-7227-4466-8d52-3da0837acfed",
+      "type": "upload",
+      "fileId": "083d5b4a-a383-45f0-92e0-797baf2c97b9",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "provider": "catbox",
+        "filePath": "uploads/video_1772653645131.mp4",
+        "folderId": "root",
+        "fileName": "video_1772653645131.mp4",
+        "result": {
+          "url": "https://files.catbox.moe/qboisx.mp4",
+          "fileId": "qboisx.mp4",
+          "provider": "catbox",
+          "size": 7477829,
+          "isTemporary": false
+        }
+      },
+      "createdAt": "2026-03-04T19:47:37.527Z",
+      "updatedAt": "2026-03-04T19:47:46.418Z",
+      "startedAt": "2026-03-04T19:47:37.531Z",
+      "completedAt": "2026-03-04T19:47:46.418Z"
+    },
+    {
+      "id": "9dbacfa1-a597-499b-a1e2-bfc1d875ea26",
+      "type": "process",
+      "fileId": "5adbbfbf-ff7e-4369-b20c-17e4ddb8f105",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 0,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "hlsUrl": "https://dcu9c0dztvf91.cloudfront.net/production/e/54/5c40/e545c40fb14f4e628c2d64c6917fb574.0.m3u8?Expires=1772665800&Signature=SJHzWNhCHNSApsgmikohj8nU6VetcMXx-ZW0Tq4PBu3TAnq-3um1ui4h3Kqy8W2gEn4DjHTJP7xu7Cm9HdQmFmOILXCASKeOiEcI4jZfr88l-gycc7WUTqKv0JHbbWsYzpwRzbJ6cgxM8X04NI6Lcrv7Qgltvq8yvxdEr1Xa3PpBJHgYb79ju-zEo1HWp5zdHU0QhwAQ00TbYQq2r-HA-YUKilSexW5WrlD7k2cqqciUyK7IoWr2~jQBv8lKXdljVEQa9flYK85uKH-4scB4y3yzALxn6aEleUVG~1vzWS14BdYimewYkw4-55j-ByylKuvIEAbA1emEL2shJahCCw__&Key-Pair-Id=K2PMCCGIKK2UV0",
+        "outputPath": "uploads/test.mp4",
+        "tempPlaylistPath": "uploads/playlist_e0316e4e-af3a-4782-8fd4-721951fcf137.m3u8",
+        "hasDecryption": false,
+        "fileSize": 35357840,
+        "duration": 224.064
+      },
+      "createdAt": "2026-03-04T22:15:44.376Z",
+      "updatedAt": "2026-03-04T22:16:08.350Z",
+      "startedAt": null,
+      "completedAt": "2026-03-04T22:16:08.351Z"
+    },
+    {
+      "id": "fd54ac76-e3d2-43eb-8a21-b0937ee1d903",
+      "type": "upload",
+      "fileId": "5adbbfbf-ff7e-4369-b20c-17e4ddb8f105",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "provider": "catbox",
+        "filePath": "uploads/test.mp4",
+        "folderId": "root",
+        "fileName": "test.mp4",
+        "result": {
+          "url": "https://files.catbox.moe/xy7n33.mp4",
+          "fileId": "xy7n33.mp4",
+          "provider": "catbox",
+          "size": 35357840,
+          "isTemporary": false
+        }
+      },
+      "createdAt": "2026-03-04T22:16:08.408Z",
+      "updatedAt": "2026-03-04T22:16:36.360Z",
+      "startedAt": "2026-03-04T22:16:08.454Z",
+      "completedAt": "2026-03-04T22:16:36.235Z"
+    },
+    {
+      "id": "4f718bde-ec96-4ec4-be7e-9d3d08bf3e2e",
+      "type": "upload",
+      "fileId": "5adbbfbf-ff7e-4369-b20c-17e4ddb8f105",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "provider": "catbox",
+        "filePath": "uploads/test.mp4",
+        "folderId": "root",
+        "fileName": "test.mp4",
+        "result": {
+          "url": "https://files.catbox.moe/xy7n33.mp4",
+          "fileId": "xy7n33.mp4",
+          "provider": "catbox",
+          "size": 35357840,
+          "isTemporary": true
+        }
+      },
+      "createdAt": "2026-03-05T16:33:06.893Z",
+      "updatedAt": "2026-03-05T16:33:20.385Z",
+      "startedAt": "2026-03-05T16:33:06.901Z",
+      "completedAt": "2026-03-05T16:33:20.282Z"
+    },
+    {
+      "id": "24d6a8e3-522f-4065-b7ee-5939993c4995",
+      "type": "upload",
+      "fileId": "5adbbfbf-ff7e-4369-b20c-17e4ddb8f105",
+      "status": "failed",
+      "progress": 0,
+      "attempts": 3,
+      "maxAttempts": 3,
+      "error": "Request failed with status code 405",
+      "metadata": {
+        "provider": "seekstreaming",
+        "filePath": "uploads/test.mp4",
+        "folderId": "root",
+        "fileName": "test.mp4"
+      },
+      "createdAt": "2026-03-17T16:19:01.160Z",
+      "updatedAt": "2026-03-17T16:20:11.629Z",
+      "startedAt": "2026-03-17T16:19:01.173Z",
+      "completedAt": "2026-03-17T16:20:11.629Z"
+    },
+    {
+      "id": "8d665b6b-9ec6-49b0-bef9-28da44d4f95c",
+      "type": "upload",
+      "fileId": "5adbbfbf-ff7e-4369-b20c-17e4ddb8f105",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "provider": "seekstreaming",
+        "filePath": "uploads/test.mp4",
+        "folderId": "root",
+        "fileName": "test.mp4",
+        "result": {
+          "url": null,
+          "fileId": "sbsha",
+          "provider": "seekstreaming",
+          "size": 35357840,
+          "embedUrl": null,
+          "downloadUrl": null,
+          "thumbnail": null,
+          "title": "test.mp4",
+          "status": "Pending",
+          "raw": {
+            "id": "sbsha",
+            "name": "test.mp4",
+            "poster": null,
+            "preview": null,
+            "subtitle": 0,
+            "impression": 0,
+            "play": 0,
+            "premiumPlay": 0,
+            "download": 0,
+            "premiumDownload": 0,
+            "error": 0,
+            "adsImpression": 0,
+            "adsClick": 0,
+            "adsError": 0,
+            "size": 35357840,
+            "duration": 224,
+            "width": 1280,
+            "height": 720,
+            "resolution": "HD",
+            "bitrate": 1120960,
+            "framerate": 30,
+            "codec": "H264",
+            "audioBitrate": 132842,
+            "audioChannels": 2,
+            "audioSampleRate": 48000,
+            "audioCodec": "AAC",
+            "type": "MP4",
+            "status": "Pending",
+            "reason": null,
+            "updatedAt": null,
+            "createdAt": "2026-03-17 16:52:43",
+            "assetUrl": "https://asset.seekstreaming.info"
+          }
+        }
+      },
+      "createdAt": "2026-03-17T16:52:31.470Z",
+      "updatedAt": "2026-03-17T16:52:45.050Z",
+      "startedAt": "2026-03-17T16:52:31.483Z",
+      "completedAt": "2026-03-17T16:52:45.050Z"
+    },
+    {
+      "id": "4f1ac916-1b49-4fb9-b338-1106d989d89a",
+      "type": "transfer",
+      "fileId": "2b3414cf-302b-4edb-ad6d-5621ea9b799b",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "sourceProvider": "catbox",
+        "sourceUrl": "https://files.catbox.moe/xy7n33.mp4",
+        "sourceCheck": {
+          "available": true,
+          "status": 200,
+          "size": null,
+          "contentType": "video/mp4",
+          "method": "HEAD"
+        },
+        "targetProvider": "seekstreaming",
+        "filePath": "uploads/1773766468297-bvbv",
+        "folderId": "root",
+        "fileName": "bvbv",
+        "downloadedSize": 35357840,
+        "targetResult": {
+          "url": null,
+          "fileId": "sbshb",
+          "provider": "seekstreaming",
+          "size": 35357840,
+          "embedUrl": null,
+          "downloadUrl": null,
+          "thumbnail": null,
+          "title": "bvbv",
+          "status": "Pending",
+          "raw": {
+            "id": "sbshb",
+            "name": "bvbv",
+            "poster": null,
+            "preview": null,
+            "subtitle": 0,
+            "impression": 0,
+            "play": 0,
+            "premiumPlay": 0,
+            "download": 0,
+            "premiumDownload": 0,
+            "error": 0,
+            "adsImpression": 0,
+            "adsClick": 0,
+            "adsError": 0,
+            "size": 35357840,
+            "duration": 224,
+            "width": 1280,
+            "height": 720,
+            "resolution": "HD",
+            "bitrate": 1120960,
+            "framerate": 30,
+            "codec": "H264",
+            "audioBitrate": 132842,
+            "audioChannels": 2,
+            "audioSampleRate": 48000,
+            "audioCodec": "AAC",
+            "type": "MP4",
+            "status": "Pending",
+            "reason": null,
+            "updatedAt": null,
+            "createdAt": "2026-03-17 16:55:02",
+            "assetUrl": "https://asset.seekstreaming.info"
+          }
+        },
+        "targetVerify": {
+          "exists": true,
+          "info": {
+            "id": "sbshb",
+            "name": "bvbv",
+            "poster": null,
+            "preview": null,
+            "subtitle": 0,
+            "impression": 0,
+            "play": 0,
+            "premiumPlay": 0,
+            "download": 0,
+            "premiumDownload": 0,
+            "error": 0,
+            "adsImpression": 0,
+            "adsClick": 0,
+            "adsError": 0,
+            "size": 35357840,
+            "duration": 224,
+            "width": 1280,
+            "height": 720,
+            "resolution": "HD",
+            "bitrate": 1120960,
+            "framerate": 30,
+            "codec": "H264",
+            "audioBitrate": 132842,
+            "audioChannels": 2,
+            "audioSampleRate": 48000,
+            "audioCodec": "AAC",
+            "type": "MP4",
+            "status": "Pending",
+            "reason": null,
+            "updatedAt": null,
+            "createdAt": "2026-03-17 16:55:02",
+            "assetUrl": "https://asset.seekstreaming.info"
+          }
+        }
+      },
+      "createdAt": "2026-03-17T16:54:28.302Z",
+      "updatedAt": "2026-03-17T16:55:04.357Z",
+      "startedAt": "2026-03-17T16:54:28.305Z",
+      "completedAt": "2026-03-17T16:55:04.357Z"
+    },
+    {
+      "id": "95a5a60b-11fd-4213-a346-d84005f38a1b",
+      "type": "upload",
+      "fileId": "2b3414cf-302b-4edb-ad6d-5621ea9b799b",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "provider": "seekstreaming",
+        "filePath": "uploads/1773766468297-bvbv",
+        "folderId": "root",
+        "fileName": "bvbv",
+        "result": {
+          "url": "https://seekstreaming.com/v/ug6p1",
+          "fileId": "ug6p1",
+          "provider": "seekstreaming",
+          "size": 35357840,
+          "embedUrl": "https://seekstreaming.embedseek.com/#ug6p1",
+          "downloadUrl": null,
+          "thumbnail": null,
+          "title": "bvbv",
+          "status": "Pending",
+          "raw": {
+            "id": "ug6p1",
+            "name": "bvbv",
+            "poster": null,
+            "preview": null,
+            "subtitle": 0,
+            "impression": 0,
+            "play": 0,
+            "premiumPlay": 0,
+            "download": 0,
+            "premiumDownload": 0,
+            "error": 0,
+            "adsImpression": 0,
+            "adsClick": 0,
+            "adsError": 0,
+            "size": 35357840,
+            "duration": 224,
+            "width": 1280,
+            "height": 720,
+            "resolution": "HD",
+            "bitrate": 1120960,
+            "framerate": 30,
+            "codec": "H264",
+            "audioBitrate": 132842,
+            "audioChannels": 2,
+            "audioSampleRate": 48000,
+            "audioCodec": "AAC",
+            "type": "MP4",
+            "status": "Pending",
+            "reason": null,
+            "updatedAt": null,
+            "createdAt": "2026-03-17 19:28:50",
+            "assetUrl": "https://asset.seekstreaming.info"
+          }
+        }
+      },
+      "createdAt": "2026-03-17T19:28:00.963Z",
+      "updatedAt": "2026-03-17T19:28:51.529Z",
+      "startedAt": "2026-03-17T19:28:01.071Z",
+      "completedAt": "2026-03-17T19:28:51.529Z"
+    },
+    {
+      "id": "f3cd61a7-b355-4ca8-b1c2-bb830b4c09ff",
+      "type": "upload",
+      "fileId": "5adbbfbf-ff7e-4369-b20c-17e4ddb8f105",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "provider": "seekstreaming",
+        "filePath": "uploads/test.mp4",
+        "folderId": "root",
+        "fileName": "test.mp4",
+        "result": {
+          "url": "https://seekstreaming.com/v/ks5hh",
+          "fileId": "ks5hh",
+          "provider": "seekstreaming",
+          "size": 35357840,
+          "embedUrl": "https://seekstreaming.embedseek.com/#ks5hh",
+          "downloadUrl": null,
+          "thumbnail": null,
+          "title": "test.mp4",
+          "status": "Pending",
+          "raw": {
+            "id": "ks5hh",
+            "name": "test.mp4",
+            "poster": null,
+            "preview": null,
+            "subtitle": 0,
+            "impression": 0,
+            "play": 0,
+            "premiumPlay": 0,
+            "download": 0,
+            "premiumDownload": 0,
+            "error": 0,
+            "adsImpression": 0,
+            "adsClick": 0,
+            "adsError": 0,
+            "size": 35357840,
+            "duration": 224,
+            "width": 1280,
+            "height": 720,
+            "resolution": "HD",
+            "bitrate": 1120960,
+            "framerate": 30,
+            "codec": "H264",
+            "audioBitrate": 132842,
+            "audioChannels": 2,
+            "audioSampleRate": 48000,
+            "audioCodec": "AAC",
+            "type": "MP4",
+            "status": "Pending",
+            "reason": null,
+            "updatedAt": null,
+            "createdAt": "2026-03-17 19:36:58",
+            "assetUrl": "https://asset.seekstreaming.info"
+          }
+        }
+      },
+      "createdAt": "2026-03-17T19:28:01.070Z",
+      "updatedAt": "2026-03-17T19:36:59.575Z",
+      "startedAt": "2026-03-17T19:28:34.355Z",
+      "completedAt": "2026-03-17T19:36:59.575Z"
+    },
+    {
+      "id": "bbfe0ef5-cf44-491f-8949-3f108fd857c6",
+      "type": "transfer",
+      "fileId": "23cc3648-f22e-448c-93fa-f37437807a97",
+      "status": "cancelled",
+      "progress": 10,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": "Cancelled by user",
+      "metadata": {
+        "sourceProvider": "catbox",
+        "sourceUrl": "https://files.catbox.moe/xy7n33.mp4",
+        "sourceCheck": {
+          "available": true,
+          "status": 200,
+          "size": null,
+          "contentType": "video/mp4",
+          "method": "HEAD"
+        },
+        "targetProvider": "voesx",
+        "filePath": "uploads/1773783121050-asdasdas",
+        "folderId": "root",
+        "fileName": "asdasdas"
+      },
+      "createdAt": "2026-03-17T21:32:01.101Z",
+      "updatedAt": "2026-03-17T21:32:35.314Z",
+      "startedAt": "2026-03-17T21:32:01.110Z",
+      "completedAt": null
+    },
+    {
+      "id": "2e21a164-2c35-40b6-be7c-027b1b9bf4be",
+      "type": "transfer",
+      "fileId": "0ecc3d78-8f76-4750-91f5-328725eb5110",
+      "status": "cancelled",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": "Cancelled by user",
+      "metadata": {
+        "sourceProvider": "catbox",
+        "sourceUrl": "https://files.catbox.moe/xy7n33.mp4",
+        "sourceCheck": {
+          "available": true,
+          "status": 200,
+          "size": null,
+          "contentType": "video/mp4",
+          "method": "HEAD"
+        },
+        "targetProvider": "voesx",
+        "filePath": "uploads/1773783162313-sadasd",
+        "folderId": "root",
+        "fileName": "sadasd"
+      },
+      "createdAt": "2026-03-17T21:32:42.320Z",
+      "updatedAt": "2026-03-17T22:21:53.207Z",
+      "startedAt": "2026-03-17T21:32:42.324Z",
+      "completedAt": null
+    },
+    {
+      "id": "cd14f8e6-41b2-4123-9f5e-9176f134cde1",
+      "type": "transfer",
+      "fileId": "527f4d2b-4d89-439e-b5e5-dbc0cdb74437",
+      "status": "processing",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "sourceProvider": "catbox",
+        "sourceUrl": "https://files.catbox.moe/xy7n33.mp4",
+        "sourceCheck": {
+          "available": true,
+          "status": 200,
+          "size": null,
+          "contentType": "video/mp4",
+          "method": "HEAD"
+        },
+        "targetProvider": "voesx",
+        "filePath": "uploads/1773786124837-safa",
+        "folderId": "root",
+        "fileName": "safa"
+      },
+      "createdAt": "2026-03-17T22:22:04.844Z",
+      "updatedAt": "2026-03-17T22:22:47.323Z",
+      "startedAt": "2026-03-17T22:22:04.849Z",
+      "completedAt": null
+    },
+    {
+      "id": "206fd6ea-cb32-4658-8d18-166832da7fb4",
+      "type": "upload",
+      "fileId": "c029eaaf-dd61-4ee1-b82b-d8ef9da65a20",
+      "status": "failed",
+      "progress": 100,
+      "attempts": 3,
+      "maxAttempts": 3,
+      "error": "ENOENT: no such file or directory, stat 'uploads/1773787576144-file_example_MP4_480_1_5MG.mp4'",
+      "metadata": {
+        "provider": "voesx",
+        "filePath": "uploads/1773787576144-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1773787576144-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": true,
+        "normalizedFileName": "1773787576144-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://voe.sx/e/njtjogwnjvtn",
+          "fileId": "njtjogwnjvtn",
+          "provider": "voesx",
+          "size": 1570024,
+          "embedUrl": "https://voe.sx/e/njtjogwnjvtn",
+          "title": "1773787576144-file_example_MP4_480_1_5MG.mp4",
+          "remoteId": 83846863,
+          "encodingNecessary": true
+        }
+      },
+      "createdAt": "2026-03-17T22:46:16.176Z",
+      "updatedAt": "2026-03-17T22:47:09.217Z",
+      "startedAt": "2026-03-17T22:46:21.686Z",
+      "completedAt": "2026-03-17T22:47:09.217Z"
+    },
+    {
+      "id": "c91624d9-748b-45db-8285-b048c701e6e6",
+      "type": "upload",
+      "fileId": "c029eaaf-dd61-4ee1-b82b-d8ef9da65a20",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "provider": "seekstreaming",
+        "filePath": "uploads/1773787576144-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1773787576144-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": true,
+        "normalizedFileName": "1773787576144-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://seekstreaming.com/v/8cltq",
+          "fileId": "8cltq",
+          "provider": "seekstreaming",
+          "size": 1570024,
+          "embedUrl": "https://seekstream.embedseek.com/#8cltq",
+          "downloadUrl": null,
+          "thumbnail": null,
+          "title": "1773787576144-file_example_MP4_480_1_5MG.mp4",
+          "status": "Pending",
+          "raw": {
+            "id": "8cltq",
+            "name": "1773787576144-file_example_MP4_480_1_5MG.mp4",
+            "poster": null,
+            "preview": null,
+            "subtitle": 0,
+            "impression": 0,
+            "play": 0,
+            "premiumPlay": 0,
+            "download": 0,
+            "premiumDownload": 0,
+            "error": 0,
+            "adsImpression": 0,
+            "adsClick": 0,
+            "adsError": 0,
+            "size": 1570024,
+            "duration": 30,
+            "width": 480,
+            "height": 270,
+            "resolution": "SD",
+            "bitrate": 301201,
+            "framerate": 30,
+            "codec": "H264",
+            "audioBitrate": 112000,
+            "audioChannels": 2,
+            "audioSampleRate": 48000,
+            "audioCodec": "AAC",
+            "type": "MP4",
+            "status": "Pending",
+            "reason": null,
+            "updatedAt": null,
+            "createdAt": "2026-03-17 22:46:22",
+            "assetUrl": "https://asset.seekstreaming.info"
+          }
+        }
+      },
+      "createdAt": "2026-03-17T22:46:16.179Z",
+      "updatedAt": "2026-03-17T22:46:23.146Z",
+      "startedAt": "2026-03-17T22:46:16.195Z",
+      "completedAt": "2026-03-17T22:46:23.146Z"
+    },
+    {
+      "id": "5c0965b9-2adb-44ec-aeae-6708a84ffffb",
+      "type": "upload",
+      "fileId": "f39bbe4b-4456-487d-b553-a8e879e15b8d",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "provider": "voesx",
+        "filePath": "uploads/1773790298162-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1773790298162-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": true,
+        "normalizedFileName": "1773790298162-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://voe.sx/e/row7arsxnzdg",
+          "fileId": "row7arsxnzdg",
+          "provider": "voesx",
+          "size": 1570024,
+          "embedUrl": "https://voe.sx/e/row7arsxnzdg",
+          "title": "1773790298162-file_example_MP4_480_1_5MG.mp4",
+          "remoteId": 83847489,
+          "encodingNecessary": true
+        }
+      },
+      "createdAt": "2026-03-17T23:31:38.187Z",
+      "updatedAt": "2026-03-17T23:31:50.163Z",
+      "startedAt": "2026-03-17T23:31:42.717Z",
+      "completedAt": "2026-03-17T23:31:50.163Z"
+    },
+    {
+      "id": "3a5c5dff-2aaf-4033-8cad-2682c01bfd08",
+      "type": "upload",
+      "fileId": "f39bbe4b-4456-487d-b553-a8e879e15b8d",
+      "status": "failed",
+      "progress": 100,
+      "attempts": 3,
+      "maxAttempts": 3,
+      "error": "ENOENT: no such file or directory, stat 'uploads/1773790298162-file_example_MP4_480_1_5MG.mp4'",
+      "metadata": {
+        "provider": "catbox",
+        "filePath": "uploads/1773790298162-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1773790298162-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": true,
+        "normalizedFileName": "1773790298162-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://files.catbox.moe/bl31ao.mp4",
+          "fileId": "bl31ao.mp4",
+          "provider": "catbox",
+          "size": 1570024
+        }
+      },
+      "createdAt": "2026-03-17T23:31:38.189Z",
+      "updatedAt": "2026-03-17T23:32:43.419Z",
+      "startedAt": "2026-03-17T23:31:43.317Z",
+      "completedAt": "2026-03-17T23:32:43.419Z"
+    },
+    {
+      "id": "c0330cfc-10fa-4b7a-bd9e-d94571f5b165",
+      "type": "upload",
+      "fileId": "f39bbe4b-4456-487d-b553-a8e879e15b8d",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "provider": "seekstreaming",
+        "filePath": "uploads/1773790298162-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1773790298162-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": true,
+        "normalizedFileName": "1773790298162-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://seekstreaming.com/v/mznk6",
+          "fileId": "mznk6",
+          "provider": "seekstreaming",
+          "size": 1570024,
+          "embedUrl": "https://seekstream.embedseek.com/#mznk6",
+          "downloadUrl": null,
+          "thumbnail": null,
+          "title": "1773790298162-file_example_MP4_480_1_5MG.mp4",
+          "status": "Pending",
+          "raw": {
+            "id": "mznk6",
+            "name": "1773790298162-file_example_MP4_480_1_5MG.mp4",
+            "poster": null,
+            "preview": null,
+            "subtitle": 0,
+            "impression": 0,
+            "play": 0,
+            "premiumPlay": 0,
+            "download": 0,
+            "premiumDownload": 0,
+            "error": 0,
+            "adsImpression": 0,
+            "adsClick": 0,
+            "adsError": 0,
+            "size": 1570024,
+            "duration": 30,
+            "width": 480,
+            "height": 270,
+            "resolution": "SD",
+            "bitrate": 301201,
+            "framerate": 30,
+            "codec": "H264",
+            "audioBitrate": 112000,
+            "audioChannels": 2,
+            "audioSampleRate": 48000,
+            "audioCodec": "AAC",
+            "type": "MP4",
+            "status": "Pending",
+            "reason": null,
+            "updatedAt": null,
+            "createdAt": "2026-03-17 23:31:46",
+            "assetUrl": "https://asset.seekstreaming.info"
+          }
+        }
+      },
+      "createdAt": "2026-03-17T23:31:38.194Z",
+      "updatedAt": "2026-03-17T23:31:47.105Z",
+      "startedAt": "2026-03-17T23:31:38.201Z",
+      "completedAt": "2026-03-17T23:31:47.105Z"
+    },
+    {
+      "id": "1f02205e-a9e4-48c7-878a-b2333e2f5bb8",
+      "type": "upload",
+      "fileId": "f39bbe4b-4456-487d-b553-a8e879e15b8d",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "provider": "catbox",
+        "filePath": "uploads/reupload-f39bbe4b-4456-487d-b553-a8e879e15b8d-1773883629508-test2.mp4",
+        "folderId": "root",
+        "fileName": "test2.mp4",
+        "cleanupAfterUpload": true,
+        "removeWhenUnused": true,
+        "normalizedFileName": "test2.mp4",
+        "result": {
+          "url": "https://files.catbox.moe/br96nd.mp4",
+          "fileId": "br96nd.mp4",
+          "provider": "catbox",
+          "size": 3606
+        }
+      },
+      "createdAt": "2026-03-19T01:27:10.895Z",
+      "updatedAt": "2026-03-19T01:27:12.419Z",
+      "startedAt": "2026-03-19T01:27:10.903Z",
+      "completedAt": "2026-03-19T01:27:12.323Z"
+    },
+    {
+      "id": "034d4d4a-fc50-45ff-b7ed-96e7f6391bfb",
+      "type": "upload",
+      "fileId": "33a1d00a-2f4f-403d-ad78-196418b0376c",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "provider": "voesx",
+        "filePath": "uploads/1773889833076-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1773889833076-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1773889833076-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://voe.sx/e/afnkhgnmjx6y",
+          "fileId": "afnkhgnmjx6y",
+          "provider": "voesx",
+          "size": 1570024,
+          "embedUrl": "https://voe.sx/e/afnkhgnmjx6y",
+          "title": "1773889833076-file_example_MP4_480_1_5MG.mp4",
+          "remoteId": 83886465,
+          "encodingNecessary": true
+        }
+      },
+      "createdAt": "2026-03-19T03:10:33.135Z",
+      "updatedAt": "2026-03-19T03:10:37.723Z",
+      "startedAt": "2026-03-19T03:10:33.151Z",
+      "completedAt": "2026-03-19T03:10:37.723Z"
+    },
+    {
+      "id": "4aaf5132-c896-46d9-b726-61982e82c0e3",
+      "type": "upload",
+      "fileId": "33a1d00a-2f4f-403d-ad78-196418b0376c",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "provider": "catbox",
+        "filePath": "uploads/1773889833076-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1773889833076-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1773889833076-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://files.catbox.moe/bl31ao.mp4",
+          "fileId": "bl31ao.mp4",
+          "provider": "catbox",
+          "size": 1570024
+        }
+      },
+      "createdAt": "2026-03-19T03:10:33.140Z",
+      "updatedAt": "2026-03-19T03:10:38.440Z",
+      "startedAt": "2026-03-19T03:10:34.714Z",
+      "completedAt": "2026-03-19T03:10:37.328Z"
+    },
+    {
+      "id": "b579892e-5ebe-49d8-b98d-65fb18e12fb1",
+      "type": "upload",
+      "fileId": "33a1d00a-2f4f-403d-ad78-196418b0376c",
+      "status": "failed",
+      "progress": 100,
+      "attempts": 3,
+      "maxAttempts": 3,
+      "error": "ENOENT: no such file or directory, stat 'uploads/1773889833076-file_example_MP4_480_1_5MG.mp4'",
+      "metadata": {
+        "provider": "seekstreaming",
+        "filePath": "uploads/1773889833076-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1773889833076-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1773889833076-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://seekstreaming.com/v/aobzc",
+          "fileId": "aobzc",
+          "provider": "seekstreaming",
+          "size": 1570024,
+          "embedUrl": "https://seekstream.embedseek.com/#aobzc",
+          "downloadUrl": null,
+          "thumbnail": null,
+          "title": "1773889833076-file_example_MP4_480_1_5MG.mp4",
+          "status": "Pending",
+          "raw": {
+            "id": "aobzc",
+            "name": "1773889833076-file_example_MP4_480_1_5MG.mp4",
+            "poster": null,
+            "preview": null,
+            "subtitle": 0,
+            "impression": 0,
+            "play": 0,
+            "premiumPlay": 0,
+            "download": 0,
+            "premiumDownload": 0,
+            "error": 0,
+            "adsImpression": 0,
+            "adsClick": 0,
+            "adsError": 0,
+            "size": 1570024,
+            "duration": 30,
+            "width": 480,
+            "height": 270,
+            "resolution": "SD",
+            "bitrate": 301201,
+            "framerate": 30,
+            "codec": "H264",
+            "audioBitrate": 112000,
+            "audioChannels": 2,
+            "audioSampleRate": 48000,
+            "audioCodec": "AAC",
+            "type": "MP4",
+            "status": "Pending",
+            "reason": null,
+            "updatedAt": null,
+            "createdAt": "2026-03-19 03:10:37",
+            "assetUrl": "https://asset.seekstreaming.info"
+          }
+        }
+      },
+      "createdAt": "2026-03-19T03:10:33.143Z",
+      "updatedAt": "2026-03-19T03:11:25.735Z",
+      "startedAt": "2026-03-19T03:10:37.331Z",
+      "completedAt": "2026-03-19T03:11:25.735Z"
+    },
+    {
+      "id": "44652929-bb5b-4d4e-af28-42816af12a15",
+      "type": "upload",
+      "fileId": "6dd5e25a-cd85-4ab6-a985-3ea59d052f01",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "provider": "voesx",
+        "filePath": "uploads/1773958244177-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1773958244177-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1773958244177-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://voe.sx/e/9ck8l7vk8bb7",
+          "fileId": "9ck8l7vk8bb7",
+          "provider": "voesx",
+          "size": 1570024,
+          "embedUrl": "https://voe.sx/e/9ck8l7vk8bb7",
+          "title": "1773958244177-file_example_MP4_480_1_5MG.mp4",
+          "remoteId": 83923552,
+          "encodingNecessary": true
+        }
+      },
+      "createdAt": "2026-03-19T22:10:44.235Z",
+      "updatedAt": "2026-03-19T22:10:49.538Z",
+      "startedAt": "2026-03-19T22:10:45.276Z",
+      "completedAt": "2026-03-19T22:10:49.538Z"
+    },
+    {
+      "id": "fff0584c-971c-4d74-b8cb-a54a2515ff04",
+      "type": "upload",
+      "fileId": "6dd5e25a-cd85-4ab6-a985-3ea59d052f01",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "provider": "catbox",
+        "filePath": "uploads/1773958244177-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1773958244177-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1773958244177-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://files.catbox.moe/bl31ao.mp4",
+          "fileId": "bl31ao.mp4",
+          "provider": "catbox",
+          "size": 1570024
+        }
+      },
+      "createdAt": "2026-03-19T22:10:44.239Z",
+      "updatedAt": "2026-03-19T22:10:51.668Z",
+      "startedAt": "2026-03-19T22:10:47.282Z",
+      "completedAt": "2026-03-19T22:10:51.569Z"
+    },
+    {
+      "id": "e19f66de-50ed-4e29-8f0b-b4e8c6778e68",
+      "type": "upload",
+      "fileId": "6dd5e25a-cd85-4ab6-a985-3ea59d052f01",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "provider": "seekstreaming",
+        "filePath": "uploads/1773958244177-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1773958244177-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1773958244177-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://seekstreaming.com/v/efy8k",
+          "fileId": "efy8k",
+          "provider": "seekstreaming",
+          "size": 1570024,
+          "embedUrl": "https://seekstream.embedseek.com/#efy8k",
+          "downloadUrl": null,
+          "thumbnail": null,
+          "title": "1773958244177-file_example_MP4_480_1_5MG.mp4",
+          "status": "Pending",
+          "raw": {
+            "id": "efy8k",
+            "name": "1773958244177-file_example_MP4_480_1_5MG.mp4",
+            "poster": null,
+            "preview": null,
+            "subtitle": 0,
+            "impression": 0,
+            "play": 0,
+            "premiumPlay": 0,
+            "download": 0,
+            "premiumDownload": 0,
+            "error": 0,
+            "adsImpression": 0,
+            "adsClick": 0,
+            "adsError": 0,
+            "size": 1570024,
+            "duration": 30,
+            "width": 480,
+            "height": 270,
+            "resolution": "SD",
+            "bitrate": 301201,
+            "framerate": 30,
+            "codec": "H264",
+            "audioBitrate": 112000,
+            "audioChannels": 2,
+            "audioSampleRate": 48000,
+            "audioCodec": "AAC",
+            "type": "MP4",
+            "status": "Pending",
+            "reason": null,
+            "updatedAt": null,
+            "createdAt": "2026-03-19 22:10:48",
+            "assetUrl": "https://asset.seekstreaming.info"
+          }
+        }
+      },
+      "createdAt": "2026-03-19T22:10:44.242Z",
+      "updatedAt": "2026-03-19T22:10:49.333Z",
+      "startedAt": "2026-03-19T22:10:44.249Z",
+      "completedAt": "2026-03-19T22:10:49.333Z"
+    },
+    {
+      "id": "747aca95-1d07-44a1-872a-a31f7789e4ab",
+      "type": "upload",
+      "fileId": "db665ffb-c4fb-4039-8dc6-21c2544bef4a",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "provider": "pixeldrain",
+        "filePath": "uploads/1773959301198-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1773959301198-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1773959301198-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://pixeldrain.com/file/",
+          "fileId": "",
+          "provider": "pixeldrain",
+          "size": 1570024
+        }
+      },
+      "createdAt": "2026-03-19T22:28:21.223Z",
+      "updatedAt": "2026-03-19T22:28:21.867Z",
+      "startedAt": "2026-03-19T22:28:21.228Z",
+      "completedAt": "2026-03-19T22:28:21.867Z"
+    },
+    {
+      "id": "2ad026f1-6655-420b-aba2-4ab7a8a71ab9",
+      "type": "upload",
+      "fileId": "e57d1b69-e665-437d-b032-8584726de25e",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 3,
+      "error": null,
+      "metadata": {
+        "provider": "catbox",
+        "filePath": "uploads/1773959649144-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1773959649144-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1773959649144-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://files.catbox.moe/bl31ao.mp4",
+          "fileId": "bl31ao.mp4",
+          "provider": "catbox",
+          "size": 1570024
+        }
+      },
+      "createdAt": "2026-03-19T22:34:09.172Z",
+      "updatedAt": "2026-03-19T22:34:12.924Z",
+      "startedAt": "2026-03-19T22:34:09.905Z",
+      "completedAt": "2026-03-19T22:34:12.825Z"
+    },
+    {
+      "id": "b0e3fdeb-c2b4-48b7-98bb-54beea667217",
+      "type": "upload",
+      "fileId": "e57d1b69-e665-437d-b032-8584726de25e",
+      "status": "failed",
+      "progress": 5,
+      "attempts": 3,
+      "maxAttempts": 3,
+      "error": "Upload failed",
+      "metadata": {
+        "provider": "pixeldrain",
+        "filePath": "uploads/1773959649144-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1773959649144-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false
+      },
+      "createdAt": "2026-03-19T22:34:09.175Z",
+      "updatedAt": "2026-03-19T22:35:21.237Z",
+      "startedAt": "2026-03-19T22:34:09.185Z",
+      "completedAt": "2026-03-19T22:35:21.237Z"
+    },
+    {
+      "id": "984ff976-e236-46f8-9dc4-250f15a5b6a7",
+      "type": "upload",
+      "fileId": "3fd71e5a-6a7b-4a97-93e7-0ba252f12958",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 2,
+      "error": null,
+      "metadata": {
+        "provider": "catbox",
+        "filePath": "uploads/1774032692190-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1774032692190-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1774032692190-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://files.catbox.moe/bl31ao.mp4",
+          "fileId": "bl31ao.mp4",
+          "provider": "catbox",
+          "size": 1570024
+        }
+      },
+      "createdAt": "2026-03-20T18:51:32.254Z",
+      "updatedAt": "2026-03-20T18:51:37.661Z",
+      "startedAt": "2026-03-20T18:51:34.228Z",
+      "completedAt": "2026-03-20T18:51:37.661Z"
+    },
+    {
+      "id": "37c1157b-f222-46ff-98f8-09040dfc0599",
+      "type": "upload",
+      "fileId": "3fd71e5a-6a7b-4a97-93e7-0ba252f12958",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 2,
+      "error": null,
+      "metadata": {
+        "provider": "pixeldrain",
+        "filePath": "uploads/1774032692190-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1774032692190-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1774032692190-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://pixeldrain.com/file/x23unoqP",
+          "fileId": "x23unoqP",
+          "provider": "pixeldrain",
+          "size": 1570024
+        }
+      },
+      "createdAt": "2026-03-20T18:51:32.257Z",
+      "updatedAt": "2026-03-20T18:51:36.041Z",
+      "startedAt": "2026-03-20T18:51:32.264Z",
+      "completedAt": "2026-03-20T18:51:35.944Z"
+    },
+    {
+      "id": "5d78f74c-fd27-4303-9175-384a371d6d81",
+      "type": "upload",
+      "fileId": "92ff0e5d-088e-4ec2-9821-e83740d40904",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 2,
+      "error": null,
+      "metadata": {
+        "provider": "voesx",
+        "filePath": "uploads/1774033179407-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1774033179407-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1774033179407-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://voe.sx/e/c72knalrpzwx",
+          "fileId": "c72knalrpzwx",
+          "provider": "voesx",
+          "size": 1570024,
+          "embedUrl": "https://voe.sx/e/c72knalrpzwx",
+          "title": "1774033179407-file_example_MP4_480_1_5MG.mp4",
+          "remoteId": 83957385,
+          "encodingNecessary": true
+        }
+      },
+      "createdAt": "2026-03-20T18:59:39.803Z",
+      "updatedAt": "2026-03-20T18:59:44.926Z",
+      "startedAt": "2026-03-20T18:59:39.836Z",
+      "completedAt": "2026-03-20T18:59:44.926Z"
+    },
+    {
+      "id": "b1fddd56-006b-4ac9-9c44-ac17d6c718c2",
+      "type": "upload",
+      "fileId": "92ff0e5d-088e-4ec2-9821-e83740d40904",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 2,
+      "error": null,
+      "metadata": {
+        "provider": "catbox",
+        "filePath": "uploads/1774033179407-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1774033179407-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1774033179407-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://files.catbox.moe/bl31ao.mp4",
+          "fileId": "bl31ao.mp4",
+          "provider": "catbox",
+          "size": 1570024
+        }
+      },
+      "createdAt": "2026-03-20T18:59:39.817Z",
+      "updatedAt": "2026-03-20T18:59:43.961Z",
+      "startedAt": "2026-03-20T18:59:41.114Z",
+      "completedAt": "2026-03-20T18:59:43.961Z"
+    },
+    {
+      "id": "4b6dbb97-7d72-4889-b071-4d1f9192164d",
+      "type": "upload",
+      "fileId": "92ff0e5d-088e-4ec2-9821-e83740d40904",
+      "status": "failed",
+      "progress": 100,
+      "attempts": 2,
+      "maxAttempts": 2,
+      "error": "ENOENT: no such file or directory, stat 'uploads/1774033179407-file_example_MP4_480_1_5MG.mp4'",
+      "metadata": {
+        "provider": "seekstreaming",
+        "filePath": "uploads/1774033179407-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1774033179407-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1774033179407-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://seekstreaming.com/v/wqrbt",
+          "fileId": "wqrbt",
+          "provider": "seekstreaming",
+          "size": 1570024,
+          "embedUrl": "https://seekstream.embedseek.com/#wqrbt",
+          "downloadUrl": null,
+          "thumbnail": null,
+          "title": "1774033179407-file_example_MP4_480_1_5MG.mp4",
+          "status": "Pending",
+          "raw": {
+            "id": "wqrbt",
+            "name": "1774033179407-file_example_MP4_480_1_5MG.mp4",
+            "poster": null,
+            "preview": null,
+            "subtitle": 0,
+            "impression": 0,
+            "play": 0,
+            "premiumPlay": 0,
+            "download": 0,
+            "premiumDownload": 0,
+            "error": 0,
+            "adsImpression": 0,
+            "adsClick": 0,
+            "adsError": 0,
+            "size": 1570024,
+            "duration": 30,
+            "width": 480,
+            "height": 270,
+            "resolution": "SD",
+            "bitrate": 301201,
+            "framerate": 30,
+            "codec": "H264",
+            "audioBitrate": 112000,
+            "audioChannels": 2,
+            "audioSampleRate": 48000,
+            "audioCodec": "AAC",
+            "type": "MP4",
+            "status": "Pending",
+            "reason": null,
+            "updatedAt": null,
+            "createdAt": "2026-03-20 18:59:46",
+            "assetUrl": "https://asset.seekstreaming.info"
+          }
+        }
+      },
+      "createdAt": "2026-03-20T18:59:39.823Z",
+      "updatedAt": "2026-03-20T18:59:58.036Z",
+      "startedAt": "2026-03-20T18:59:43.204Z",
+      "completedAt": "2026-03-20T18:59:58.036Z"
+    },
+    {
+      "id": "7ce66711-e56f-4c70-8645-10d61606b45d",
+      "type": "upload",
+      "fileId": "8d2b8c99-f150-4cac-b1d6-490d795709dc",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 2,
+      "error": null,
+      "metadata": {
+        "provider": "voesx",
+        "filePath": "uploads/1774035308649-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1774035308649-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1774035308649-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://voe.sx/e/4fgzgici2ig2",
+          "fileId": "4fgzgici2ig2",
+          "provider": "voesx",
+          "size": 1570024,
+          "embedUrl": "https://voe.sx/e/4fgzgici2ig2",
+          "title": "1774035308649-file_example_MP4_480_1_5MG.mp4",
+          "remoteId": 83958307,
+          "encodingNecessary": true
+        }
+      },
+      "createdAt": "2026-03-20T19:35:08.960Z",
+      "updatedAt": "2026-03-20T19:35:14.492Z",
+      "startedAt": "2026-03-20T19:35:09.539Z",
+      "completedAt": "2026-03-20T19:35:14.492Z"
+    },
+    {
+      "id": "454d4f63-3523-4a6d-a624-093a82536164",
+      "type": "upload",
+      "fileId": "8d2b8c99-f150-4cac-b1d6-490d795709dc",
+      "status": "failed",
+      "progress": 100,
+      "attempts": 2,
+      "maxAttempts": 2,
+      "error": "ENOENT: no such file or directory, stat 'uploads/1774035308649-file_example_MP4_480_1_5MG.mp4'",
+      "metadata": {
+        "provider": "catbox",
+        "filePath": "uploads/1774035308649-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1774035308649-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1774035308649-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://files.catbox.moe/bl31ao.mp4",
+          "fileId": "bl31ao.mp4",
+          "provider": "catbox",
+          "size": 1570024
+        }
+      },
+      "createdAt": "2026-03-20T19:35:08.964Z",
+      "updatedAt": "2026-03-20T19:35:26.556Z",
+      "startedAt": "2026-03-20T19:35:14.019Z",
+      "completedAt": "2026-03-20T19:35:26.556Z"
+    },
+    {
+      "id": "63cc8133-854f-4826-91ee-5164c13eb9cd",
+      "type": "upload",
+      "fileId": "8d2b8c99-f150-4cac-b1d6-490d795709dc",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 2,
+      "error": null,
+      "metadata": {
+        "provider": "seekstreaming",
+        "filePath": "uploads/1774035308649-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1774035308649-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1774035308649-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://seekstreaming.com/v/o1y68",
+          "fileId": "o1y68",
+          "provider": "seekstreaming",
+          "size": 1570024,
+          "embedUrl": "https://seekstream.embedseek.com/#o1y68",
+          "downloadUrl": null,
+          "thumbnail": null,
+          "title": "1774035308649-file_example_MP4_480_1_5MG.mp4",
+          "status": "Pending",
+          "raw": {
+            "id": "o1y68",
+            "name": "1774035308649-file_example_MP4_480_1_5MG.mp4",
+            "poster": null,
+            "preview": null,
+            "subtitle": 0,
+            "impression": 0,
+            "play": 0,
+            "premiumPlay": 0,
+            "download": 0,
+            "premiumDownload": 0,
+            "error": 0,
+            "adsImpression": 0,
+            "adsClick": 0,
+            "adsError": 0,
+            "size": 1570024,
+            "duration": 30,
+            "width": 480,
+            "height": 270,
+            "resolution": "SD",
+            "bitrate": 301201,
+            "framerate": 30,
+            "codec": "H264",
+            "audioBitrate": 112000,
+            "audioChannels": 2,
+            "audioSampleRate": 48000,
+            "audioCodec": "AAC",
+            "type": "MP4",
+            "status": "Pending",
+            "reason": null,
+            "updatedAt": null,
+            "createdAt": "2026-03-20 19:35:14",
+            "assetUrl": "https://asset.seekstreaming.info"
+          }
+        }
+      },
+      "createdAt": "2026-03-20T19:35:08.970Z",
+      "updatedAt": "2026-03-20T19:35:15.730Z",
+      "startedAt": "2026-03-20T19:35:08.980Z",
+      "completedAt": "2026-03-20T19:35:15.730Z"
+    },
+    {
+      "id": "d68dd90a-2e91-41bf-8684-4446691b3b0c",
+      "type": "upload",
+      "fileId": "4986be23-235d-4486-8ee5-652939de98f0",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 2,
+      "error": null,
+      "metadata": {
+        "provider": "voesx",
+        "filePath": "uploads/1774035953049-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1774035953049-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1774035953049-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://voe.sx/e/0tvabhvtwefd",
+          "fileId": "0tvabhvtwefd",
+          "provider": "voesx",
+          "size": 1570024,
+          "embedUrl": "https://voe.sx/e/0tvabhvtwefd",
+          "title": "1774035953049-file_example_MP4_480_1_5MG.mp4",
+          "remoteId": 83958396,
+          "encodingNecessary": true
+        }
+      },
+      "createdAt": "2026-03-20T19:45:53.079Z",
+      "updatedAt": "2026-03-20T19:45:58.139Z",
+      "startedAt": "2026-03-20T19:45:55.003Z",
+      "completedAt": "2026-03-20T19:45:58.139Z"
+    },
+    {
+      "id": "118cdf5e-82e8-4e8e-99d6-e826ae8f0946",
+      "type": "upload",
+      "fileId": "4986be23-235d-4486-8ee5-652939de98f0",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 2,
+      "error": null,
+      "metadata": {
+        "provider": "catbox",
+        "filePath": "uploads/1774035953049-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1774035953049-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1774035953049-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://files.catbox.moe/bl31ao.mp4",
+          "fileId": "bl31ao.mp4",
+          "provider": "catbox",
+          "size": 1570024
+        }
+      },
+      "createdAt": "2026-03-20T19:45:53.082Z",
+      "updatedAt": "2026-03-20T19:45:58.771Z",
+      "startedAt": "2026-03-20T19:45:55.943Z",
+      "completedAt": "2026-03-20T19:45:58.771Z"
+    },
+    {
+      "id": "b4c0b89d-6799-4aae-ab18-879de5981d6c",
+      "type": "upload",
+      "fileId": "4986be23-235d-4486-8ee5-652939de98f0",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 2,
+      "error": null,
+      "metadata": {
+        "provider": "seekstreaming",
+        "filePath": "uploads/1774035953049-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1774035953049-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1774035953049-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://seekstreaming.com/v/ugesu",
+          "fileId": "ugesu",
+          "provider": "seekstreaming",
+          "size": 1570024,
+          "embedUrl": "https://seekstream.embedseek.com/#ugesu",
+          "downloadUrl": null,
+          "thumbnail": null,
+          "title": "1774035953049-file_example_MP4_480_1_5MG.mp4",
+          "status": "Pending",
+          "raw": {
+            "id": "ugesu",
+            "name": "1774035953049-file_example_MP4_480_1_5MG.mp4",
+            "poster": null,
+            "preview": null,
+            "subtitle": 0,
+            "impression": 0,
+            "play": 0,
+            "premiumPlay": 0,
+            "download": 0,
+            "premiumDownload": 0,
+            "error": 0,
+            "adsImpression": 0,
+            "adsClick": 0,
+            "adsError": 0,
+            "size": 1570024,
+            "duration": 30,
+            "width": 480,
+            "height": 270,
+            "resolution": "SD",
+            "bitrate": 301201,
+            "framerate": 30,
+            "codec": "H264",
+            "audioBitrate": 112000,
+            "audioChannels": 2,
+            "audioSampleRate": 48000,
+            "audioCodec": "AAC",
+            "type": "MP4",
+            "status": "Pending",
+            "reason": null,
+            "updatedAt": null,
+            "createdAt": "2026-03-20 19:45:57",
+            "assetUrl": "https://asset.seekstreaming.info"
+          }
+        }
+      },
+      "createdAt": "2026-03-20T19:45:53.086Z",
+      "updatedAt": "2026-03-20T19:45:58.152Z",
+      "startedAt": "2026-03-20T19:45:53.096Z",
+      "completedAt": "2026-03-20T19:45:58.152Z"
+    },
+    {
+      "id": "ef3df6b3-ace5-4aa7-bc6a-422062cc68ae",
+      "type": "upload",
+      "fileId": "354bffcd-147f-4406-8224-7b18ccfaaea4",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 2,
+      "error": null,
+      "metadata": {
+        "provider": "pixeldrain",
+        "filePath": "uploads/1774037018575-file_example_MP4_480_1_5MG.mp4",
+        "folderId": "root",
+        "fileName": "1774037018575-file_example_MP4_480_1_5MG.mp4",
+        "removeWhenUnused": false,
+        "normalizedFileName": "1774037018575-file_example_MP4_480_1_5MG.mp4",
+        "result": {
+          "url": "https://pixeldrain.com/u/vqdvXYE9",
+          "fileId": "vqdvXYE9",
+          "provider": "pixeldrain",
+          "size": 1570024,
+          "downloadUrl": "https://pixeldrain.com/api/file/vqdvXYE9"
+        }
+      },
+      "createdAt": "2026-03-20T20:03:38.676Z",
+      "updatedAt": "2026-03-20T20:03:42.579Z",
+      "startedAt": "2026-03-20T20:03:38.690Z",
+      "completedAt": "2026-03-20T20:03:42.579Z"
+    },
+    {
+      "id": "34e18ce0-8d33-4fbf-9480-ceb802bd6418",
+      "type": "upload",
+      "fileId": "c029eaaf-dd61-4ee1-b82b-d8ef9da65a20",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 2,
+      "error": null,
+      "metadata": {
+        "provider": "catbox",
+        "filePath": "uploads/reupload-c029eaaf-dd61-4ee1-b82b-d8ef9da65a20-1774284349279-tes.mp4",
+        "folderId": "root",
+        "fileName": "tes.mp4",
+        "cleanupAfterUpload": true,
+        "removeWhenUnused": true,
+        "normalizedFileName": "tes.mp4",
+        "result": {
+          "url": "https://files.catbox.moe/o01afx.mp4",
+          "fileId": "o01afx.mp4",
+          "provider": "catbox",
+          "size": 5062244
+        }
+      },
+      "createdAt": "2026-03-23T16:46:07.642Z",
+      "updatedAt": "2026-03-23T16:46:13.077Z",
+      "startedAt": "2026-03-23T16:46:07.648Z",
+      "completedAt": "2026-03-23T16:46:12.975Z"
+    },
+    {
+      "id": "72af47d6-c27e-4eeb-9483-6af0e53833fa",
+      "type": "upload",
+      "fileId": "c029eaaf-dd61-4ee1-b82b-d8ef9da65a20",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 2,
+      "error": null,
+      "metadata": {
+        "provider": "voesx",
+        "filePath": "uploads/reupload-c029eaaf-dd61-4ee1-b82b-d8ef9da65a20-1774284402923-tes.mp4",
+        "folderId": "root",
+        "fileName": "tes.mp4",
+        "cleanupAfterUpload": true,
+        "removeWhenUnused": true,
+        "normalizedFileName": "tes.mp4",
+        "result": {
+          "url": "https://voe.sx/e/dhlzxcjposki",
+          "fileId": "dhlzxcjposki",
+          "provider": "voesx",
+          "size": 5062244,
+          "embedUrl": "https://voe.sx/e/dhlzxcjposki",
+          "title": "tes.mp4",
+          "remoteId": 84098807,
+          "encodingNecessary": true
+        }
+      },
+      "createdAt": "2026-03-23T16:46:49.129Z",
+      "updatedAt": "2026-03-23T16:46:55.151Z",
+      "startedAt": "2026-03-23T16:46:49.134Z",
+      "completedAt": "2026-03-23T16:46:55.151Z"
+    },
+    {
+      "id": "adb843be-5bb8-4e56-b57b-78ff67cd2cdc",
+      "type": "upload",
+      "fileId": "401c2603-cf63-4142-bf58-3bc62826c61e",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 2,
+      "error": null,
+      "metadata": {
+        "provider": "catbox",
+        "filePath": "uploads/reupload-401c2603-cf63-4142-bf58-3bc62826c61e-1774284649883-test.mp4",
+        "folderId": "root",
+        "fileName": "test.mp4",
+        "cleanupAfterUpload": true,
+        "removeWhenUnused": true,
+        "normalizedFileName": "test.mp4",
+        "result": {
+          "url": "https://files.catbox.moe/o01afx.mp4",
+          "fileId": "o01afx.mp4",
+          "provider": "catbox",
+          "size": 5062244
+        }
+      },
+      "createdAt": "2026-03-23T16:50:55.430Z",
+      "updatedAt": "2026-03-23T16:51:01.629Z",
+      "startedAt": "2026-03-23T16:50:55.438Z",
+      "completedAt": "2026-03-23T16:51:01.630Z"
+    },
+    {
+      "id": "b99e70e7-ebd6-4c7d-8a99-cb565bea6f3e",
+      "type": "upload",
+      "fileId": "401c2603-cf63-4142-bf58-3bc62826c61e",
+      "status": "completed",
+      "progress": 100,
+      "attempts": 1,
+      "maxAttempts": 2,
+      "error": null,
+      "metadata": {
+        "provider": "voesx",
+        "filePath": "uploads/reupload-401c2603-cf63-4142-bf58-3bc62826c61e-1774284688014-test.mp4",
+        "folderId": "root",
+        "fileName": "test.mp4",
+        "cleanupAfterUpload": true,
+        "removeWhenUnused": true,
+        "normalizedFileName": "test.mp4",
+        "result": {
+          "url": "https://voe.sx/e/h6mfohtvjreu",
+          "fileId": "h6mfohtvjreu",
+          "provider": "voesx",
+          "size": 5062244,
+          "embedUrl": "https://voe.sx/e/h6mfohtvjreu",
+          "title": "test.mp4",
+          "remoteId": 84098872,
+          "encodingNecessary": true
+        }
+      },
+      "createdAt": "2026-03-23T16:51:33.499Z",
+      "updatedAt": "2026-03-23T16:51:39.522Z",
+      "startedAt": "2026-03-23T16:51:33.503Z",
+      "completedAt": "2026-03-23T16:51:39.522Z"
+    }
+  ],
+  "providers": {
+    "backblaze": {
+      "enabled": false,
+      "config": {},
+      "updatedAt": "2026-03-04T19:42:52.479Z"
+    },
+    "voesx": {
+      "enabled": true,
+      "config": {},
+      "updatedAt": "2026-03-17T20:56:43.995Z"
+    },
+    "catbox": {
+      "enabled": true,
+      "config": {}
+    },
+    "seekstreaming": {
+      "enabled": true,
+      "config": {},
+      "updatedAt": "2026-03-05T09:53:54.798Z"
+    }
+  },
+  "system": {
+    "lastCheck": "2026-03-17T20:57:09.831Z",
+    "nextScheduledCheck": "2026-03-24T20:57:09.831Z",
+    "providerChecks": {
+      "backblaze": {
+        "name": "backblaze",
+        "configured": false,
+        "authenticated": false,
+        "message": "No active rclone sync profile configured for backblaze provider",
+        "enabled": false,
+        "source": "live",
+        "checkedAt": "2026-03-23T16:58:47.066Z"
+      },
+      "voesx": {
+        "name": "voesx",
+        "configured": true,
+        "authenticated": true,
+        "message": "Connected as hikarunoawa@gmail.com",
+        "accountInfo": {
+          "email": "hikarunoawa@gmail.com",
+          "balance": "0.00000",
+          "storageUsed": 126068790
+        },
+        "enabled": true,
+        "source": "live",
+        "checkedAt": "2026-03-23T16:58:47.938Z"
+      },
+      "catbox": {
+        "name": "catbox",
+        "configured": true,
+        "authenticated": false,
+        "message": "Anonymous mode",
+        "enabled": true,
+        "source": "live",
+        "checkedAt": "2026-03-23T16:58:47.945Z"
+      },
+      "seekstreaming": {
+        "name": "seekstreaming",
+        "configured": true,
+        "authenticated": true,
+        "message": "Connected successfully",
+        "enabled": true,
+        "source": "live",
+        "checkedAt": "2026-03-23T16:58:49.015Z"
+      }
+    },
+    "primaryProvider": "seekstreaming",
+    "rclone": {
+      "remotes": [],
+      "syncProfiles": [],
+      "defaultProfileId": null,
+      "lastValidation": null,
+      "lastValidatedAt": null
+    }
+  }
+}
