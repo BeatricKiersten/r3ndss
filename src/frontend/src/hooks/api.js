@@ -8,7 +8,22 @@ const api = axios.create({
   baseURL: API_URL,
   headers: {
     'Content-Type': 'application/json'
+  },
+  timeout: 25000
+});
+
+api.interceptors.response.use(null, async (error) => {
+  if (error.response?.status === 503) {
+    const config = error.config;
+    if (!config.__retryCount) config.__retryCount = 0;
+    
+    if (config.__retryCount < 3) {
+      config.__retryCount += 1;
+      await new Promise(r => setTimeout(r, 3000 * config.__retryCount));
+      return api(config);
+    }
   }
+  return Promise.reject(error);
 });
 
 if (isDevelopment) {
