@@ -205,6 +205,11 @@ class UploaderService extends EventEmitter {
     await fs.ensureDir(path.dirname(destinationPath));
 
     const headers = this._getSourceHeaders(sourceUrl);
+    const userAgent = String(headers['User-Agent'] || '').trim();
+    const referer = String(headers.Referer || '').trim();
+    const origin = String(headers.Origin || '').trim();
+    const cookie = String(headers.Cookie || '').trim();
+
     const args = [
       '-y',
       '-hide_banner',
@@ -215,12 +220,30 @@ class UploaderService extends EventEmitter {
       '-reconnect_at_eof', '1',
       '-reconnect_streamed', '1',
       '-reconnect_delay_max', '5',
-      '-thread_queue_size', '4096'
+      '-thread_queue_size', '4096',
+      '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
+      '-allowed_extensions', 'ALL'
     ];
 
-    if (headers && Object.keys(headers).length > 0) {
-      const headerString = Object.entries(headers)
-        .filter(([_, value]) => value !== undefined && value !== null && String(value).length > 0)
+    if (userAgent) {
+      args.push('-user_agent', userAgent);
+    }
+
+    if (referer) {
+      args.push('-referer', referer);
+    }
+
+    const extraHeaders = {};
+    if (origin) {
+      extraHeaders.Origin = origin;
+    }
+    if (cookie) {
+      extraHeaders.Cookie = cookie;
+    }
+
+    if (Object.keys(extraHeaders).length > 0) {
+      const headerString = Object.entries(extraHeaders)
+        .filter(([_, value]) => value !== undefined && value !== null && String(value).trim().length > 0)
         .map(([key, value]) => `${key}: ${value}`)
         .join('\r\n');
 

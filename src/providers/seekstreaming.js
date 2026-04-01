@@ -122,11 +122,18 @@ class SeekStreamingAdapter {
   }
 
   getDownloadHeaders() {
-    return {
+    const headers = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       Referer: 'https://seekstream.embedseek.com/',
       Origin: 'https://seekstream.embedseek.com'
     };
+
+    const cookie = String(process.env.SEEK_DOWNLOAD_COOKIE || '').trim();
+    if (cookie) {
+      headers.Cookie = cookie;
+    }
+
+    return headers;
   }
 
   _mapVideoInfo(fileInfo, fallbackName = null, fallbackFileId = null) {
