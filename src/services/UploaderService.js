@@ -344,7 +344,8 @@ class UploaderService extends EventEmitter {
       '-thread_queue_size', '4096',
       '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
       '-allowed_extensions', 'ALL',
-      '-allowed_segment_extensions', 'ALL'
+      '-allowed_segment_extensions', 'ALL',
+      '-extension_picky', '0'
     ];
 
     if (userAgent) {
