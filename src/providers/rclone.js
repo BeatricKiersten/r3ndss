@@ -32,17 +32,61 @@ class RcloneAdapter {
     return normalizedBase ? `${normalizedBase}/${normalizedName}` : normalizedName;
   }
 
+  _isS3Remote(remote) {
+    const remoteType = String(remote?.type || '').trim().toLowerCase();
+    return remoteType === 's3' || remoteType.includes('s3');
+  }
+
+  _withS3SafetyFlags(args, remote) {
+    if (this._isS3Remote(remote)) {
+      args.push('--s3-no-check-bucket');
+      args.push('--s3-no-head');
+      args.push('--s3-no-head-object');
+    }
+    return args;
+  }
+
   _buildPublicUrl(profile, remotePath) {
     const base = String(profile.publicBaseUrl || '').trim();
     if (!base) {
       return `${profile.remoteName}:${remotePath}`;
     }
 
-    const encodedPath = remotePath
+    const pathSegments = String(remotePath || '')
       .split('/')
-      .filter(Boolean)
+      .filter(Boolean);
+
+    try {
+      const parsedBase = new URL(base);
+      const host = parsedBase.hostname.toLowerCase();
+
+      // Virtual-hosted style S3 URL, e.g. https://bucket.s3.us-east-1.amazonaws.com
+      const hostBucketMatch = host.match(/^([^.]+)\.s3[.-]/);
+      const bucketFromHost = hostBucketMatch ? hostBucketMatch[1].toLowerCase() : null;
+
+      if (bucketFromHost && pathSegments[0]?.toLowerCase() === bucketFromHost) {
+        pathSegments.shift();
+      }
+
+      // Path-style/custom base path URL, e.g. https://endpoint.example.com/bucket
+      const basePathFirstSegment = parsedBase.pathname
+        .split('/')
+        .filter(Boolean)[0];
+
+      if (basePathFirstSegment && pathSegments[0] === basePathFirstSegment) {
+        pathSegments.shift();
+      }
+    } catch (_) {
+      // Keep original behavior when publicBaseUrl is not a valid URL.
+    }
+
+    const encodedPath = pathSegments
       .map((segment) => encodeURIComponent(segment))
       .join('/');
+
+    if (!encodedPath) {
+      return base.replace(/\/+$/, '');
+    }
 
     return `${base.replace(/\/+$/, '')}/${encodedPath}`;
   }
@@ -159,7 +203,7 @@ class RcloneAdapter {
     }
 
     const fileSize = fs.statSync(filePath).size;
-    const { profile } = await this._getRcloneConfig();
+    const { profile, remote } = await this._getRcloneConfig();
 
     if (onProgress) onProgress(10);
 
@@ -167,16 +211,19 @@ class RcloneAdapter {
       const remotePath = this._joinRemotePath(profile.destinationPath, fileName);
       const destination = `${profile.remoteName}:${remotePath}`;
 
-      await this._runRclone([
+      const args = [
         'copyto',
         filePath,
         destination,
+        '--no-check-dest',
         '--config',
         configPath,
         '--stats=1s',
         '--stats-one-line',
         '--retries=2'
-      ], { signal });
+      ];
+
+      await this._runRclone(this._withS3SafetyFlags(args, remote), { signal });
 
       if (onProgress) onProgress(100);
 
@@ -228,11 +275,48 @@ class RcloneAdapter {
     };
 
     try {
-      const { profile } = await this._getRcloneConfig();
+      const { profile, remote } = await this._getRcloneConfig();
       status.configured = true;
 
       await this._withTempRcloneConfig(async (configPath) => {
-        await this._runRclone(['lsf', `${profile.remoteName}:`, '--max-depth', '0', '--config', configPath]);
+        await this._runRclone(this._withS3SafetyFlags([
+          'lsf',
+          `${profile.remoteName}:`,
+          '--max-depth',
+          '0',
+          '--config',
+          configPath
+        ], remote));
+
+        const healthTmpDir = await fsExtra.mkdtemp(path.join(os.tmpdir(), 'zenius-rclone-health-'));
+        const healthFileName = `.zenius-rclone-healthcheck-${Date.now()}.txt`;
+        const healthFilePath = path.join(healthTmpDir, healthFileName);
+        const healthRemotePath = this._joinRemotePath(profile.destinationPath, healthFileName);
+        const healthDestination = `${profile.remoteName}:${healthRemotePath}`;
+
+        await fsExtra.writeFile(healthFilePath, `healthcheck ${new Date().toISOString()}\n`, 'utf8');
+
+        try {
+          await this._runRclone(this._withS3SafetyFlags([
+            'copyto',
+            healthFilePath,
+            healthDestination,
+            '--no-check-dest',
+            '--config',
+            configPath,
+            '--retries=1'
+          ], remote));
+
+          await this._runRclone([
+            'deletefile',
+            healthDestination,
+            '--config',
+            configPath,
+            '--retries=1'
+          ]);
+        } finally {
+          await fsExtra.remove(healthTmpDir).catch(() => {});
+        }
       });
 
       status.authenticated = true;

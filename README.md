@@ -6,7 +6,7 @@ A production-ready platform for downloading encrypted HLS streams, converting th
 
 - **HLS Processing**: Download and decrypt HLS streams using FFmpeg
 - **Multi-Provider Backup**: Upload to 4 storage providers simultaneously
-  - Rclone Storage (configurable remote, default target: Backblaze-compatible)
+  - Rclone Storage (configurable remote)
   - Voe.sx
   - Catbox.moe
   - SeekStreaming
@@ -30,7 +30,7 @@ src/
 │   ├── VideoProcessor.js  # FFmpeg HLS processing
 │   └── UploaderService.js # Parallel upload queue/workers
 └── providers/
-    ├── backblaze.js       # Rclone-backed storage adapter
+    ├── rclone.js          # Rclone-backed storage adapter
     ├── voesx.js           # Voe.sx adapter
     ├── catbox.js          # Catbox adapter
     └── seekstreaming.js   # SeekStreaming adapter
@@ -176,10 +176,10 @@ Uses **Zustand** for state management with three main stores:
 
 ### Provider API Setup
 
-**Rclone Storage (Backblaze-compatible):**
+**Rclone Storage:**
 1. Konfigurasi credential remote di halaman `/rclone`
 2. Tambahkan `remotes` dan `sync profiles`
-3. Set profile default untuk provider `backblaze` (UI label: Rclone Storage)
+3. Set profile default untuk provider `rclone`
 
 **Voe.sx:**
 1. Register at voe.sx

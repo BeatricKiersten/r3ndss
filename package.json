@@ -11,6 +11,7 @@
     "build": "npm --prefix src/frontend install --include=dev && npm --prefix src/frontend run build",
     "dev:all": "concurrently \"npm run dev\" \"npm run frontend\"",
     "db:migrate:json": "node src/scripts/migrate-json-to-mysql.js",
+    "test:rclone-s3": "node src/scripts/test-rclone-s3-upload.js",
     "lint": "eslint src/",
     "test": "jest",
     "test:instance-details": "node test/get-instance-details.js",

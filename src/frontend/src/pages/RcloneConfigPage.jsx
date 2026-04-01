@@ -138,7 +138,7 @@ export default function RcloneConfigPage() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-xl font-semibold text-white">Rclone Configuration</h2>
-          <p className="text-sm text-[#888]">Kelola remote dan sync profile untuk backbone provider Backblaze.</p>
+          <p className="text-sm text-[#888]">Kelola remote dan sync profile untuk provider Rclone.</p>
         </div>
         <div className="flex items-center gap-2">
           <button type="button" onClick={() => refetch()} className="btn flex items-center gap-2" disabled={isFetching}>
