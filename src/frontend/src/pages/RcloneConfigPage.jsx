@@ -6,7 +6,7 @@ function createRemote() {
   return {
     name: '',
     type: '',
-    parametersText: '{\n  "account": "",\n  "key": ""\n}'
+    parametersText: '{\n  "provider": "AWS",\n  "access_key_id": "",\n  "secret_access_key": "",\n  "region": "ap-southeast-1"\n}'
   };
 }
 
@@ -14,7 +14,7 @@ function createProfile() {
   return {
     id: `profile-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
     name: '',
-    provider: 'backblaze',
+    provider: 'rclone',
     remoteName: '',
     destinationPath: '',
     publicBaseUrl: '',
@@ -106,7 +106,7 @@ export default function RcloneConfigPage() {
       ...profile,
       id: String(profile.id || '').trim(),
       name: String(profile.name || '').trim(),
-      provider: String(profile.provider || 'backblaze').trim(),
+      provider: String(profile.provider || 'rclone').trim(),
       remoteName: String(profile.remoteName || '').trim(),
       destinationPath: String(profile.destinationPath || '').trim(),
       publicBaseUrl: String(profile.publicBaseUrl || '').trim(),
@@ -248,8 +248,8 @@ export default function RcloneConfigPage() {
               <div key={profile.id || `profile-${index}`} className="p-3 rounded-lg bg-[#0f0f0f] border border-[#222]">
                 <div className="grid grid-cols-1 md:grid-cols-6 gap-2">
                   <input value={profile.name || ''} onChange={(e) => updateProfileField(index, 'name', e.target.value)} className="input" placeholder="profile name" />
-                  <select value={profile.provider || 'backblaze'} onChange={(e) => updateProfileField(index, 'provider', e.target.value)} className="input">
-                    <option value="backblaze">backblaze</option>
+                  <select value={profile.provider || 'rclone'} onChange={(e) => updateProfileField(index, 'provider', e.target.value)} className="input">
+                    <option value="rclone">rclone</option>
                   </select>
                   <select value={profile.remoteName || ''} onChange={(e) => updateProfileField(index, 'remoteName', e.target.value)} className="input">
                     <option value="">Select remote</option>
@@ -257,7 +257,7 @@ export default function RcloneConfigPage() {
                       <option key={name} value={name}>{name}</option>
                     ))}
                   </select>
-                  <input value={profile.destinationPath || ''} onChange={(e) => updateProfileField(index, 'destinationPath', e.target.value)} className="input" placeholder="destination path" />
+                  <input value={profile.destinationPath || ''} onChange={(e) => updateProfileField(index, 'destinationPath', e.target.value)} className="input" placeholder="bucket/path" />
                   <input value={profile.publicBaseUrl || ''} onChange={(e) => updateProfileField(index, 'publicBaseUrl', e.target.value)} className="input" placeholder="public base URL (opsional)" />
                   <div className="flex items-center gap-2">
                     <label className="text-xs text-[#777] flex items-center gap-1">

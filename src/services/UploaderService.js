@@ -15,7 +15,7 @@ const axios = require('axios');
 const config = require('../config');
 
 // Provider adapters
-const { BackblazeAdapter } = require('../providers/backblaze');
+const { RcloneAdapter } = require('../providers/rclone');
 const { VoeSxAdapter } = require('../providers/voesx');
 const { CatboxAdapter } = require('../providers/catbox');
 const { SeekStreamingAdapter } = require('../providers/seekstreaming');
@@ -35,7 +35,7 @@ const ALLOWED_TRANSFER_SOURCE_HOSTS = new Set([
   'files.catbox.moe',
   'litterbox.catbox.moe'
 ]);
-const ALLOWED_REUPLOAD_SOURCES = ['catbox', 'backblaze', 'seekstreaming'];
+const ALLOWED_REUPLOAD_SOURCES = ['catbox', 'rclone', 'seekstreaming'];
 
 class UploaderService extends EventEmitter {
   constructor(dbHandler) {
@@ -47,7 +47,7 @@ class UploaderService extends EventEmitter {
     
     // Initialize provider adapters
     this.adapters = {
-      backblaze: new BackblazeAdapter({ db: this.db }),
+      rclone: new RcloneAdapter({ db: this.db }),
       voesx: new VoeSxAdapter(),
       catbox: new CatboxAdapter(),
       seekstreaming: new SeekStreamingAdapter()
@@ -56,7 +56,7 @@ class UploaderService extends EventEmitter {
 
     // Provider-specific rate limiters
     this.uploadLimits = {
-      backblaze: pLimit(MAX_CONCURRENT_UPLOADS),
+      rclone: pLimit(MAX_CONCURRENT_UPLOADS),
       voesx: pLimit(MAX_CONCURRENT_UPLOADS),
       catbox: pLimit(MAX_CONCURRENT_UPLOADS),
       seekstreaming: pLimit(MAX_CONCURRENT_UPLOADS)
@@ -118,7 +118,7 @@ class UploaderService extends EventEmitter {
     await this.db.updateFileProgress(fileId, 'upload', 0);
 
     const providerConfigs = await this.db.getProviderConfigs();
-    const allProviders = ['backblaze', 'voesx', 'catbox', 'seekstreaming'];
+    const allProviders = config.supportedProviders;
     
     // Use selected providers if provided, otherwise use all enabled providers
     let providers;

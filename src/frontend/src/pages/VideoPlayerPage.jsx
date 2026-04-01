@@ -333,7 +333,7 @@ export default function VideoPlayerPage() {
                       >
                         <option value="">Select source...</option>
                         {(() => {
-                          const ALLOWED_SOURCES = ['catbox', 'backblaze', 'seekstreaming'];
+                          const ALLOWED_SOURCES = ['catbox', 'rclone', 'seekstreaming'];
                           const availableSources = Object.entries(currentFile.providers || {})
                             .filter(([key, ps]) => ALLOWED_SOURCES.includes(key) && ps.status === 'completed')
                             .filter(([key]) => key !== provider);

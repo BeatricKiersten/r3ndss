@@ -1,12 +1,12 @@
 export const PROVIDERS = {
-  backblaze: {
-    id: 'backblaze',
+  rclone: {
+    id: 'rclone',
     name: 'Rclone Storage',
     short: 'R',
     color: 'text-red-400',
     bgColor: 'bg-red-400/10',
     borderColor: 'border-red-400/20',
-    description: 'Rclone-backed remote storage (Backblaze and others)',
+    description: 'Rclone-backed remote storage (S3, B2, Drive, etc)',
     icon: 'Server'
   },
   voesx: {

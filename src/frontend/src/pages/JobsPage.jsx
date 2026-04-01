@@ -94,7 +94,7 @@ export default function JobsPage() {
             className="input"
           >
             <option value="seekstreaming">seekstreaming</option>
-            <option value="backblaze">rclone-storage</option>
+            <option value="rclone">rclone-storage</option>
             <option value="voesx">voesx</option>
             <option value="catbox">catbox</option>
           </select>

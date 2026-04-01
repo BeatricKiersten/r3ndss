@@ -1,5 +1,7 @@
 require('dotenv').config();
 
+const DEFAULT_PROVIDERS = ['voesx', 'catbox', 'seekstreaming', 'rclone'];
+
 module.exports = {
   port: Number(process.env.PORT || process.env.API_PORT || 3001),
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
@@ -16,7 +18,7 @@ module.exports = {
     ssl: String(process.env.MYSQL_SSL || 'false').toLowerCase() === 'true',
     sslRejectUnauthorized: String(process.env.MYSQL_SSL_REJECT_UNAUTHORIZED || 'true').toLowerCase() !== 'false'
   },
-  supportedProviders: ['backblaze', 'voesx', 'catbox', 'seekstreaming'],
+  supportedProviders: DEFAULT_PROVIDERS,
   upload: {
     maxConcurrentUploads: 2,
     maxConcurrentProviders: 4,
@@ -34,5 +36,12 @@ module.exports = {
   checker: {
     intervalHours: 1,
     weeklyIntervalDays: 7
+  },
+  rcloneProviders: {
+    rclone: {
+      name: 'Rclone Storage',
+      description: 'Rclone-backed remote storage (S3, B2, Drive, etc)',
+      supportsMultipleRemotes: true
+    }
   }
 };

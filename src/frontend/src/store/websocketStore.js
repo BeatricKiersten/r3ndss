@@ -52,7 +52,7 @@ function getPlayableUrl(provider, url) {
   return url;
 }
 
-export const IFRAME_PROVIDERS = ['seekstreaming', 'voesx', 'streamtape', 'mixdrop', 'catbox', 'backblaze'];
+export const IFRAME_PROVIDERS = ['seekstreaming', 'voesx', 'streamtape', 'mixdrop', 'catbox', 'rclone'];
 
 export function requiresIframe(provider) {
   return IFRAME_PROVIDERS.includes(provider);
@@ -270,7 +270,7 @@ export const usePlayerStore = create((set, get) => ({
     
     // Provider sources
     const providerNames = {
-      backblaze: 'Rclone Storage',
+      rclone: 'Rclone Storage',
       voesx: 'Voe.sx',
       catbox: 'Catbox',
       seekstreaming: 'SeekStreaming'

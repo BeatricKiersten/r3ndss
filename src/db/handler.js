@@ -13,7 +13,7 @@
 const mysql = require('mysql2/promise');
 const { v4: uuidv4 } = require('uuid');
 
-const DEFAULT_PROVIDERS = ['backblaze', 'voesx', 'catbox', 'seekstreaming'];
+const DEFAULT_PROVIDERS = ['voesx', 'catbox', 'seekstreaming', 'rclone'];
 
 function toInt(value, fallback = 0) {
   const parsed = Number(value);
@@ -1684,7 +1684,7 @@ class DatabaseHandler {
     const normalizeProfile = (profile = {}) => ({
       id: String(profile.id || uuidv4()).trim(),
       name: String(profile.name || '').trim(),
-      provider: String(profile.provider || 'backblaze').trim(),
+      provider: String(profile.provider || 'rclone').trim(),
       remoteName: String(profile.remoteName || '').trim(),
       destinationPath: String(profile.destinationPath || '').trim(),
       publicBaseUrl: String(profile.publicBaseUrl || '').trim(),

@@ -161,7 +161,7 @@ function FileDetailModal({ file, onClose }) {
                 const config = PROVIDERS[key];
                 const ProviderIcon = providerIconMap[config?.icon] || Cloud;
                 const remoteStatus = providerStatus?.[key];
-                const ALLOWED_SOURCES = ['catbox', 'backblaze', 'seekstreaming'];
+                const ALLOWED_SOURCES = ['catbox', 'rclone', 'seekstreaming'];
                 const availableSources = Object.entries(file.providers || {})
                   .filter(([sourceKey, sourcePs]) => ALLOWED_SOURCES.includes(sourceKey) && sourcePs.status === 'completed')
                   .filter(([sourceKey]) => sourceKey !== key);
@@ -287,7 +287,7 @@ function FileDetailModal({ file, onClose }) {
             </div>
 
             {(() => {
-              const rcloneStatus = file.providers?.backblaze;
+              const rcloneStatus = file.providers?.rclone;
               if (!rcloneStatus) return null;
 
               const parsed = parseRcloneFileId(rcloneStatus.fileId);

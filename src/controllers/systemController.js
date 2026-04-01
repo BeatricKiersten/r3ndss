@@ -22,12 +22,12 @@ const systemController = {
 
   async validateRclone(req, res) {
     try {
-      const backblazeStatus = await uploaderService.checkSingleProviderStatus('backblaze');
-      const persisted = await db.setRcloneValidationResult(backblazeStatus);
+      const rcloneStatus = await uploaderService.checkSingleProviderStatus('rclone');
+      const persisted = await db.setRcloneValidationResult(rcloneStatus);
       res.json({
         success: true,
         data: {
-          ...backblazeStatus,
+          ...rcloneStatus,
           lastValidatedAt: persisted.lastValidatedAt || null
         }
       });

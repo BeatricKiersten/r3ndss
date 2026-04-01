@@ -12,7 +12,7 @@ const fs = require('fs-extra');
 const path = require('path');
 const { getInstance } = require('../db/handler');
 
-const SUPPORTED_PROVIDERS = ['backblaze', 'voesx', 'catbox', 'seekstreaming'];
+const SUPPORTED_PROVIDERS = ['voesx', 'catbox', 'seekstreaming', 'rclone'];
 
 function toIso(value, fallback = null) {
   if (!value) return fallback;
@@ -257,7 +257,7 @@ async function run() {
         [
           String(profile.id),
           String(profile.name),
-          String(profile.provider || 'backblaze'),
+          String(profile.provider || 'rclone'),
           String(profile.remoteName),
           String(profile.destinationPath || ''),
           String(profile.publicBaseUrl || ''),
