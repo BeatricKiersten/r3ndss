@@ -658,19 +658,9 @@ class UploaderService extends EventEmitter {
       throw new Error(`Source provider '${sourceProviderId}' is not available or not completed`);
     }
 
-    let sourcePath = null;
-    let cleanupAfterUpload = false;
-
-    if (file.localPath && await fs.pathExists(file.localPath)) {
-      sourcePath = file.localPath;
-    } else {
-      const downloadedSource = await this._downloadRemoteSourceToTemp(file, {
-        excludeProvider: targetProviderId,
-        specificProvider: sourceProviderId
-      });
-      sourcePath = downloadedSource.filePath;
-      cleanupAfterUpload = downloadedSource.needsCleanup;
-    }
+    const hasLocalSource = Boolean(file.localPath && await fs.pathExists(file.localPath));
+    const sourcePath = hasLocalSource ? file.localPath : null;
+    const cleanupAfterUpload = false;
 
     // Reset provider status
     await this.db.updateProviderStatus(fileId, targetProviderId, 'pending', null, null, null, { embedUrl: null });
@@ -685,6 +675,7 @@ class UploaderService extends EventEmitter {
         filePath: sourcePath,
         folderId: file.folderId,
         fileName: file.name,
+        sourceProvider: sourceProviderId,
         cleanupAfterUpload,
         removeWhenUnused: cleanupAfterUpload
       }
@@ -1417,21 +1408,28 @@ class UploaderService extends EventEmitter {
   }
 
   async _ensureUploadSourceForJob(job) {
-    const currentPath = job.metadata?.filePath;
+    const currentPath = job.metadata?.filePath || null;
 
-    if (!currentPath) {
-      throw new Error('Missing upload source path in job metadata');
-    }
-
-    if (await fs.pathExists(currentPath)) {
+    if (currentPath && await fs.pathExists(currentPath)) {
       this._cancelScheduledCleanup(currentPath);
       return { filePath: currentPath, metadata: job.metadata };
     }
 
     const file = await this.db.getFile(job.fileId);
+
+    let preferredSourceProvider = String(job.metadata?.sourceProvider || '').trim() || null;
+    if (preferredSourceProvider) {
+      try {
+        preferredSourceProvider = await this._resolveProviderId(preferredSourceProvider, { allowDisabled: true });
+      } catch (_) {
+        preferredSourceProvider = null;
+      }
+    }
+
     const recovered = await this._downloadRemoteSourceToTemp(file, {
       excludeProvider: job.metadata?.provider,
-      preferPrimary: true
+      specificProvider: preferredSourceProvider,
+      preferPrimary: preferredSourceProvider ? false : true
     });
 
     const nextMetadata = {
@@ -1841,14 +1839,17 @@ class UploaderService extends EventEmitter {
     }
 
     let sourcePath = null;
-    let cleanupAfterUpload = false;
+    let sourceProvider = null;
+    const cleanupAfterUpload = false;
 
     if (file.localPath && await fs.pathExists(file.localPath)) {
       sourcePath = file.localPath;
     } else {
-      const downloadedSource = await this._downloadRemoteSourceToTemp(file, { preferPrimary: true });
-      sourcePath = downloadedSource.filePath;
-      cleanupAfterUpload = downloadedSource.needsCleanup;
+      const remoteSource = await this._resolveRemoteSource(file, { preferPrimary: true });
+      if (!remoteSource) {
+        throw new Error('No source available for retry: local file not found and no completed provider source');
+      }
+      sourceProvider = remoteSource.provider;
     }
 
     const jobs = [];
@@ -1864,6 +1865,7 @@ class UploaderService extends EventEmitter {
           filePath: sourcePath,
           folderId: file.folderId,
           fileName: file.name,
+          sourceProvider,
           cleanupAfterUpload,
           removeWhenUnused: cleanupAfterUpload
         }
@@ -1938,66 +1940,45 @@ class UploaderService extends EventEmitter {
       return { fileId, provider: targetProviderId, message: 'Already uploaded to this provider', url: targetStatus.url };
     }
 
-    const primaryProvider = await this._getPrimaryProvider();
-
-    // Determine source: prefer primary provider, else local file, else any completed provider
     let sourcePath = null;
-    let needsCleanup = false;
+    let sourceProvider = null;
 
-    const preferredRemoteSource = await this._resolveRemoteSource(file, { excludeProvider: targetProviderId, preferPrimary: true });
-
-    if (preferredRemoteSource?.provider === primaryProvider) {
-      const downloadedSource = await this._downloadRemoteSourceToTemp(file, { excludeProvider: targetProviderId, preferPrimary: true });
-      sourcePath = downloadedSource.filePath;
-      needsCleanup = downloadedSource.needsCleanup;
-    } else if (file.localPath && await fs.pathExists(file.localPath)) {
+    if (file.localPath && await fs.pathExists(file.localPath)) {
       sourcePath = file.localPath;
     } else {
-      const remoteSource = preferredRemoteSource || await this._resolveRemoteSource(file, { excludeProvider: targetProviderId, preferPrimary: false });
-
+      const remoteSource = await this._resolveRemoteSource(file, { excludeProvider: targetProviderId, preferPrimary: true });
       if (!remoteSource) {
         throw new Error('No source available: local file not found and no provider has completed upload');
       }
-
-      console.log(`[Uploader] Downloading from ${remoteSource.provider} to copy to ${targetProviderId}`);
-      const downloadedSource = await this._downloadRemoteSourceToTemp(file, { excludeProvider: targetProviderId, preferPrimary: false });
-      sourcePath = downloadedSource.filePath;
-      needsCleanup = downloadedSource.needsCleanup;
+      sourceProvider = remoteSource.provider;
     }
 
-    try {
-      // Create job for the copy
-      const job = await this.db.createJob({
-        type: 'upload',
-        fileId,
-        maxAttempts: UPLOAD_RETRY_ATTEMPTS,
-        metadata: {
-          provider: targetProviderId,
-          filePath: sourcePath,
-          folderId: file.folderId,
-          fileName: file.name,
-          isCopy: true,
-          cleanupAfterUpload: needsCleanup,
-          removeWhenUnused: needsCleanup
-        }
-      });
-
-      // Update provider status to pending
-      await this.db.updateProviderStatus(fileId, targetProviderId, 'pending', null, null, null, { embedUrl: null });
-
-      this.emit('upload:queued', { fileId, jobs: [{ provider: targetProviderId, jobId: job.id }], enabledProviders: [targetProviderId] });
-
-      // Process queue
-      this._processQueue();
-
-      return { fileId, provider: targetProviderId, jobId: job.id, message: 'Copy queued for upload' };
-    } catch (error) {
-      // Clean up temp file if we created one
-      if (needsCleanup && sourcePath) {
-        await fs.remove(sourcePath).catch(() => {});
+    // Create job for the copy
+    const job = await this.db.createJob({
+      type: 'upload',
+      fileId,
+      maxAttempts: UPLOAD_RETRY_ATTEMPTS,
+      metadata: {
+        provider: targetProviderId,
+        filePath: sourcePath,
+        folderId: file.folderId,
+        fileName: file.name,
+        sourceProvider,
+        isCopy: true,
+        cleanupAfterUpload: false,
+        removeWhenUnused: false
       }
-      throw error;
-    }
+    });
+
+    // Update provider status to pending
+    await this.db.updateProviderStatus(fileId, targetProviderId, 'pending', null, null, null, { embedUrl: null });
+
+    this.emit('upload:queued', { fileId, jobs: [{ provider: targetProviderId, jobId: job.id }], enabledProviders: [targetProviderId] });
+
+    // Process queue
+    this._processQueue();
+
+    return { fileId, provider: targetProviderId, jobId: job.id, message: 'Copy queued for upload', sourceProvider };
   }
 
   _sleep(ms) {
