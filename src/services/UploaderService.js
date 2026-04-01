@@ -201,20 +201,44 @@ class UploaderService extends EventEmitter {
     return {};
   }
 
-  async _downloadHlsSourceWithYtdlp(sourceUrl, destinationPath) {
+  async _downloadHlsSourceWithFfmpeg(sourceUrl, destinationPath) {
     await fs.ensureDir(path.dirname(destinationPath));
 
     const headers = this._getSourceHeaders(sourceUrl);
-    const args = ['-o', destinationPath];
+    const args = [
+      '-y',
+      '-hide_banner',
+      '-loglevel', 'warning',
+      '-stats',
+      '-fflags', '+discardcorrupt',
+      '-reconnect', '1',
+      '-reconnect_at_eof', '1',
+      '-reconnect_streamed', '1',
+      '-reconnect_delay_max', '5',
+      '-thread_queue_size', '4096'
+    ];
 
-    for (const [key, value] of Object.entries(headers)) {
-      args.push('--add-header', `${key}:${value}`);
+    if (headers && Object.keys(headers).length > 0) {
+      const headerString = Object.entries(headers)
+        .filter(([_, value]) => value !== undefined && value !== null && String(value).length > 0)
+        .map(([key, value]) => `${key}: ${value}`)
+        .join('\r\n');
+
+      if (headerString) {
+        args.push('-headers', `${headerString}\r\n`);
+      }
     }
 
-    args.push(sourceUrl);
+    args.push(
+      '-i', sourceUrl,
+      '-c', 'copy',
+      '-bsf:a', 'aac_adtstoasc',
+      '-movflags', '+faststart',
+      destinationPath
+    );
 
     await new Promise((resolve, reject) => {
-      const proc = spawn('yt-dlp', args, {
+      const proc = spawn('ffmpeg', args, {
         stdio: ['ignore', 'ignore', 'pipe']
       });
 
@@ -229,11 +253,11 @@ class UploaderService extends EventEmitter {
           return;
         }
 
-        reject(new Error(`yt-dlp failed with code ${code}${stderr ? `: ${stderr.trim()}` : ''}`));
+        reject(new Error(`ffmpeg failed with code ${code}${stderr ? `: ${stderr.trim()}` : ''}`));
       });
 
       proc.on('error', (error) => {
-        reject(new Error(`Failed to start yt-dlp: ${error.message}`));
+        reject(new Error(`Failed to start ffmpeg: ${error.message}`));
       });
     });
 
@@ -907,7 +931,7 @@ class UploaderService extends EventEmitter {
 
   async _downloadSourceFile(sourceUrl, destinationPath) {
     if (sourceUrl.includes('emergingtechhubonline.store') && (sourceUrl.includes('.txt') || sourceUrl.includes('.m3u8'))) {
-      return this._downloadHlsSourceWithYtdlp(sourceUrl, destinationPath);
+      return this._downloadHlsSourceWithFfmpeg(sourceUrl, destinationPath);
     }
 
     const response = await axios.get(sourceUrl, {
