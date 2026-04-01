@@ -232,7 +232,7 @@ export default function ProviderManagementPage() {
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
             {Object.keys(PROVIDERS).map((provider) => {
-              const conf = PROVIDERS[provider];
+              const conf = getProviderConfig(provider);
               const enabled = providers?.[provider]?.enabled;
               const selected = primaryProvider === provider;
 
@@ -278,7 +278,7 @@ export default function ProviderManagementPage() {
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
           {Object.keys(PROVIDERS).map((provider) => {
-            const conf = PROVIDERS[provider];
+            const conf = getProviderConfig(provider);
             const enabled = providers?.[provider]?.enabled;
             const selected = selectedCheckProviders.includes(provider);
 
@@ -316,7 +316,7 @@ export default function ProviderManagementPage() {
 
       <div className="space-y-3">
         {Object.entries(providers || {}).map(([key, info]) => {
-          const config = PROVIDERS[key];
+          const config = getProviderConfig(key);
           const status = providersStatus?.[key] || {};
           const snapshot = providerSnapshots?.[key] || null;
           const providerFiles = getProviderFiles(key);

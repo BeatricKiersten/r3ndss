@@ -21,7 +21,7 @@ import {
   useZeniusDownload,
   useZeniusInstanceDetails
 } from '../hooks/api';
-import { PROVIDERS } from '../config/providers';
+import { getProviderConfig } from '../config/providers';
 
 const HEADERS_STORAGE_KEY = 'zenius-headers-raw';
 const BATCH_CHAIN_CHUNK_SIZE = 8;
@@ -109,7 +109,7 @@ function ProviderSelector({ providers, selectedProviders, setSelectedProviders }
 
       <div className="grid grid-cols-2 gap-2">
         {Object.entries(providers || {}).map(([key, info]) => {
-          const config = PROVIDERS[key];
+          const config = getProviderConfig(key);
           const isEnabled = info.enabled;
           const isSelected = selectedProviders.includes(key);
 

@@ -158,7 +158,7 @@ function FileDetailModal({ file, onClose }) {
 
             <div className="space-y-2">
               {Object.entries(file.providers).map(([key, ps]) => {
-                const config = PROVIDERS[key];
+                const config = getProviderConfig(key);
                 const ProviderIcon = providerIconMap[config?.icon] || Cloud;
                 const remoteStatus = providerStatus?.[key];
                 const ALLOWED_SOURCES = ['catbox', 'rclone', 'seekstreaming'];
@@ -240,7 +240,7 @@ function FileDetailModal({ file, onClose }) {
                           >
                             <option value="">Select source...</option>
                             {availableSources.map(([sourceKey, sourcePs]) => {
-                              const config = PROVIDERS[sourceKey];
+                              const config = getProviderConfig(sourceKey);
                               return (
                                 <option key={sourceKey} value={sourceKey}>
                                   {config.name} ({sourceKey})
@@ -260,7 +260,7 @@ function FileDetailModal({ file, onClose }) {
                             ) : (
                               <Upload className="w-3 h-3" />
                             )}
-                            Re-upload from {selectedSource ? PROVIDERS[selectedSource]?.name : 'source'}
+                            Re-upload from {selectedSource ? getProviderConfig(selectedSource)?.name : 'source'}
                           </button>
                           <button
                             onClick={cancelSourceSelect}

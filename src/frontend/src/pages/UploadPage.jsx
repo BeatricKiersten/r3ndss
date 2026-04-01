@@ -13,7 +13,7 @@ import {
   Film,
   FileVideo
 } from 'lucide-react';
-import { PROVIDERS } from '../config/providers';
+import { getProviderConfig } from '../config/providers';
 
 function ProviderSelector({
   providers,
@@ -75,7 +75,7 @@ function ProviderSelector({
           </div>
           <div className="grid grid-cols-2 gap-2">
             {Object.entries(providers || {}).map(([key, info]) => {
-              const config = PROVIDERS[key];
+              const config = getProviderConfig(key);
               const isEnabled = info.enabled;
               const isSelected = selectedProviders.includes(key);
 
@@ -106,7 +106,7 @@ function ProviderSelector({
           <p className="text-xs text-[#555] mt-2">
             {selectedProviders.length === 0
               ? 'All enabled providers will be used'
-              : `Will upload to: ${selectedProviders.map((provider) => PROVIDERS[provider]?.short).join(', ')}`}
+              : `Will upload to: ${selectedProviders.map((provider) => getProviderConfig(provider)?.short).join(', ')}`}
           </p>
         </div>
       )}
