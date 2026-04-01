@@ -30,6 +30,7 @@ const SOURCE_PROBE_TIMEOUT = probeTimeout;
 const SOURCE_DOWNLOAD_TIMEOUT = downloadTimeout;
 const UPLOAD_DIR = config.uploadDir;
 const DEBUG_UPLOAD_CLEANUP = String(process.env.DEBUG_UPLOAD_CLEANUP || 'false').toLowerCase() === 'true';
+const LOCAL_FILE_CLEANUP_DELAY_MS = Number(process.env.UPLOAD_LOCAL_CLEANUP_DELAY_MS || 300000);
 const ALLOWED_TRANSFER_SOURCE_HOSTS = new Set([
   'catbox.moe',
   'files.catbox.moe',
@@ -43,6 +44,8 @@ class UploaderService extends EventEmitter {
     this.db = dbHandler;
     this.isRunning = false;
     this.activeUploads = new Map(); // Track active upload streams
+    this.processingJobIds = new Set();
+    this.localCleanupTimers = new Map();
     this.providerLimit = pLimit(MAX_CONCURRENT_PROVIDERS);
     
     // Initialize provider adapters
@@ -106,6 +109,13 @@ class UploaderService extends EventEmitter {
     }
     
     this.activeUploads.clear();
+
+    for (const timer of this.localCleanupTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.localCleanupTimers.clear();
+
+    this.processingJobIds.clear();
     console.log('[Uploader] Service stopped');
   }
 
@@ -293,6 +303,8 @@ class UploaderService extends EventEmitter {
   async _removeManagedLocalFile(fileId, filePath) {
     if (!filePath) return;
 
+    this._cancelScheduledCleanup(filePath);
+
     const resolvedUploadDir = path.resolve(UPLOAD_DIR);
     const resolvedFilePath = path.resolve(filePath);
 
@@ -309,11 +321,87 @@ class UploaderService extends EventEmitter {
     }
   }
 
+  _safeResolvePath(filePath) {
+    if (!filePath || typeof filePath !== 'string') return null;
+    return path.resolve(filePath);
+  }
+
+  _cancelScheduledCleanup(filePath) {
+    if (!filePath) return;
+
+    const key = this._safeResolvePath(filePath);
+    if (!key) return;
+
+    const timer = this.localCleanupTimers.get(key);
+    if (timer) {
+      clearTimeout(timer);
+      this.localCleanupTimers.delete(key);
+    }
+  }
+
+  async _scheduleManagedLocalFileCleanup(fileId, filePath) {
+    if (!filePath) return;
+
+    const key = this._safeResolvePath(filePath);
+    if (!key) return;
+
+    this._cancelScheduledCleanup(key);
+
+    const delayMs = Number.isFinite(LOCAL_FILE_CLEANUP_DELAY_MS)
+      ? Math.max(0, LOCAL_FILE_CLEANUP_DELAY_MS)
+      : 300000;
+
+    if (delayMs === 0) {
+      await this._finalizeManagedLocalFileCleanup(fileId, key);
+      return;
+    }
+
+    if (DEBUG_UPLOAD_CLEANUP) {
+      console.log(`[Uploader] Cleanup scheduled in ${delayMs}ms for ${fileId}: ${key}`);
+    }
+
+    const timer = setTimeout(async () => {
+      this.localCleanupTimers.delete(key);
+      await this._finalizeManagedLocalFileCleanup(fileId, key);
+    }, delayMs);
+
+    this.localCleanupTimers.set(key, timer);
+  }
+
+  async _finalizeManagedLocalFileCleanup(fileId, filePath) {
+    if (!filePath) return;
+
+    const resolvedTargetPath = this._safeResolvePath(filePath);
+    if (!resolvedTargetPath) return;
+
+    const jobs = await this.db.getJobsByFile(fileId);
+    const relatedJobs = jobs.filter((item) => this._safeResolvePath(item.metadata?.filePath) === resolvedTargetPath);
+
+    if (relatedJobs.length === 0) {
+      return;
+    }
+
+    const hasNonFinalJob = relatedJobs.some((item) => (
+      item.status === 'pending' || item.status === 'processing' || item.status === 'uploading'
+    ));
+
+    if (hasNonFinalJob) {
+      return;
+    }
+
+    await this._removeManagedLocalFile(fileId, resolvedTargetPath);
+  }
+
   async _cleanupFilePathWhenUnused(fileId, filePath) {
     if (!filePath) return;
 
+    const resolvedTargetPath = this._safeResolvePath(filePath);
+    if (!resolvedTargetPath) return;
+
+    this._cancelScheduledCleanup(resolvedTargetPath);
+
     const jobs = await this.db.getJobsByFile(fileId);
-    const relatedJobs = jobs.filter((item) => item.metadata?.filePath === filePath);
+    const relatedJobs = jobs.filter((item) => this._safeResolvePath(item.metadata?.filePath) === resolvedTargetPath);
 
     if (relatedJobs.length === 0) {
       return;
@@ -334,7 +422,7 @@ class UploaderService extends EventEmitter {
     ));
 
     if (!hasNonFinalJob && !hasRunningUploadState && allJobsFinished) {
-      await this._removeManagedLocalFile(fileId, filePath);
+      await this._scheduleManagedLocalFileCleanup(fileId, filePath);
     }
   }
 
@@ -393,7 +481,7 @@ class UploaderService extends EventEmitter {
         folderId: file.folderId,
         fileName: file.name,
         cleanupAfterUpload,
-        removeWhenUnused: true
+        removeWhenUnused: cleanupAfterUpload
       }
     });
 
@@ -771,11 +859,14 @@ class UploaderService extends EventEmitter {
   async _processQueue() {
     if (!this.isRunning) return;
 
+    let uploadJobs = [];
+    let transferJobs = [];
+
     try {
       // Get pending upload jobs
       const pendingJobs = await this.db.getPendingJobs(20);
-      const uploadJobs = pendingJobs.filter(j => j.type === 'upload');
-      const transferJobs = pendingJobs.filter(j => j.type === 'transfer');
+      uploadJobs = this._claimJobs(pendingJobs.filter(j => j.type === 'upload'));
+      transferJobs = this._claimJobs(pendingJobs.filter(j => j.type === 'transfer'));
 
       if (uploadJobs.length === 0 && transferJobs.length === 0) return;
 
@@ -792,12 +883,24 @@ class UploaderService extends EventEmitter {
       );
 
       const transferPromise = Promise.all(
-        transferJobs.map((job) => this.providerLimit(() => this._processTransferJob(job)))
+        transferJobs.map((job) => this.providerLimit(async () => {
+          try {
+            await this._processTransferJob(job);
+          } finally {
+            this._releaseJobClaim(job.id);
+          }
+        }))
       );
 
       await Promise.all([uploadPromise, transferPromise]);
 
     } catch (error) {
+      for (const job of uploadJobs) {
+        this._releaseJobClaim(job.id);
+      }
+      for (const job of transferJobs) {
+        this._releaseJobClaim(job.id);
+      }
       console.error('[Uploader] Queue processing error:', error);
     }
   }
@@ -997,12 +1100,36 @@ class UploaderService extends EventEmitter {
     }, {});
   }
 
+  _claimJobs(jobs) {
+    const claimed = [];
+
+    for (const job of jobs) {
+      if (this.processingJobIds.has(job.id)) {
+        continue;
+      }
+      this.processingJobIds.add(job.id);
+      claimed.push(job);
+    }
+
+    return claimed;
+  }
+
+  _releaseJobClaim(jobId) {
+    this.processingJobIds.delete(jobId);
+  }
+
   /**
    * Process all provider uploads for a single file
    */
   async _processFileUploads(fileId, jobs) {
-    const promises = jobs.map(job => 
-      this.providerLimit(() => this._uploadToProvider(job))
+    const promises = jobs.map(job =>
+      this.providerLimit(async () => {
+        try {
+          await this._uploadToProvider(job);
+        } finally {
+          this._releaseJobClaim(job.id);
+        }
+      })
     );
 
     await Promise.allSettled(promises);
@@ -1013,15 +1140,49 @@ class UploaderService extends EventEmitter {
     }
   }
 
+  async _ensureUploadSourceForJob(job) {
+    const currentPath = job.metadata?.filePath;
+
+    if (!currentPath) {
+      throw new Error('Missing upload source path in job metadata');
+    }
+
+    if (await fs.pathExists(currentPath)) {
+      this._cancelScheduledCleanup(currentPath);
+      return { filePath: currentPath, metadata: job.metadata };
+    }
+
+    const file = await this.db.getFile(job.fileId);
+    const recovered = await this._downloadRemoteSourceToTemp(file, {
+      excludeProvider: job.metadata?.provider,
+      preferPrimary: true
+    });
+
+    const nextMetadata = {
+      ...job.metadata,
+      filePath: recovered.filePath,
+      cleanupAfterUpload: true,
+      removeWhenUnused: true,
+      sourceRecovered: true,
+      sourceRecoveredAt: new Date().toISOString()
+    };
+
+    await this.db.updateJob(job.id, { metadata: nextMetadata });
+    job.metadata = nextMetadata;
+
+    return { filePath: recovered.filePath, metadata: nextMetadata };
+  }
+
   /**
    * Upload to a specific provider
    */
   async _uploadToProvider(job) {
-    const { provider, filePath, fileName } = job.metadata;
+    const { provider } = job.metadata;
     const providerLimit = this.uploadLimits[provider];
 
     return providerLimit(async () => {
-      const normalizedFileName = this._normalizeUploadFileName(fileName, filePath);
+      const { filePath, metadata } = await this._ensureUploadSourceForJob(job);
+      const normalizedFileName = this._normalizeUploadFileName(metadata?.fileName, filePath);
       console.log(`[Uploader] Starting upload to ${provider}: ${normalizedFileName}`);
 
       const currentAttempt = job.attempts + 1;
@@ -1383,7 +1544,7 @@ class UploaderService extends EventEmitter {
           folderId: file.folderId,
           fileName: file.name,
           cleanupAfterUpload,
-          removeWhenUnused: true
+          removeWhenUnused: cleanupAfterUpload
         }
       });
 
@@ -1492,7 +1653,7 @@ class UploaderService extends EventEmitter {
           fileName: file.name,
           isCopy: true,
           cleanupAfterUpload: needsCleanup,
-          removeWhenUnused: true
+          removeWhenUnused: needsCleanup
         }
       });
 
