@@ -12,8 +12,17 @@
 
 const mysql = require('mysql2/promise');
 const { v4: uuidv4 } = require('uuid');
+const {
+  STATIC_PROVIDER_DEFS,
+  LEGACY_RCLONE_PROVIDER_ID,
+  getStaticProviderIds,
+  buildRcloneProfileProviderId,
+  isKnownProviderId,
+  isRcloneProfileProviderId,
+  parseRcloneProfileId
+} = require('../services/providerRegistry');
 
-const DEFAULT_PROVIDERS = ['voesx', 'catbox', 'seekstreaming', 'rclone'];
+const STATIC_PROVIDER_IDS = getStaticProviderIds();
 
 function toInt(value, fallback = 0) {
   const parsed = Number(value);
@@ -42,17 +51,6 @@ function parseJson(value, fallback) {
 
 function stringifyJson(value) {
   return JSON.stringify(value === undefined ? null : value);
-}
-
-function defaultProviderStatus() {
-  return {
-    status: 'pending',
-    url: null,
-    fileId: null,
-    embedUrl: null,
-    error: null,
-    urlHistory: []
-  };
 }
 
 function buildMysqlConfigFromEnv() {
@@ -128,9 +126,60 @@ class DatabaseHandler {
   }
 
   _assertProviderSupported(provider) {
-    if (!DEFAULT_PROVIDERS.includes(provider)) {
+    if (!isKnownProviderId(provider)) {
       throw new Error(`Provider '${provider}' not found`);
     }
+  }
+
+  _getStaticProviderCatalog() {
+    return STATIC_PROVIDER_IDS.map((providerId) => ({
+      ...STATIC_PROVIDER_DEFS[providerId],
+      enabled: true,
+      source: 'static'
+    }));
+  }
+
+  _buildRcloneProviderCatalog(rcloneConfig = null) {
+    const config = rcloneConfig || {};
+    const profiles = Array.isArray(config.syncProfiles) ? config.syncProfiles : [];
+    const remotes = new Map((config.remotes || []).map((remote) => [remote.name, remote]));
+
+    return profiles.map((profile) => {
+      const providerId = buildRcloneProfileProviderId(profile.id);
+      const remote = remotes.get(profile.remoteName) || null;
+
+      return {
+        id: providerId,
+        name: profile.name || providerId,
+        short: `R${String(profile.name || profile.id || '').trim().slice(0, 2).toUpperCase()}`,
+        kind: 'rclone',
+        source: 'rclone-profile',
+        profileId: profile.id,
+        remoteName: profile.remoteName,
+        remoteType: remote?.type || null,
+        destinationPath: profile.destinationPath || '',
+        publicBaseUrl: profile.publicBaseUrl || '',
+        enabled: profile.enabled !== false,
+        supportsStream: Boolean(profile.publicBaseUrl),
+        supportsReupload: true,
+        supportsCopy: true
+      };
+    });
+  }
+
+  _buildProviderCatalog(configs = {}, rcloneConfig = null) {
+    const catalog = [...this._getStaticProviderCatalog(), ...this._buildRcloneProviderCatalog(rcloneConfig)];
+    return catalog.map((item) => {
+      const configEntry = configs?.[item.id] || null;
+      const enabledByConfig = configEntry?.enabled !== false;
+      const enabled = item.enabled !== false && enabledByConfig;
+
+      return {
+        ...item,
+        enabled,
+        configured: item.kind === 'rclone' ? Boolean(item.remoteName) : true
+      };
+    });
   }
 
   _mapFolderRow(row) {
@@ -164,10 +213,6 @@ class DatabaseHandler {
 
   _buildProviders(providerRows = []) {
     const providers = {};
-
-    for (const provider of DEFAULT_PROVIDERS) {
-      providers[provider] = defaultProviderStatus();
-    }
 
     for (const row of providerRows) {
       providers[row.provider] = {
@@ -385,7 +430,7 @@ class DatabaseHandler {
       [now, now]
     );
 
-    for (const provider of DEFAULT_PROVIDERS) {
+    for (const provider of STATIC_PROVIDER_IDS) {
       await this.pool.query(
         `INSERT INTO provider_configs (provider, enabled, config, updated_at)
          VALUES (?, 1, '{}', ?)
@@ -402,21 +447,10 @@ class DatabaseHandler {
     }
 
     await this.pool.query(
-      `DELETE FROM provider_configs WHERE provider NOT IN (${DEFAULT_PROVIDERS.map(() => '?').join(',')})`,
-      DEFAULT_PROVIDERS
-    );
-
-    await this.pool.query(
-      `DELETE FROM provider_checks WHERE provider NOT IN (${DEFAULT_PROVIDERS.map(() => '?').join(',')})`,
-      DEFAULT_PROVIDERS
-    );
-
-    await this.pool.query(
       `INSERT INTO system_state (id, last_check, next_scheduled_check, primary_provider, updated_at)
        VALUES (1, NULL, NULL, 'catbox', ?)
-       ON DUPLICATE KEY UPDATE
-         primary_provider = IF(primary_provider IN (${DEFAULT_PROVIDERS.map(() => '?').join(',')}), primary_provider, 'catbox')`,
-      [now, ...DEFAULT_PROVIDERS]
+       ON DUPLICATE KEY UPDATE id = id`,
+      [now]
     );
 
     await this.pool.query(
@@ -430,6 +464,8 @@ class DatabaseHandler {
     for (const row of files) {
       await this._ensureFileProvidersForFile(this.pool, row.id);
     }
+
+    await this._migrateLegacyRcloneProviderRows();
   }
 
   async _ready() {
@@ -456,7 +492,7 @@ class DatabaseHandler {
   async _ensureFileProvidersForFile(connection, fileId) {
     const now = this._now();
 
-    for (const provider of DEFAULT_PROVIDERS) {
+    for (const provider of STATIC_PROVIDER_IDS) {
       await connection.query(
         `INSERT INTO file_providers
           (file_id, provider, status, url, remote_file_id, embed_url, error, url_history, updated_at)
@@ -465,6 +501,69 @@ class DatabaseHandler {
         [fileId, provider, now]
       );
     }
+  }
+
+  async _migrateLegacyRcloneProviderRows(connection = this.pool) {
+    const [stateRows] = await connection.query('SELECT default_profile_id FROM rclone_state WHERE id = 1 LIMIT 1');
+    const defaultProfileId = String(stateRows[0]?.default_profile_id || '').trim();
+    if (!defaultProfileId) {
+      return;
+    }
+
+    const targetProviderId = buildRcloneProfileProviderId(defaultProfileId);
+
+    await connection.query(
+      `UPDATE file_providers fp
+       SET provider = ?
+       WHERE fp.provider = ?
+         AND NOT EXISTS (
+           SELECT 1
+           FROM file_providers existing
+           WHERE existing.file_id = fp.file_id
+             AND existing.provider = ?
+         )`,
+      [targetProviderId, LEGACY_RCLONE_PROVIDER_ID, targetProviderId]
+    );
+
+    await connection.query(
+      'DELETE FROM file_providers WHERE provider = ?',
+      [LEGACY_RCLONE_PROVIDER_ID]
+    );
+
+    await connection.query(
+      `UPDATE provider_configs pc
+       SET provider = ?
+       WHERE pc.provider = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM provider_configs existing WHERE existing.provider = ?
+         )`,
+      [targetProviderId, LEGACY_RCLONE_PROVIDER_ID, targetProviderId]
+    );
+
+    await connection.query(
+      'DELETE FROM provider_configs WHERE provider = ?',
+      [LEGACY_RCLONE_PROVIDER_ID]
+    );
+
+    await connection.query(
+      `UPDATE provider_checks pc
+       SET provider = ?
+       WHERE pc.provider = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM provider_checks existing WHERE existing.provider = ?
+         )`,
+      [targetProviderId, LEGACY_RCLONE_PROVIDER_ID, targetProviderId]
+    );
+
+    await connection.query(
+      'DELETE FROM provider_checks WHERE provider = ?',
+      [LEGACY_RCLONE_PROVIDER_ID]
+    );
+
+    await connection.query(
+      'UPDATE system_state SET primary_provider = ?, updated_at = ? WHERE id = 1 AND primary_provider = ?',
+      [targetProviderId, this._now(), LEGACY_RCLONE_PROVIDER_ID]
+    );
   }
 
   async _getSystemState() {
@@ -522,16 +621,22 @@ class DatabaseHandler {
 
   async _getSystemPayload() {
     const state = await this._getSystemState();
-    const providerChecks = await this.getProviderCheckStatuses();
     const rclone = await this.getRcloneConfig();
+    const providerConfigs = await this.getProviderConfigs();
+    const providerCatalog = this._buildProviderCatalog(providerConfigs, rclone);
+    const providerChecks = await this.getProviderCheckStatuses();
+
+    const hasPrimary = providerCatalog.some((item) => item.id === state.primary_provider);
+    const fallbackPrimary = providerCatalog.find((item) => item.enabled)?.id
+      || providerCatalog[0]?.id
+      || 'catbox';
 
     return {
       lastCheck: state.last_check,
       nextScheduledCheck: state.next_scheduled_check,
-      primaryProvider: DEFAULT_PROVIDERS.includes(state.primary_provider)
-        ? state.primary_provider
-        : 'catbox',
+      primaryProvider: hasPrimary ? state.primary_provider : fallbackPrimary,
       providerChecks,
+      providerCatalog,
       rclone
     };
   }
@@ -1442,9 +1547,33 @@ class DatabaseHandler {
 
   // ==================== PROVIDER CONFIG OPERATIONS ====================
 
+  async _getProviderConfigRowsMap() {
+    const [rows] = await this.pool.query('SELECT * FROM provider_configs');
+    const configs = {};
+
+    for (const row of rows) {
+      configs[row.provider] = {
+        enabled: toBool(row.enabled),
+        config: parseJson(row.config, {}) || {},
+        updatedAt: row.updated_at || null
+      };
+    }
+
+    return configs;
+  }
+
   async updateProviderConfig(provider, config) {
     this._assertProviderSupported(provider);
     await this._ready();
+
+    const providerCatalog = await this.getProviderCatalog({ includeDisabled: true });
+    const existsInCatalog = providerCatalog.some((item) => item.id === provider);
+    const isStatic = STATIC_PROVIDER_IDS.includes(provider);
+    const isLegacy = provider === LEGACY_RCLONE_PROVIDER_ID;
+
+    if (!existsInCatalog && !isStatic && !isLegacy) {
+      throw new Error(`Provider '${provider}' not found`);
+    }
 
     const configs = await this.getProviderConfigs();
     const current = configs[provider] || { enabled: true, config: {} };
@@ -1478,31 +1607,78 @@ class DatabaseHandler {
 
   async getProviderConfigs() {
     await this._ready();
-    const [rows] = await this.pool.query('SELECT * FROM provider_configs');
+    const rowConfigs = await this._getProviderConfigRowsMap();
+    const rcloneConfig = await this.getRcloneConfig();
+    const catalog = this._buildProviderCatalog(rowConfigs, rcloneConfig);
 
     const configs = {};
-
-    for (const provider of DEFAULT_PROVIDERS) {
-      configs[provider] = { enabled: true, config: {} };
+    for (const provider of catalog) {
+      const row = rowConfigs[provider.id] || null;
+      configs[provider.id] = {
+        enabled: provider.enabled !== false,
+        config: row?.config || {},
+        updatedAt: row?.updatedAt || null,
+        name: provider.name,
+        kind: provider.kind,
+        source: provider.source,
+        profileId: provider.profileId || null,
+        remoteName: provider.remoteName || null,
+        remoteType: provider.remoteType || null,
+        supportsStream: provider.supportsStream !== false,
+        supportsReupload: provider.supportsReupload !== false,
+        supportsCopy: provider.supportsCopy !== false,
+        configured: provider.configured !== false
+      };
     }
 
-    for (const row of rows) {
-      if (!DEFAULT_PROVIDERS.includes(row.provider)) continue;
-
-      configs[row.provider] = {
-        enabled: toBool(row.enabled),
-        config: parseJson(row.config, {}) || {},
-        updatedAt: row.updated_at || null
+    for (const [providerId, row] of Object.entries(rowConfigs)) {
+      if (configs[providerId]) continue;
+      configs[providerId] = {
+        enabled: row.enabled !== false,
+        config: row.config || {},
+        updatedAt: row.updatedAt || null,
+        name: providerId,
+        kind: isRcloneProfileProviderId(providerId) ? 'rclone' : 'unknown',
+        source: 'config',
+        profileId: parseRcloneProfileId(providerId),
+        remoteName: null,
+        remoteType: null,
+        supportsStream: false,
+        supportsReupload: true,
+        supportsCopy: true,
+        configured: true
       };
     }
 
     return configs;
   }
 
+  async getProviderCatalog(options = {}) {
+    await this._ready();
+
+    const includeDisabled = options.includeDisabled !== false;
+    const rowConfigs = await this._getProviderConfigRowsMap();
+    const rcloneConfig = await this.getRcloneConfig();
+    const catalog = this._buildProviderCatalog(rowConfigs, rcloneConfig);
+
+    if (includeDisabled) {
+      return catalog;
+    }
+
+    return catalog.filter((item) => item.enabled !== false);
+  }
+
+  async getEnabledProviderIds() {
+    const catalog = await this.getProviderCatalog({ includeDisabled: false });
+    return catalog.map((item) => item.id);
+  }
+
   // ==================== STATS & HEALTH ====================
 
   async getStats() {
     await this._ready();
+
+    const providerCatalog = await this.getProviderCatalog();
 
     const [fileTotals] = await this.pool.query('SELECT COUNT(*) AS count FROM files');
     const [jobTotals] = await this.pool.query('SELECT COUNT(*) AS count FROM jobs');
@@ -1512,8 +1688,8 @@ class DatabaseHandler {
       'SELECT provider, status, COUNT(*) AS count FROM file_providers GROUP BY provider, status'
     );
 
-    const providerStats = DEFAULT_PROVIDERS.reduce((acc, provider) => {
-      acc[provider] = { pending: 0, completed: 0, failed: 0 };
+    const providerStats = providerCatalog.reduce((acc, provider) => {
+      acc[provider.id] = { pending: 0, completed: 0, failed: 0 };
       return acc;
     }, {});
 
@@ -1624,14 +1800,30 @@ class DatabaseHandler {
 
   async getPrimaryProvider() {
     const state = await this._getSystemState();
-    return DEFAULT_PROVIDERS.includes(state.primary_provider)
-      ? state.primary_provider
-      : 'catbox';
+    const providerCatalog = await this.getProviderCatalog();
+    const hasPrimary = providerCatalog.some((item) => item.id === state.primary_provider);
+    if (hasPrimary) {
+      return state.primary_provider;
+    }
+
+    return providerCatalog.find((item) => item.enabled !== false)?.id
+      || providerCatalog[0]?.id
+      || 'catbox';
   }
 
   async setPrimaryProvider(provider) {
     this._assertProviderSupported(provider);
     await this._ready();
+
+    const providerCatalog = await this.getProviderCatalog();
+    const target = providerCatalog.find((item) => item.id === provider);
+    if (!target) {
+      throw new Error(`Provider '${provider}' not found`);
+    }
+
+    if (target.enabled === false) {
+      throw new Error('Primary provider must be enabled');
+    }
 
     await this.pool.query(
       'UPDATE system_state SET primary_provider = ?, updated_at = ? WHERE id = 1',
@@ -1656,9 +1848,10 @@ class DatabaseHandler {
         parameters: parseJson(row.parameters, {}) || {}
       })),
       syncProfiles: profileRows.map((row) => ({
+        providerId: buildRcloneProfileProviderId(row.id),
         id: row.id,
         name: row.name,
-        provider: row.provider,
+        provider: row.provider || 'rclone',
         remoteName: row.remote_name,
         destinationPath: row.destination_path || '',
         publicBaseUrl: row.public_base_url || '',
@@ -1682,9 +1875,8 @@ class DatabaseHandler {
     });
 
     const normalizeProfile = (profile = {}) => ({
-      id: String(profile.id || uuidv4()).trim(),
+      id: String(profile.id || uuidv4()).trim().slice(0, 48),
       name: String(profile.name || '').trim(),
-      provider: String(profile.provider || 'rclone').trim(),
       remoteName: String(profile.remoteName || '').trim(),
       destinationPath: String(profile.destinationPath || '').trim(),
       publicBaseUrl: String(profile.publicBaseUrl || '').trim(),
@@ -1729,6 +1921,8 @@ class DatabaseHandler {
       }
 
       for (const profile of syncProfiles) {
+        const providerId = buildRcloneProfileProviderId(profile.id);
+
         await connection.query(
           `INSERT INTO rclone_sync_profiles
             (id, name, provider, remote_name, destination_path, public_base_url, enabled, updated_at)
@@ -1736,7 +1930,7 @@ class DatabaseHandler {
           [
             profile.id,
             profile.name,
-            profile.provider,
+            'rclone',
             profile.remoteName,
             profile.destinationPath,
             profile.publicBaseUrl,
@@ -1744,6 +1938,43 @@ class DatabaseHandler {
             now
           ]
         );
+
+        await connection.query(
+          `INSERT INTO provider_configs (provider, enabled, config, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE
+             enabled = VALUES(enabled),
+             updated_at = VALUES(updated_at)`,
+          [providerId, profile.enabled ? 1 : 0, '{}', now]
+        );
+
+        await connection.query(
+          `INSERT INTO provider_checks (provider, payload, checked_at)
+           VALUES (?, NULL, NULL)
+           ON DUPLICATE KEY UPDATE provider = provider`,
+          [providerId]
+        );
+      }
+
+      const activeRcloneProviderIds = syncProfiles.map((profile) => buildRcloneProfileProviderId(profile.id));
+      if (activeRcloneProviderIds.length > 0) {
+        const placeholders = activeRcloneProviderIds.map(() => '?').join(',');
+        await connection.query(
+          `DELETE FROM provider_configs
+           WHERE provider LIKE 'rclone:%'
+             AND provider NOT IN (${placeholders})`,
+          activeRcloneProviderIds
+        );
+
+        await connection.query(
+          `DELETE FROM provider_checks
+           WHERE provider LIKE 'rclone:%'
+             AND provider NOT IN (${placeholders})`,
+          activeRcloneProviderIds
+        );
+      } else {
+        await connection.query("DELETE FROM provider_configs WHERE provider LIKE 'rclone:%'");
+        await connection.query("DELETE FROM provider_checks WHERE provider LIKE 'rclone:%'");
       }
 
       await connection.query(
@@ -1761,6 +1992,8 @@ class DatabaseHandler {
           now
         ]
       );
+
+      await this._migrateLegacyRcloneProviderRows(connection);
     });
 
     return this.getRcloneConfig();
@@ -1805,14 +2038,14 @@ class DatabaseHandler {
   async getProviderCheckStatuses() {
     await this._ready();
     const [rows] = await this.pool.query('SELECT * FROM provider_checks');
+    const catalog = await this.getProviderCatalog();
 
     const checks = {};
-    for (const provider of DEFAULT_PROVIDERS) {
-      checks[provider] = null;
+    for (const provider of catalog) {
+      checks[provider.id] = null;
     }
 
     for (const row of rows) {
-      if (!DEFAULT_PROVIDERS.includes(row.provider)) continue;
       checks[row.provider] = parseJson(row.payload, null);
     }
 

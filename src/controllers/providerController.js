@@ -1,5 +1,4 @@
 const { db, uploaderService } = require('../services/runtime');
-const config = require('../config');
 
 const providerController = {
   async list(req, res) {
@@ -8,7 +7,16 @@ const providerController = {
       const sanitized = Object.entries(configs).reduce((acc, [key, value]) => {
         acc[key] = {
           enabled: value.enabled,
-          configured: Object.keys(value.config).length > 0
+          configured: value.configured !== false,
+          name: value.name || key,
+          kind: value.kind || 'unknown',
+          source: value.source || 'config',
+          profileId: value.profileId || null,
+          remoteName: value.remoteName || null,
+          remoteType: value.remoteType || null,
+          supportsStream: value.supportsStream !== false,
+          supportsReupload: value.supportsReupload !== false,
+          supportsCopy: value.supportsCopy !== false
         };
         return acc;
       }, {});
@@ -71,9 +79,12 @@ const providerController = {
   async checkBulk(req, res) {
     try {
       const { providers, autoReuploadMissing = false } = req.body || {};
+      const providerCatalog = await uploaderService.getProviderCatalog({ includeDisabled: false });
+      const availableProviderIds = new Set(providerCatalog.map((item) => item.id));
+
       const selectedProviders = Array.isArray(providers) && providers.length > 0
-        ? providers.filter((provider) => config.supportedProviders.includes(provider))
-        : [...config.supportedProviders];
+        ? providers.filter((provider) => availableProviderIds.has(provider))
+        : providerCatalog.map((item) => item.id);
 
       if (selectedProviders.length === 0) {
         return res.status(400).json({ success: false, error: 'No valid providers selected' });

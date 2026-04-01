@@ -19,6 +19,10 @@ const { RcloneAdapter } = require('../providers/rclone');
 const { VoeSxAdapter } = require('../providers/voesx');
 const { CatboxAdapter } = require('../providers/catbox');
 const { SeekStreamingAdapter } = require('../providers/seekstreaming');
+const {
+  LEGACY_RCLONE_PROVIDER_ID,
+  buildRcloneProfileProviderId
+} = require('./providerRegistry');
 
 const { maxConcurrentUploads, maxConcurrentProviders, retryAttempts, retryDelay, timeout, probeTimeout, downloadTimeout } = config.upload;
 const MAX_CONCURRENT_UPLOADS = maxConcurrentUploads;
@@ -36,7 +40,6 @@ const ALLOWED_TRANSFER_SOURCE_HOSTS = new Set([
   'files.catbox.moe',
   'litterbox.catbox.moe'
 ]);
-const ALLOWED_REUPLOAD_SOURCES = ['catbox', 'rclone', 'seekstreaming'];
 
 class UploaderService extends EventEmitter {
   constructor(dbHandler) {
@@ -47,29 +50,110 @@ class UploaderService extends EventEmitter {
     this.processingJobIds = new Set();
     this.localCleanupTimers = new Map();
     this.providerLimit = pLimit(MAX_CONCURRENT_PROVIDERS);
-    
-    // Initialize provider adapters
-    this.adapters = {
-      rclone: new RcloneAdapter({ db: this.db }),
+
+    this.staticAdapters = {
       voesx: new VoeSxAdapter(),
       catbox: new CatboxAdapter(),
       seekstreaming: new SeekStreamingAdapter()
     };
-    this.providerNames = Object.keys(this.adapters);
 
-    // Provider-specific rate limiters
-    this.uploadLimits = {
-      rclone: pLimit(MAX_CONCURRENT_UPLOADS),
-      voesx: pLimit(MAX_CONCURRENT_UPLOADS),
-      catbox: pLimit(MAX_CONCURRENT_UPLOADS),
-      seekstreaming: pLimit(MAX_CONCURRENT_UPLOADS)
-    };
+    this.adapters = { ...this.staticAdapters };
+    this.providerCatalogById = new Map();
+    this.providerNames = Object.keys(this.adapters);
+    this.uploadLimits = {};
+    for (const provider of this.providerNames) {
+      this.uploadLimits[provider] = pLimit(MAX_CONCURRENT_UPLOADS);
+    }
   }
 
-  _ensureProviderSupported(provider) {
-    if (!this.providerNames.includes(provider)) {
-      throw new Error(`Provider '${provider}' is not supported`);
+  _ensureUploadLimit(provider) {
+    if (!this.uploadLimits[provider]) {
+      this.uploadLimits[provider] = pLimit(MAX_CONCURRENT_UPLOADS);
     }
+    return this.uploadLimits[provider];
+  }
+
+  async _refreshProviderRuntime() {
+    const providerCatalog = await this.db.getProviderCatalog();
+    const nextAdapters = { ...this.staticAdapters };
+    const nextCatalogById = new Map(providerCatalog.map((item) => [item.id, item]));
+
+    for (const provider of providerCatalog) {
+      if (provider.kind !== 'rclone') {
+        continue;
+      }
+
+      nextAdapters[provider.id] = new RcloneAdapter({
+        db: this.db,
+        providerName: provider.id,
+        profileId: provider.profileId || null
+      });
+    }
+
+    this.adapters = nextAdapters;
+    this.providerCatalogById = nextCatalogById;
+    this.providerNames = Object.keys(nextAdapters);
+
+    for (const provider of this.providerNames) {
+      this._ensureUploadLimit(provider);
+    }
+
+    return providerCatalog;
+  }
+
+  async _resolveLegacyRcloneProvider() {
+    const rclone = await this.db.getRcloneConfig();
+    const candidates = [];
+
+    if (rclone?.defaultProfileId) {
+      candidates.push(buildRcloneProfileProviderId(rclone.defaultProfileId));
+    }
+
+    for (const profile of rclone?.syncProfiles || []) {
+      if (profile?.id) {
+        candidates.push(buildRcloneProfileProviderId(profile.id));
+      }
+    }
+
+    for (const candidate of candidates) {
+      if (this.adapters[candidate]) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
+  async _resolveProviderId(provider, options = {}) {
+    const allowDisabled = options.allowDisabled !== false;
+
+    await this._refreshProviderRuntime();
+
+    const normalized = String(provider || '').trim();
+    if (!normalized) {
+      throw new Error('Provider is required');
+    }
+
+    let resolved = normalized;
+
+    if (!this.adapters[resolved] && resolved === LEGACY_RCLONE_PROVIDER_ID) {
+      const legacyMapped = await this._resolveLegacyRcloneProvider();
+      if (legacyMapped) {
+        resolved = legacyMapped;
+      }
+    }
+
+    const adapter = this.adapters[resolved];
+    if (!adapter) {
+      throw new Error(`Provider '${normalized}' is not supported`);
+    }
+
+    const providerMeta = this.providerCatalogById.get(resolved) || null;
+    if (!allowDisabled && providerMeta && providerMeta.enabled === false) {
+      throw new Error(`Provider ${resolved} is disabled`);
+    }
+
+    return resolved;
   }
 
   /**
@@ -77,6 +161,8 @@ class UploaderService extends EventEmitter {
    */
   async start() {
     if (this.isRunning) return;
+
+    await this._refreshProviderRuntime();
     
     this.isRunning = true;
     console.log('[Uploader] Service started');
@@ -127,15 +213,28 @@ class UploaderService extends EventEmitter {
 
     await this.db.updateFileProgress(fileId, 'upload', 0);
 
-    const providerConfigs = await this.db.getProviderConfigs();
-    const allProviders = config.supportedProviders;
+    const providerCatalog = await this._refreshProviderRuntime();
+    const enabledProviders = providerCatalog
+      .filter((item) => item.enabled !== false)
+      .map((item) => item.id);
     
     // Use selected providers if provided, otherwise use all enabled providers
     let providers;
     if (selectedProviders && selectedProviders.length > 0) {
-      providers = selectedProviders.filter(p => providerConfigs?.[p]?.enabled !== false);
+      const resolved = [];
+      for (const provider of selectedProviders) {
+        try {
+          const providerId = await this._resolveProviderId(provider, { allowDisabled: false });
+          if (!resolved.includes(providerId)) {
+            resolved.push(providerId);
+          }
+        } catch (_) {
+          // Ignore invalid providers in payload.
+        }
+      }
+      providers = resolved;
     } else {
-      providers = allProviders.filter((provider) => providerConfigs?.[provider]?.enabled !== false);
+      providers = enabledProviders;
     }
 
     if (providers.length === 0) {
@@ -168,8 +267,16 @@ class UploaderService extends EventEmitter {
   }
 
   async _getPrimaryProvider() {
+    await this._refreshProviderRuntime();
+
     const provider = await this.db.getPrimaryProvider();
-    return this.providerNames.includes(provider) ? provider : 'catbox';
+    if (this.providerNames.includes(provider)) {
+      return provider;
+    }
+
+    return this.providerNames.includes('catbox')
+      ? 'catbox'
+      : this.providerNames[0] || 'catbox';
   }
 
   _getProviderDownloadUrl(provider, status) {
@@ -193,8 +300,22 @@ class UploaderService extends EventEmitter {
     return url;
   }
 
+  _getSeekstreamingDownloadUrls(status) {
+    const adapter = this.adapters.seekstreaming;
+    if (!adapter) {
+      return [];
+    }
+
+    if (typeof adapter.getDownloadUrlCandidates === 'function') {
+      return adapter.getDownloadUrlCandidates(status).filter(Boolean);
+    }
+
+    const singleUrl = adapter.getDownloadUrl(status);
+    return singleUrl ? [singleUrl] : [];
+  }
+
   _getSourceHeaders(sourceUrl) {
-    if (sourceUrl.includes('emergingtechhubonline.store')) {
+    if (sourceUrl.includes('emergingtechhubonline.store') || sourceUrl.includes('technologyevolution.space')) {
       return this.adapters.seekstreaming.getDownloadHeaders();
     }
 
@@ -297,6 +418,7 @@ class UploaderService extends EventEmitter {
 
   async _resolveRemoteSource(file, options = {}) {
     const { excludeProvider = null, preferPrimary = true, specificProvider = null } = options;
+    await this._refreshProviderRuntime();
     const primaryProvider = await this._getPrimaryProvider();
     const candidates = [];
 
@@ -306,7 +428,12 @@ class UploaderService extends EventEmitter {
       candidates.push(primaryProvider);
     }
 
-    for (const provider of this.providerNames) {
+    const discoveredProviders = new Set([
+      ...this.providerNames,
+      ...Object.keys(file.providers || {})
+    ]);
+
+    for (const provider of discoveredProviders) {
       if (provider === excludeProvider || candidates.includes(provider)) {
         continue;
       }
@@ -315,12 +442,24 @@ class UploaderService extends EventEmitter {
 
     for (const provider of candidates) {
       const status = file.providers?.[provider];
-      const sourceUrl = this._getProviderDownloadUrl(provider, status);
+      let sourceUrl = this._getProviderDownloadUrl(provider, status);
+      let fallbackUrls = [];
+      const adapter = this.adapters[provider] || null;
+      const canDownloadByFileId = Boolean(adapter && typeof adapter.download === 'function' && status?.fileId);
 
-      if (sourceUrl) {
+      if (provider === 'seekstreaming') {
+        const candidateUrls = this._getSeekstreamingDownloadUrls(status);
+        if (candidateUrls.length > 0) {
+          sourceUrl = candidateUrls[0];
+          fallbackUrls = candidateUrls.slice(1);
+        }
+      }
+
+      if (sourceUrl || canDownloadByFileId) {
         return {
           provider,
           sourceUrl,
+          fallbackUrls,
           isPrimary: provider === primaryProvider
         };
       }
@@ -338,7 +477,20 @@ class UploaderService extends EventEmitter {
 
     await fs.ensureDir(UPLOAD_DIR);
     const tempPath = path.join(UPLOAD_DIR, `reupload-${file.id}-${Date.now()}-${file.name}`);
-    await this._downloadSourceFile(remoteSource.sourceUrl, tempPath);
+
+    const sourceStatus = file.providers?.[remoteSource.provider] || {};
+    const sourceAdapter = this.adapters[remoteSource.provider] || null;
+    const canDownloadByFileId = Boolean(sourceAdapter && typeof sourceAdapter.download === 'function' && sourceStatus.fileId);
+
+    if (canDownloadByFileId) {
+      await sourceAdapter.download(sourceStatus.fileId, tempPath);
+    } else if (remoteSource.sourceUrl) {
+      await this._downloadSourceFile(remoteSource.sourceUrl, tempPath, {
+        fallbackUrls: remoteSource.fallbackUrls
+      });
+    } else {
+      throw new Error(`No downloadable source for provider '${remoteSource.provider}'`);
+    }
 
     return {
       ...remoteSource,
@@ -479,28 +631,29 @@ class UploaderService extends EventEmitter {
   async reuploadToProvider(fileId, provider, source) {
     console.log(`[Uploader] Re-uploading file ${fileId} to ${provider} from source ${source}`);
 
+    const targetProviderId = await this._resolveProviderId(provider, { allowDisabled: false });
     const file = await this.db.getFile(fileId);
-    const providerConfigs = await this.db.getProviderConfigs();
-
-    if (providerConfigs?.[provider]?.enabled === false) {
-      throw new Error(`Provider ${provider} is disabled`);
-    }
 
     if (!source) {
       throw new Error('Source is required for reupload');
     }
 
-    if (!ALLOWED_REUPLOAD_SOURCES.includes(source)) {
-      throw new Error(`Source must be one of: ${ALLOWED_REUPLOAD_SOURCES.join(', ')}`);
+    let sourceProviderId = String(source).trim();
+    if (!file.providers?.[sourceProviderId]) {
+      try {
+        sourceProviderId = await this._resolveProviderId(sourceProviderId, { allowDisabled: true });
+      } catch (_) {
+        // Keep original source identifier for compatibility lookup.
+      }
     }
 
-    if (source === provider) {
+    if (sourceProviderId === targetProviderId) {
       throw new Error('Source cannot be the same as target provider');
     }
 
-    const sourceStatus = file.providers?.[source];
+    const sourceStatus = file.providers?.[sourceProviderId];
     if (!sourceStatus || sourceStatus.status !== 'completed') {
-      throw new Error(`Source provider '${source}' is not available or not completed`);
+      throw new Error(`Source provider '${sourceProviderId}' is not available or not completed`);
     }
 
     let sourcePath = null;
@@ -509,13 +662,16 @@ class UploaderService extends EventEmitter {
     if (file.localPath && await fs.pathExists(file.localPath)) {
       sourcePath = file.localPath;
     } else {
-      const downloadedSource = await this._downloadRemoteSourceToTemp(file, { excludeProvider: provider, specificProvider: source });
+      const downloadedSource = await this._downloadRemoteSourceToTemp(file, {
+        excludeProvider: targetProviderId,
+        specificProvider: sourceProviderId
+      });
       sourcePath = downloadedSource.filePath;
       cleanupAfterUpload = downloadedSource.needsCleanup;
     }
 
     // Reset provider status
-    await this.db.updateProviderStatus(fileId, provider, 'pending', null, null, null, { embedUrl: null });
+    await this.db.updateProviderStatus(fileId, targetProviderId, 'pending', null, null, null, { embedUrl: null });
 
     // Create new job
     const job = await this.db.createJob({
@@ -523,7 +679,7 @@ class UploaderService extends EventEmitter {
       fileId,
       maxAttempts: UPLOAD_RETRY_ATTEMPTS,
       metadata: {
-        provider,
+        provider: targetProviderId,
         filePath: sourcePath,
         folderId: file.folderId,
         fileName: file.name,
@@ -532,10 +688,14 @@ class UploaderService extends EventEmitter {
       }
     });
 
-    this.emit('upload:queued', { fileId, jobs: [{ provider, jobId: job.id }], enabledProviders: [provider] });
+    this.emit('upload:queued', {
+      fileId,
+      jobs: [{ provider: targetProviderId, jobId: job.id }],
+      enabledProviders: [targetProviderId]
+    });
     this._processQueue();
 
-    return { fileId, provider, jobId: job.id };
+    return { fileId, provider: targetProviderId, source: sourceProviderId, jobId: job.id };
   }
 
   _assertTransferSourceUrl(sourceUrl) {
@@ -633,12 +793,7 @@ class UploaderService extends EventEmitter {
 
   async queueTransferJob({ sourceUrl, targetProvider = 'seekstreaming', folderId = 'root', filename = null }) {
     this._assertTransferSourceUrl(sourceUrl);
-    this._ensureProviderSupported(targetProvider);
-
-    const providerConfigs = await this.db.getProviderConfigs();
-    if (providerConfigs?.[targetProvider]?.enabled === false) {
-      throw new Error(`Target provider ${targetProvider} is disabled`);
-    }
+    const targetProviderId = await this._resolveProviderId(targetProvider, { allowDisabled: false });
 
     const sourceCheck = await this._checkSourceAvailability(sourceUrl);
     if (!sourceCheck.available) {
@@ -664,7 +819,7 @@ class UploaderService extends EventEmitter {
         sourceProvider: 'catbox',
         sourceUrl,
         sourceCheck,
-        targetProvider,
+        targetProvider: targetProviderId,
         filePath: localPath,
         folderId,
         fileName
@@ -676,7 +831,7 @@ class UploaderService extends EventEmitter {
       jobId: job.id,
       sourceProvider: 'catbox',
       sourceUrl,
-      targetProvider
+      targetProvider: targetProviderId
     });
 
     this._processQueue();
@@ -686,7 +841,7 @@ class UploaderService extends EventEmitter {
       jobId: job.id,
       sourceProvider: 'catbox',
       sourceUrl,
-      targetProvider,
+      targetProvider: targetProviderId,
       fileName
     };
   }
@@ -695,6 +850,8 @@ class UploaderService extends EventEmitter {
    * Check all providers status
    */
   async checkProvidersStatus() {
+    await this._refreshProviderRuntime();
+
     const results = {};
     const providerConfigs = await this.db.getProviderConfigs();
     
@@ -734,10 +891,8 @@ class UploaderService extends EventEmitter {
    * Check single provider status and persist snapshot
    */
   async checkSingleProviderStatus(provider) {
-    const adapter = this.adapters[provider];
-    if (!adapter) {
-      throw new Error(`Provider '${provider}' not found`);
-    }
+    const resolvedProvider = await this._resolveProviderId(provider, { allowDisabled: true });
+    const adapter = this.adapters[resolvedProvider];
 
     const providerConfigs = await this.db.getProviderConfigs();
 
@@ -745,10 +900,10 @@ class UploaderService extends EventEmitter {
       const status = await adapter.checkStatus();
       const enriched = {
         ...status,
-        enabled: providerConfigs?.[provider]?.enabled !== false
+        enabled: providerConfigs?.[resolvedProvider]?.enabled !== false
       };
 
-      await this.db.setProviderCheckStatus(provider, {
+      await this.db.setProviderCheckStatus(resolvedProvider, {
         ...enriched,
         source: 'manual'
       });
@@ -756,14 +911,14 @@ class UploaderService extends EventEmitter {
       return enriched;
     } catch (error) {
       const failed = {
-        name: provider,
+        name: resolvedProvider,
         configured: false,
         authenticated: false,
-        enabled: providerConfigs?.[provider]?.enabled !== false,
+        enabled: providerConfigs?.[resolvedProvider]?.enabled !== false,
         message: `Error: ${error.message}`
       };
 
-      await this.db.setProviderCheckStatus(provider, {
+      await this.db.setProviderCheckStatus(resolvedProvider, {
         ...failed,
         source: 'manual'
       });
@@ -787,8 +942,12 @@ class UploaderService extends EventEmitter {
   }
 
   async _checkProviderFileStatus(provider, status) {
-    if (status.status === 'completed' && status.url) {
+    if (status.status === 'completed' && (status.url || status.fileId)) {
       const adapter = this.adapters[provider];
+
+      if (!adapter) {
+        return { ...status, remoteExists: false, error: `Provider adapter unavailable: ${provider}` };
+      }
 
       try {
         if (provider === 'catbox' && status.url) {
@@ -814,9 +973,9 @@ class UploaderService extends EventEmitter {
    * Check one file status on one provider
    */
   async checkFileProviderStatus(fileId, provider) {
-    this._ensureProviderSupported(provider);
+    const resolvedProvider = await this._resolveProviderId(provider, { allowDisabled: true });
     const file = await this.db.getFile(fileId);
-    const status = file.providers?.[provider] || {
+    const status = file.providers?.[resolvedProvider] || {
       status: 'pending',
       url: null,
       fileId: null,
@@ -824,8 +983,8 @@ class UploaderService extends EventEmitter {
       error: null
     };
 
-    const checkedStatus = await this._checkProviderFileStatus(provider, status);
-    return { [provider]: checkedStatus };
+    const checkedStatus = await this._checkProviderFileStatus(resolvedProvider, status);
+    return { [resolvedProvider]: checkedStatus };
   }
 
   /**
@@ -833,12 +992,12 @@ class UploaderService extends EventEmitter {
    */
   async checkProviderIntegrity(provider, options = {}) {
     const { autoReuploadMissing = false } = options;
-    this._ensureProviderSupported(provider);
+    const resolvedProvider = await this._resolveProviderId(provider, { allowDisabled: true });
 
     const files = await this.db.listFiles();
-    const providerStatus = await this.checkProviderStatus(provider);
+    const providerStatus = await this.checkProviderStatus(resolvedProvider);
     const results = {
-      provider,
+      provider: resolvedProvider,
       checkedAt: new Date().toISOString(),
       totalFiles: files.length,
       checked: 0,
@@ -848,15 +1007,15 @@ class UploaderService extends EventEmitter {
     };
 
     for (const file of files) {
-      const statusResult = await this.checkFileProviderStatus(file.id, provider);
-      const status = statusResult[provider];
+      const statusResult = await this.checkFileProviderStatus(file.id, resolvedProvider);
+      const status = statusResult[resolvedProvider];
       results.checked++;
 
       if (status.status === 'completed' && !status.remoteExists) {
         const issue = {
           fileId: file.id,
           fileName: file.name,
-          provider,
+          provider: resolvedProvider,
           issue: 'File missing on provider'
         };
 
@@ -864,18 +1023,18 @@ class UploaderService extends EventEmitter {
 
         if (autoReuploadMissing) {
           try {
-            const reupload = await this.reuploadToProvider(file.id, provider);
+            const reupload = await this.reuploadToProvider(file.id, resolvedProvider);
             results.reuploadsQueued.push({
               fileId: file.id,
               fileName: file.name,
-              provider,
+              provider: resolvedProvider,
               jobId: reupload.jobId
             });
           } catch (error) {
             results.reuploadsQueued.push({
               fileId: file.id,
               fileName: file.name,
-              provider,
+              provider: resolvedProvider,
               error: error.message
             });
           }
@@ -890,10 +1049,23 @@ class UploaderService extends EventEmitter {
    * Check file status on each provider
    */
   async checkFileProvidersStatus(fileId) {
+    await this._refreshProviderRuntime();
     const file = await this.db.getFile(fileId);
     const results = {};
 
-    for (const [provider, status] of Object.entries(file.providers)) {
+    const providerIds = new Set([
+      ...this.providerNames,
+      ...Object.keys(file.providers || {})
+    ]);
+
+    for (const provider of providerIds) {
+      const status = file.providers?.[provider] || {
+        status: 'pending',
+        url: null,
+        fileId: null,
+        embedUrl: null,
+        error: null
+      };
       results[provider] = await this._checkProviderFileStatus(provider, status);
     }
 
@@ -910,6 +1082,8 @@ class UploaderService extends EventEmitter {
     let transferJobs = [];
 
     try {
+      await this._refreshProviderRuntime();
+
       // Get pending upload jobs
       const pendingJobs = await this.db.getPendingJobs(20);
       uploadJobs = this._claimJobs(pendingJobs.filter(j => j.type === 'upload'));
@@ -952,46 +1126,99 @@ class UploaderService extends EventEmitter {
     }
   }
 
-  async _downloadSourceFile(sourceUrl, destinationPath) {
-    if (sourceUrl.includes('emergingtechhubonline.store') && (sourceUrl.includes('.txt') || sourceUrl.includes('.m3u8'))) {
-      return this._downloadHlsSourceWithFfmpeg(sourceUrl, destinationPath);
+  _isHlsSourceUrl(sourceUrl) {
+    try {
+      const parsed = new URL(String(sourceUrl || ''));
+      const pathname = parsed.pathname.toLowerCase();
+      return pathname.endsWith('.m3u8') || pathname.endsWith('.txt');
+    } catch {
+      const normalized = String(sourceUrl || '').toLowerCase();
+      return normalized.includes('.m3u8') || normalized.includes('.txt');
+    }
+  }
+
+  _isNotFoundDownloadError(error) {
+    const message = String(error?.message || '').toLowerCase();
+    return (
+      message.includes('http 404')
+      || message.includes('status 404')
+      || message.includes('404 not found')
+      || message.includes('server returned 404')
+    );
+  }
+
+  async _downloadSourceFile(sourceUrl, destinationPath, options = {}) {
+    const fallbackUrls = Array.isArray(options.fallbackUrls) ? options.fallbackUrls : [];
+    const candidates = [sourceUrl, ...fallbackUrls].filter(Boolean);
+    const uniqueCandidates = [...new Set(candidates)];
+
+    if (uniqueCandidates.length === 0) {
+      throw new Error('No source URL available for download');
     }
 
-    const response = await axios.get(sourceUrl, {
-      responseType: 'stream',
-      timeout: SOURCE_DOWNLOAD_TIMEOUT,
-      headers: this._getSourceHeaders(sourceUrl),
-      validateStatus: () => true
-    });
+    let lastError = null;
 
-    if (response.status < 200 || response.status >= 400) {
-      if (response.data?.destroy) response.data.destroy();
-      throw new Error(`Source download failed with HTTP ${response.status}`);
+    for (let index = 0; index < uniqueCandidates.length; index += 1) {
+      const candidateUrl = uniqueCandidates[index];
+      const isLastCandidate = index === uniqueCandidates.length - 1;
+
+      try {
+        await fs.remove(destinationPath).catch(() => {});
+
+        if (this._isHlsSourceUrl(candidateUrl)) {
+          const result = await this._downloadHlsSourceWithFfmpeg(candidateUrl, destinationPath);
+          return result;
+        }
+
+        const response = await axios.get(candidateUrl, {
+          responseType: 'stream',
+          timeout: SOURCE_DOWNLOAD_TIMEOUT,
+          headers: this._getSourceHeaders(candidateUrl),
+          validateStatus: () => true
+        });
+
+        if (response.status < 200 || response.status >= 400) {
+          if (response.data?.destroy) response.data.destroy();
+          throw new Error(`Source download failed with HTTP ${response.status}`);
+        }
+
+        await fs.ensureDir(path.dirname(destinationPath));
+        const writer = fs.createWriteStream(destinationPath);
+
+        await new Promise((resolve, reject) => {
+          response.data.pipe(writer);
+          writer.on('finish', resolve);
+          writer.on('error', reject);
+          response.data.on('error', reject);
+        });
+
+        const stat = await fs.stat(destinationPath);
+        if (!stat.size) {
+          throw new Error('Downloaded file is empty');
+        }
+
+        return {
+          size: stat.size,
+          contentType: response.headers['content-type'] || null
+        };
+      } catch (error) {
+        lastError = error;
+
+        if (!this._isNotFoundDownloadError(error) || isLastCandidate) {
+          throw error;
+        }
+
+        const nextCandidateUrl = uniqueCandidates[index + 1];
+        console.warn(`[Uploader] Source 404 on ${candidateUrl}, retrying with ${nextCandidateUrl}`);
+      }
     }
 
-    await fs.ensureDir(path.dirname(destinationPath));
-    const writer = fs.createWriteStream(destinationPath);
-
-    await new Promise((resolve, reject) => {
-      response.data.pipe(writer);
-      writer.on('finish', resolve);
-      writer.on('error', reject);
-      response.data.on('error', reject);
-    });
-
-    const stat = await fs.stat(destinationPath);
-    if (!stat.size) {
-      throw new Error('Downloaded file is empty');
-    }
-
-    return {
-      size: stat.size,
-      contentType: response.headers['content-type'] || null
-    };
+    throw lastError || new Error('Source download failed');
   }
 
   async _processTransferJob(job) {
     const { sourceUrl, targetProvider, filePath, fileName } = job.metadata || {};
+    const resolvedTargetProvider = await this._resolveProviderId(targetProvider, { allowDisabled: true });
     const currentAttempt = job.attempts + 1;
     const isLastAttempt = currentAttempt >= job.maxAttempts;
 
@@ -1004,13 +1231,13 @@ class UploaderService extends EventEmitter {
       attempts: currentAttempt
     });
 
-    await this.db.updateProviderStatus(job.fileId, targetProvider, 'uploading');
+    await this.db.updateProviderStatus(job.fileId, resolvedTargetProvider, 'uploading');
     this.emit('transfer:started', {
       jobId: job.id,
       fileId: job.fileId,
       sourceProvider: 'catbox',
       sourceUrl,
-      targetProvider,
+      targetProvider: resolvedTargetProvider,
       attempt: currentAttempt
     });
 
@@ -1027,21 +1254,21 @@ class UploaderService extends EventEmitter {
       await this.db.updateJob(job.id, { progress: 50 });
 
       const result = await this._uploadWithRetry(
-        targetProvider,
+        resolvedTargetProvider,
         filePath,
         fileName,
         job.fileId,
         job.id
       );
 
-      const verifyResult = await this._verifyUploadedResult(targetProvider, result);
+      const verifyResult = await this._verifyUploadedResult(resolvedTargetProvider, result);
       if (!verifyResult.exists) {
-        throw new Error(`Target verification failed on ${targetProvider}`);
+        throw new Error(`Target verification failed on ${resolvedTargetProvider}`);
       }
 
       await this.db.updateProviderStatus(
         job.fileId,
-        targetProvider,
+        resolvedTargetProvider,
         'completed',
         result.url,
         result.fileId,
@@ -1066,7 +1293,7 @@ class UploaderService extends EventEmitter {
         fileId: job.fileId,
         sourceProvider: 'catbox',
         sourceUrl,
-        targetProvider,
+        targetProvider: resolvedTargetProvider,
         url: result.url,
         fileIdOnTarget: result.fileId
       });
@@ -1077,7 +1304,7 @@ class UploaderService extends EventEmitter {
 
       await this.db.updateProviderStatus(
         job.fileId,
-        targetProvider,
+        resolvedTargetProvider,
         finalStatus,
         null,
         null,
@@ -1095,7 +1322,7 @@ class UploaderService extends EventEmitter {
         fileId: job.fileId,
         sourceProvider: 'catbox',
         sourceUrl,
-        targetProvider,
+        targetProvider: resolvedTargetProvider,
         error: error.message,
         attempt: currentAttempt,
         maxAttempts: job.maxAttempts,
@@ -1224,8 +1451,16 @@ class UploaderService extends EventEmitter {
    * Upload to a specific provider
    */
   async _uploadToProvider(job) {
-    const { provider } = job.metadata;
-    const providerLimit = this.uploadLimits[provider];
+    const requestedProvider = job.metadata?.provider;
+    const provider = await this._resolveProviderId(requestedProvider, { allowDisabled: true });
+
+    if (provider !== requestedProvider) {
+      const nextMetadata = { ...(job.metadata || {}), provider };
+      await this.db.updateJob(job.id, { metadata: nextMetadata });
+      job.metadata = nextMetadata;
+    }
+
+    const providerLimit = this._ensureUploadLimit(provider);
 
     return providerLimit(async () => {
       const { filePath, metadata } = await this._ensureUploadSourceForJob(job);
@@ -1346,6 +1581,10 @@ class UploaderService extends EventEmitter {
     let lastError;
     const adapter = this.adapters[provider];
 
+    if (!adapter || typeof adapter.upload !== 'function') {
+      throw new Error(`Provider adapter unavailable for '${provider}'`);
+    }
+
     for (let attempt = 1; attempt <= UPLOAD_RETRY_ATTEMPTS; attempt++) {
       try {
         // Create abort controller for timeout handling
@@ -1407,12 +1646,26 @@ class UploaderService extends EventEmitter {
    * Cancel upload
    */
   async cancelUpload(jobId, provider) {
-    const controller = this.activeUploads.get(`${jobId}-${provider}`);
-    if (controller) {
+    const keys = [`${jobId}-${provider}`];
+
+    if (provider === LEGACY_RCLONE_PROVIDER_ID) {
+      const mapped = await this._resolveLegacyRcloneProvider();
+      if (mapped) {
+        keys.push(`${jobId}-${mapped}`);
+      }
+    }
+
+    for (const key of keys) {
+      const controller = this.activeUploads.get(key);
+      if (!controller) {
+        continue;
+      }
+
       controller.abort();
-      this.activeUploads.delete(`${jobId}-${provider}`);
+      this.activeUploads.delete(key);
       return true;
     }
+
     return false;
   }
 
@@ -1478,6 +1731,8 @@ class UploaderService extends EventEmitter {
   }
 
   async deleteFileResources(fileId) {
+    await this._refreshProviderRuntime();
+
     const file = await this.db.getFile(fileId);
     const jobs = await this.db.getJobsByFile(fileId);
 
@@ -1497,6 +1752,9 @@ class UploaderService extends EventEmitter {
       if (status.status === 'completed' && status.fileId) {
         try {
           const adapter = this.adapters[provider];
+          if (!adapter || typeof adapter.delete !== 'function') {
+            throw new Error(`Provider adapter unavailable: ${provider}`);
+          }
           await adapter.delete(status.fileId);
           providerDeleteResults[provider] = { success: true, deletedRemote: true };
         } catch (error) {
@@ -1555,12 +1813,26 @@ class UploaderService extends EventEmitter {
    * Retry failed uploads for a file
    */
   async retryFailedUploads(fileId) {
+    await this._refreshProviderRuntime();
+
     const file = await this.db.getFile(fileId);
     const providerConfigs = await this.db.getProviderConfigs();
 
-    const failedProviders = Object.entries(file.providers)
-      .filter(([provider, status]) => status.status === 'failed' && providerConfigs?.[provider]?.enabled !== false)
-      .map(([provider]) => provider);
+    const failedProviders = [];
+    for (const [provider, status] of Object.entries(file.providers || {})) {
+      if (status.status !== 'failed') {
+        continue;
+      }
+
+      try {
+        const resolvedProvider = await this._resolveProviderId(provider, { allowDisabled: false });
+        if (providerConfigs?.[resolvedProvider]?.enabled !== false && !failedProviders.includes(resolvedProvider)) {
+          failedProviders.push(resolvedProvider);
+        }
+      } catch (_) {
+        // Ignore providers that are no longer available.
+      }
+    }
 
     if (failedProviders.length === 0) {
       return { message: 'No failed uploads to retry for enabled providers' };
@@ -1607,6 +1879,8 @@ class UploaderService extends EventEmitter {
    * Delete file from all providers
    */
   async deleteFromProviders(fileId) {
+    await this._refreshProviderRuntime();
+
     const file = await this.db.getFile(fileId);
     const results = {};
 
@@ -1614,6 +1888,9 @@ class UploaderService extends EventEmitter {
       if (status.status === 'completed' && status.fileId) {
         try {
           const adapter = this.adapters[provider];
+          if (!adapter || typeof adapter.delete !== 'function') {
+            throw new Error(`Provider adapter unavailable: ${provider}`);
+          }
           await adapter.delete(status.fileId);
           results[provider] = { success: true };
           
@@ -1632,6 +1909,11 @@ class UploaderService extends EventEmitter {
   /**
    * Get service statistics
    */
+  async getProviderCatalog(options = {}) {
+    await this._refreshProviderRuntime();
+    return this.db.getProviderCatalog(options);
+  }
+
   getStats() {
     return {
       isRunning: this.isRunning,
@@ -1645,19 +1927,13 @@ class UploaderService extends EventEmitter {
    * Uses local file if available, otherwise downloads from source provider
    */
   async copyToProvider(fileId, targetProvider) {
-    this._ensureProviderSupported(targetProvider);
-
+    const targetProviderId = await this._resolveProviderId(targetProvider, { allowDisabled: false });
     const file = await this.db.getFile(fileId);
-    const providerConfigs = await this.db.getProviderConfigs();
-
-    if (providerConfigs?.[targetProvider]?.enabled === false) {
-      throw new Error(`Target provider ${targetProvider} is disabled`);
-    }
 
     // Check if target already has completed upload
-    const targetStatus = file.providers?.[targetProvider];
+    const targetStatus = file.providers?.[targetProviderId];
     if (targetStatus?.status === 'completed') {
-      return { fileId, provider: targetProvider, message: 'Already uploaded to this provider', url: targetStatus.url };
+      return { fileId, provider: targetProviderId, message: 'Already uploaded to this provider', url: targetStatus.url };
     }
 
     const primaryProvider = await this._getPrimaryProvider();
@@ -1666,23 +1942,23 @@ class UploaderService extends EventEmitter {
     let sourcePath = null;
     let needsCleanup = false;
 
-    const preferredRemoteSource = await this._resolveRemoteSource(file, { excludeProvider: targetProvider, preferPrimary: true });
+    const preferredRemoteSource = await this._resolveRemoteSource(file, { excludeProvider: targetProviderId, preferPrimary: true });
 
     if (preferredRemoteSource?.provider === primaryProvider) {
-      const downloadedSource = await this._downloadRemoteSourceToTemp(file, { excludeProvider: targetProvider, preferPrimary: true });
+      const downloadedSource = await this._downloadRemoteSourceToTemp(file, { excludeProvider: targetProviderId, preferPrimary: true });
       sourcePath = downloadedSource.filePath;
       needsCleanup = downloadedSource.needsCleanup;
     } else if (file.localPath && await fs.pathExists(file.localPath)) {
       sourcePath = file.localPath;
     } else {
-      const remoteSource = preferredRemoteSource || await this._resolveRemoteSource(file, { excludeProvider: targetProvider, preferPrimary: false });
+      const remoteSource = preferredRemoteSource || await this._resolveRemoteSource(file, { excludeProvider: targetProviderId, preferPrimary: false });
 
       if (!remoteSource) {
         throw new Error('No source available: local file not found and no provider has completed upload');
       }
 
-      console.log(`[Uploader] Downloading from ${remoteSource.provider} to copy to ${targetProvider}`);
-      const downloadedSource = await this._downloadRemoteSourceToTemp(file, { excludeProvider: targetProvider, preferPrimary: false });
+      console.log(`[Uploader] Downloading from ${remoteSource.provider} to copy to ${targetProviderId}`);
+      const downloadedSource = await this._downloadRemoteSourceToTemp(file, { excludeProvider: targetProviderId, preferPrimary: false });
       sourcePath = downloadedSource.filePath;
       needsCleanup = downloadedSource.needsCleanup;
     }
@@ -1694,7 +1970,7 @@ class UploaderService extends EventEmitter {
         fileId,
         maxAttempts: UPLOAD_RETRY_ATTEMPTS,
         metadata: {
-          provider: targetProvider,
+          provider: targetProviderId,
           filePath: sourcePath,
           folderId: file.folderId,
           fileName: file.name,
@@ -1705,14 +1981,14 @@ class UploaderService extends EventEmitter {
       });
 
       // Update provider status to pending
-      await this.db.updateProviderStatus(fileId, targetProvider, 'pending', null, null, null, { embedUrl: null });
+      await this.db.updateProviderStatus(fileId, targetProviderId, 'pending', null, null, null, { embedUrl: null });
 
-      this.emit('upload:queued', { fileId, jobs: [{ provider: targetProvider, jobId: job.id }], enabledProviders: [targetProvider] });
+      this.emit('upload:queued', { fileId, jobs: [{ provider: targetProviderId, jobId: job.id }], enabledProviders: [targetProviderId] });
 
       // Process queue
       this._processQueue();
 
-      return { fileId, provider: targetProvider, jobId: job.id, message: 'Copy queued for upload' };
+      return { fileId, provider: targetProviderId, jobId: job.id, message: 'Copy queued for upload' };
     } catch (error) {
       // Clean up temp file if we created one
       if (needsCleanup && sourcePath) {

@@ -14,7 +14,6 @@ function createProfile() {
   return {
     id: `profile-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
     name: '',
-    provider: 'rclone',
     remoteName: '',
     destinationPath: '',
     publicBaseUrl: '',
@@ -106,7 +105,6 @@ export default function RcloneConfigPage() {
       ...profile,
       id: String(profile.id || '').trim(),
       name: String(profile.name || '').trim(),
-      provider: String(profile.provider || 'rclone').trim(),
       remoteName: String(profile.remoteName || '').trim(),
       destinationPath: String(profile.destinationPath || '').trim(),
       publicBaseUrl: String(profile.publicBaseUrl || '').trim(),
@@ -246,11 +244,8 @@ export default function RcloneConfigPage() {
           <div className="space-y-3">
             {syncProfiles.map((profile, index) => (
               <div key={profile.id || `profile-${index}`} className="p-3 rounded-lg bg-[#0f0f0f] border border-[#222]">
-                <div className="grid grid-cols-1 md:grid-cols-6 gap-2">
+                <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
                   <input value={profile.name || ''} onChange={(e) => updateProfileField(index, 'name', e.target.value)} className="input" placeholder="profile name" />
-                  <select value={profile.provider || 'rclone'} onChange={(e) => updateProfileField(index, 'provider', e.target.value)} className="input">
-                    <option value="rclone">rclone</option>
-                  </select>
                   <select value={profile.remoteName || ''} onChange={(e) => updateProfileField(index, 'remoteName', e.target.value)} className="input">
                     <option value="">Select remote</option>
                     {remoteNameOptions.map((name) => (

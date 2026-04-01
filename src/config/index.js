@@ -1,6 +1,6 @@
 require('dotenv').config();
 
-const DEFAULT_PROVIDERS = ['voesx', 'catbox', 'seekstreaming', 'rclone'];
+const DEFAULT_PROVIDERS = ['voesx', 'catbox', 'seekstreaming'];
 
 module.exports = {
   port: Number(process.env.PORT || process.env.API_PORT || 3001),

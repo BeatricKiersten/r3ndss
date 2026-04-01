@@ -28,7 +28,7 @@ import {
   Sparkles,
   Copy
 } from 'lucide-react';
-import { PROVIDERS, getProviderConfig } from '../config/providers';
+import { getProviderConfig } from '../config/providers';
 
 export default function ProviderManagementPage() {
   const [expandedProvider, setExpandedProvider] = useState(null);
@@ -54,6 +54,8 @@ export default function ProviderManagementPage() {
   const enabledProviderKeys = Object.entries(providers || {})
     .filter(([_, info]) => info.enabled)
     .map(([key]) => key);
+
+  const allProviderKeys = Object.keys(providers || {});
 
   const isRunningCheck = systemCheck.isLoading || checkSelectedProviders.isLoading;
   const latestCheckResult = checkSelectedProviders.data || systemCheck.data;
@@ -231,8 +233,11 @@ export default function ProviderManagementPage() {
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-            {Object.keys(PROVIDERS).map((provider) => {
-              const conf = getProviderConfig(provider);
+            {allProviderKeys.map((provider) => {
+              const conf = {
+                ...getProviderConfig(provider),
+                name: providers?.[provider]?.name || getProviderConfig(provider).name
+              };
               const enabled = providers?.[provider]?.enabled;
               const selected = primaryProvider === provider;
 
@@ -277,8 +282,11 @@ export default function ProviderManagementPage() {
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-          {Object.keys(PROVIDERS).map((provider) => {
-            const conf = getProviderConfig(provider);
+          {allProviderKeys.map((provider) => {
+            const conf = {
+              ...getProviderConfig(provider),
+              name: providers?.[provider]?.name || getProviderConfig(provider).name
+            };
             const enabled = providers?.[provider]?.enabled;
             const selected = selectedCheckProviders.includes(provider);
 
@@ -316,7 +324,10 @@ export default function ProviderManagementPage() {
 
       <div className="space-y-3">
         {Object.entries(providers || {}).map(([key, info]) => {
-          const config = getProviderConfig(key);
+          const config = {
+            ...getProviderConfig(key),
+            name: info?.name || getProviderConfig(key).name
+          };
           const status = providersStatus?.[key] || {};
           const snapshot = providerSnapshots?.[key] || null;
           const providerFiles = getProviderFiles(key);

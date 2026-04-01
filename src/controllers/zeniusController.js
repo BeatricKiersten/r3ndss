@@ -486,14 +486,17 @@ async function resolveFolderId(folderInput) {
   }
 }
 
-function normalizeProviders(rawProviders) {
+async function normalizeProviders(rawProviders) {
   if (!Array.isArray(rawProviders) || rawProviders.length === 0) {
     return null;
   }
 
+  const providerCatalog = await uploaderService.getProviderCatalog({ includeDisabled: false });
+  const allowed = new Set(providerCatalog.map((item) => item.id));
+
   const unique = new Set();
   for (const provider of rawProviders) {
-    if (config.supportedProviders.includes(provider)) {
+    if (allowed.has(provider)) {
       unique.add(provider);
     }
   }
@@ -1161,7 +1164,7 @@ const zeniusController = {
       const urlShortId = normalizeShortId(req.body?.urlShortId ?? req.body?.instanceId);
       const requestedFolder = String(req.body?.folderId || 'root');
       const folderId = await resolveFolderId(requestedFolder);
-      const selectedProviders = normalizeProviders(req.body?.providers);
+      const selectedProviders = await normalizeProviders(req.body?.providers);
       const requestContext = buildRequestContext(req.body || {});
 
       const details = await getInstanceDetails({
@@ -1267,7 +1270,7 @@ const zeniusController = {
   async downloadBatch(req, res) {
     try {
       const requestContext = buildRequestContext(req.body || {});
-      const selectedProviders = normalizeProviders(req.body?.providers);
+      const selectedProviders = await normalizeProviders(req.body?.providers);
       const baseFolderInput = stripWrappingQuotes(req.body?.folderId || '');
 
       const chain = await buildBatchChain({

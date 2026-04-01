@@ -293,7 +293,7 @@ export const usePlayerStore = create((set, get) => ({
       if (info.status === 'completed' && providerUrl) {
         sources.push({
           id: provider,
-          name: providerNames[provider],
+          name: providerNames[provider] || provider,
           url: getPlayableUrl(provider, providerUrl),
           originalUrl: info.url || providerUrl,
           mimeType: inferMimeTypeFromUrl(providerUrl),

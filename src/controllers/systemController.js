@@ -1,5 +1,4 @@
 const { db, uploaderService } = require('../services/runtime');
-const config = require('../config');
 
 const systemController = {
   async getRcloneConfig(req, res) {
@@ -22,12 +21,42 @@ const systemController = {
 
   async validateRclone(req, res) {
     try {
-      const rcloneStatus = await uploaderService.checkSingleProviderStatus('rclone');
-      const persisted = await db.setRcloneValidationResult(rcloneStatus);
+      const providerCatalog = await uploaderService.getProviderCatalog({ includeDisabled: false });
+      const rcloneProviders = providerCatalog.filter((item) => item.kind === 'rclone');
+
+      let validationResult;
+
+      if (rcloneProviders.length === 0) {
+        validationResult = {
+          name: 'rclone',
+          configured: false,
+          authenticated: false,
+          message: 'No rclone profiles configured',
+          profiles: {}
+        };
+      } else {
+        const statuses = {};
+        for (const provider of rcloneProviders) {
+          statuses[provider.id] = await uploaderService.checkSingleProviderStatus(provider.id);
+        }
+
+        const list = Object.values(statuses);
+        const authenticatedCount = list.filter((item) => item.authenticated).length;
+
+        validationResult = {
+          name: 'rclone',
+          configured: list.length > 0,
+          authenticated: authenticatedCount === list.length,
+          message: `Validated ${authenticatedCount}/${list.length} rclone profiles`,
+          profiles: statuses
+        };
+      }
+
+      const persisted = await db.setRcloneValidationResult(validationResult);
       res.json({
         success: true,
         data: {
-          ...rcloneStatus,
+          ...validationResult,
           lastValidatedAt: persisted.lastValidatedAt || null
         }
       });
@@ -58,13 +87,14 @@ const systemController = {
   async updatePrimaryProvider(req, res) {
     try {
       const provider = String(req.body?.provider || '');
+      const providerCatalog = await uploaderService.getProviderCatalog({ includeDisabled: true });
+      const matched = providerCatalog.find((item) => item.id === provider);
 
-      if (!config.supportedProviders.includes(provider)) {
+      if (!matched) {
         return res.status(400).json({ success: false, error: 'Invalid provider' });
       }
 
-      const providerConfigs = await db.getProviderConfigs();
-      if (providerConfigs?.[provider]?.enabled === false) {
+      if (matched.enabled === false) {
         return res.status(400).json({ success: false, error: 'Primary provider must be enabled' });
       }
 
@@ -78,9 +108,12 @@ const systemController = {
   async runCheck(req, res) {
     try {
       const { providers, autoReuploadMissing = false } = req.body || {};
+      const providerCatalog = await uploaderService.getProviderCatalog({ includeDisabled: true });
+      const availableProviderIds = new Set(providerCatalog.map((item) => item.id));
+
       const selectedProviders = Array.isArray(providers) && providers.length > 0
-        ? providers.filter((provider) => config.supportedProviders.includes(provider))
-        : [...config.supportedProviders];
+        ? providers.filter((provider) => availableProviderIds.has(provider))
+        : providerCatalog.map((item) => item.id);
 
       if (selectedProviders.length === 0) {
         return res.status(400).json({ success: false, error: 'No valid providers selected' });

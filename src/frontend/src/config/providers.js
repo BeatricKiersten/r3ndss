@@ -62,7 +62,34 @@ export const NAV_ITEMS = [
 ];
 
 export function getProviderConfig(providerKey) {
-  return PROVIDERS[providerKey] || { name: providerKey, short: providerKey.slice(0, 3).toUpperCase(), color: 'text-gray-400', bgColor: 'bg-gray-400/10' };
+  const key = String(providerKey || '');
+  const isDynamicRclone = key.startsWith('rclone:');
+  const base = isDynamicRclone ? PROVIDERS.rclone : PROVIDERS[key];
+
+  if (base) {
+    if (!isDynamicRclone) {
+      return base;
+    }
+
+    const suffix = key.split(':')[1] || key;
+    return {
+      ...base,
+      id: key,
+      name: `Rclone ${suffix}`,
+      short: `R-${suffix.slice(0, 3).toUpperCase()}`
+    };
+  }
+
+  return {
+    id: key,
+    name: key,
+    short: key.slice(0, 3).toUpperCase(),
+    color: 'text-gray-400',
+    bgColor: 'bg-gray-400/10',
+    borderColor: 'border-gray-400/20',
+    description: 'Provider',
+    icon: 'Cloud'
+  };
 }
 
 export function getStatusConfig(status) {

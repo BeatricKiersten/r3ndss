@@ -127,7 +127,7 @@ function ProviderSelector({ providers, selectedProviders, setSelectedProviders }
                     : 'bg-[#0d0d0d] border-[#2a2a2a] text-[#999] hover:bg-[#161616]'
               }`}
             >
-              {config?.name || key}
+              {info?.name || config?.name || key}
             </button>
           );
         })}
@@ -138,7 +138,7 @@ function ProviderSelector({ providers, selectedProviders, setSelectedProviders }
           ? 'Tidak ada provider aktif. Aktifkan provider di halaman Providers.'
           : selectedProviders.length === 0
             ? 'Semua provider aktif akan dipakai untuk distribusi.'
-            : `Akan upload ke: ${selectedProviders.join(', ')}`}
+            : `Akan upload ke: ${selectedProviders.map((provider) => providers?.[provider]?.name || provider).join(', ')}`}
       </p>
     </div>
   );

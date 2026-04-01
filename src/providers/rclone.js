@@ -10,13 +10,15 @@ const fsExtra = require('fs-extra');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const { parseRcloneProfileId } = require('../services/providerRegistry');
 
 const RCLONE_PROVIDER_NAME = 'rclone';
 
 class RcloneAdapter {
   constructor(options = {}) {
     this.db = options.db;
-    this.providerName = RCLONE_PROVIDER_NAME;
+    this.providerName = String(options.providerName || RCLONE_PROVIDER_NAME);
+    this.profileId = String(options.profileId || '').trim() || null;
     this.rcloneBin = process.env.RCLONE_BIN || 'rclone';
   }
 
@@ -101,10 +103,25 @@ class RcloneAdapter {
     const profiles = Array.isArray(rclone.syncProfiles) ? rclone.syncProfiles : [];
 
     const selectedProfileId = rclone.defaultProfileId || null;
+    const providerProfileId = parseRcloneProfileId(this.providerName);
+    const explicitProfileId = this.profileId || providerProfileId || null;
 
-    let profile = profiles.find((item) => item.id === selectedProfileId && item.enabled !== false);
+    let profile = null;
+
+    if (explicitProfileId) {
+      profile = profiles.find((item) => item.id === explicitProfileId && item.enabled !== false);
+    }
+
+    if (!profile && selectedProfileId) {
+      profile = profiles.find((item) => item.id === selectedProfileId && item.enabled !== false);
+    }
+
     if (!profile) {
       profile = profiles.find((item) => item.provider === this.providerName && item.enabled !== false);
+    }
+
+    if (!profile) {
+      profile = profiles.find((item) => item.enabled !== false);
     }
 
     if (!profile) {
@@ -264,6 +281,36 @@ class RcloneAdapter {
     } catch (error) {
       return { exists: false, error: error.message };
     }
+  }
+
+  async download(fileId, destinationPath, signal) {
+    if (!fileId || !String(fileId).includes(':')) {
+      throw new Error('Invalid remote file identifier');
+    }
+
+    await fsExtra.ensureDir(path.dirname(destinationPath));
+
+    return this._withTempRcloneConfig(async (configPath) => {
+      const { remotes } = await this._getRcloneConfig();
+      const remoteName = String(fileId).split(':')[0];
+      const remote = remotes.find((item) => item.name === remoteName) || null;
+
+      const args = [
+        'copyto',
+        String(fileId),
+        destinationPath,
+        '--config',
+        configPath,
+        '--retries=2'
+      ];
+
+      await this._runRclone(this._withS3SafetyFlags(args, remote), { signal });
+
+      return {
+        downloaded: true,
+        filePath: destinationPath
+      };
+    });
   }
 
   async checkStatus() {

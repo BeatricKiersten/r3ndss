@@ -161,9 +161,8 @@ function FileDetailModal({ file, onClose }) {
                 const config = getProviderConfig(key);
                 const ProviderIcon = providerIconMap[config?.icon] || Cloud;
                 const remoteStatus = providerStatus?.[key];
-                const ALLOWED_SOURCES = ['catbox', 'rclone', 'seekstreaming'];
                 const availableSources = Object.entries(file.providers || {})
-                  .filter(([sourceKey, sourcePs]) => ALLOWED_SOURCES.includes(sourceKey) && sourcePs.status === 'completed')
+                  .filter(([_, sourcePs]) => sourcePs.status === 'completed')
                   .filter(([sourceKey]) => sourceKey !== key);
                 
                 return (
@@ -287,24 +286,28 @@ function FileDetailModal({ file, onClose }) {
             </div>
 
             {(() => {
-              const rcloneStatus = file.providers?.rclone;
-              if (!rcloneStatus) return null;
+              const rcloneEntries = Object.entries(file.providers || {})
+                .filter(([providerKey]) => providerKey === 'rclone' || providerKey.startsWith('rclone:'));
 
-              const parsed = parseRcloneFileId(rcloneStatus.fileId);
+              if (rcloneEntries.length === 0) return null;
 
-              return (
-                <div className="mt-3 p-3 rounded-lg bg-red-400/10 border border-red-400/20">
-                  <div className="flex items-center justify-between mb-2">
-                    <p className="text-xs uppercase tracking-wide text-red-300">Rclone</p>
-                    <span className="text-[11px] text-red-200">{rcloneStatus.status || 'pending'}</span>
+              return rcloneEntries.map(([providerKey, rcloneStatus]) => {
+                const parsed = parseRcloneFileId(rcloneStatus.fileId);
+
+                return (
+                  <div key={`rclone-info-${providerKey}`} className="mt-3 p-3 rounded-lg bg-red-400/10 border border-red-400/20">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-xs uppercase tracking-wide text-red-300">{getProviderConfig(providerKey).name}</p>
+                      <span className="text-[11px] text-red-200">{rcloneStatus.status || 'pending'}</span>
+                    </div>
+                    <div className="space-y-1 text-xs text-[#ddd]">
+                      <p>Remote: <span className="text-white">{parsed.remoteName || '-'}</span></p>
+                      <p>Path: <span className="text-white break-all">{parsed.remotePath || '-'}</span></p>
+                      <p>Public URL: <span className="text-white break-all">{rcloneStatus.url || '-'}</span></p>
+                    </div>
                   </div>
-                  <div className="space-y-1 text-xs text-[#ddd]">
-                    <p>Remote: <span className="text-white">{parsed.remoteName || '-'}</span></p>
-                    <p>Path: <span className="text-white break-all">{parsed.remotePath || '-'}</span></p>
-                    <p>Public URL: <span className="text-white break-all">{rcloneStatus.url || '-'}</span></p>
-                  </div>
-                </div>
-              );
+                );
+              });
             })()}
           </div>
         </div>

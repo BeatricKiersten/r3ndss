@@ -272,8 +272,10 @@ async function startWeeklyChecker() {
 
 async function runSystemCheck() {
   try {
+    const providerCatalog = await uploaderService.getProviderCatalog({ includeDisabled: true });
+    const providersToCheck = providerCatalog.map((item) => item.id);
     const providerResults = {};
-    for (const provider of config.supportedProviders) {
+    for (const provider of providersToCheck) {
       providerResults[provider] = await uploaderService.checkProviderIntegrity(provider, {
         autoReuploadMissing: true
       });
@@ -285,7 +287,7 @@ async function runSystemCheck() {
       issues: Object.values(providerResults).flatMap((item) => item.issues || []),
       reuploadsQueued: Object.values(providerResults).flatMap((item) => item.reuploadsQueued || []),
       providers: providerResults,
-      checkedProviders: [...config.supportedProviders],
+      checkedProviders: providersToCheck,
       checkedAt: new Date().toISOString()
     };
 

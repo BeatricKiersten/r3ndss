@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from 'react';
-import { useCancelJob, useDeleteJob, useJobs, useQueueTransferJob } from '../hooks/api';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useCancelJob, useDeleteJob, useJobs, useProviders, useQueueTransferJob } from '../hooks/api';
 import { Trash2, Plus, Loader2, XCircle, CheckCircle2, Clock3, RefreshCw } from 'lucide-react';
 
 const JOB_STATUS_OPTIONS = ['', 'pending', 'processing', 'completed', 'failed', 'cancelled'];
@@ -27,6 +27,19 @@ export default function JobsPage() {
   const queueTransfer = useQueueTransferJob();
   const cancelJob = useCancelJob();
   const deleteJob = useDeleteJob();
+  const { data: providers = {} } = useProviders();
+
+  const enabledProviders = useMemo(
+    () => Object.entries(providers).filter(([_, info]) => info.enabled).map(([id]) => id),
+    [providers]
+  );
+
+  useEffect(() => {
+    if (enabledProviders.length === 0) return;
+    if (!enabledProviders.includes(targetProvider)) {
+      setTargetProvider(enabledProviders[0]);
+    }
+  }, [enabledProviders, targetProvider]);
 
   const filters = useMemo(() => ({
     status: statusFilter || undefined,
@@ -38,7 +51,7 @@ export default function JobsPage() {
 
   const handleSubmitTransfer = async (e) => {
     e.preventDefault();
-    if (!sourceUrl.trim()) return;
+    if (!sourceUrl.trim() || !targetProvider) return;
 
     await queueTransfer.mutateAsync({
       sourceUrl: sourceUrl.trim(),
@@ -93,14 +106,13 @@ export default function JobsPage() {
             onChange={(e) => setTargetProvider(e.target.value)}
             className="input"
           >
-            <option value="seekstreaming">seekstreaming</option>
-            <option value="rclone">rclone-storage</option>
-            <option value="voesx">voesx</option>
-            <option value="catbox">catbox</option>
+            {enabledProviders.map((providerId) => (
+              <option key={providerId} value={providerId}>{providers?.[providerId]?.name || providerId}</option>
+            ))}
           </select>
           <button
             type="submit"
-            disabled={queueTransfer.isLoading || !sourceUrl.trim()}
+            disabled={queueTransfer.isLoading || !sourceUrl.trim() || !targetProvider}
             className="btn btn-primary md:col-span-4 flex items-center justify-center gap-2"
           >
             {queueTransfer.isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}

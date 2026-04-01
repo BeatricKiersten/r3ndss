@@ -429,7 +429,7 @@ export const useToggleProvider = () => {
 
   return useMutation(
     async ({ name, enabled }) => {
-      const response = await api.put(`/api/providers/${name}`, { enabled });
+      const response = await api.put(`/api/providers/${encodeURIComponent(name)}`, { enabled });
       return response.data.data;
     },
     {
@@ -455,7 +455,7 @@ export const useProviderStatus = (provider) => {
   return useQuery(
     ['provider-status', provider],
     async () => {
-      const response = await api.get(`/api/providers/${provider}/status`);
+      const response = await api.get(`/api/providers/${encodeURIComponent(provider)}/status`);
       return response.data.data;
     },
     { enabled: !!provider, refetchInterval: 30000 }
@@ -467,7 +467,7 @@ export const useCheckProvider = () => {
 
   return useMutation(
     async ({ provider, autoReuploadMissing = false }) => {
-      const response = await api.post(`/api/providers/${provider}/check`, { autoReuploadMissing });
+      const response = await api.post(`/api/providers/${encodeURIComponent(provider)}/check`, { autoReuploadMissing });
       return response.data.data;
     },
     {
@@ -528,7 +528,7 @@ export const useReuploadToProvider = () => {
 
   return useMutation(
     async ({ fileId, provider, source }) => {
-      const response = await api.post(`/api/files/${fileId}/reupload/${provider}`, { source });
+      const response = await api.post(`/api/files/${fileId}/reupload/${encodeURIComponent(provider)}`, { source });
       return response.data.data;
     },
     {
@@ -545,7 +545,7 @@ export const useCopyToProvider = () => {
 
   return useMutation(
     async ({ fileId, targetProvider }) => {
-      const response = await api.post(`/api/files/${fileId}/copy/${targetProvider}`);
+      const response = await api.post(`/api/files/${fileId}/copy/${encodeURIComponent(targetProvider)}`);
       return response.data.data;
     },
     {

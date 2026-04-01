@@ -111,14 +111,48 @@ class SeekStreamingAdapter {
       || null;
   }
 
-  getDownloadUrl(status = {}) {
+  getDownloadUrlCandidates(status = {}) {
     const videoId = this.getDownloadVideoId(status);
-    if (!videoId) return null;
+    if (!videoId) return [];
 
-    const downloadBaseUrl = process.env.SEEK_DOWNLOAD_BASE_URL || 'https://suo.emergingtechhubonline.store';
-    const variantPath = process.env.SEEK_DOWNLOAD_VARIANT_PATH || 'v4/k5';
+    const primaryBaseUrl = process.env.SEEK_DOWNLOAD_BASE_URL || 'https://suo.emergingtechhubonline.store';
+    const primaryVariantPath = process.env.SEEK_DOWNLOAD_VARIANT_PATH || 'v4/k5';
     const playlistName = process.env.SEEK_DOWNLOAD_PLAYLIST || 'index-f1-v1-a1.txt';
-    return `${downloadBaseUrl.replace(/\/$/, '')}/${variantPath.replace(/^\//, '').replace(/\/$/, '')}/${videoId}/${playlistName}`;
+
+    const fallbackBaseUrls = String(
+      process.env.SEEK_DOWNLOAD_FALLBACK_BASE_URLS || 'https://s9m.technologyevolution.space'
+    )
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+
+    const fallbackVariantPaths = String(
+      process.env.SEEK_DOWNLOAD_FALLBACK_VARIANT_PATHS || 'v4/us'
+    )
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+
+    const baseUrls = [primaryBaseUrl, ...fallbackBaseUrls]
+      .map((value) => value.replace(/\/+$/, ''))
+      .filter(Boolean);
+
+    const variantPaths = [primaryVariantPath, ...fallbackVariantPaths]
+      .map((value) => value.replace(/^\/+/, '').replace(/\/+$/, ''))
+      .filter(Boolean);
+
+    const candidates = [];
+    for (const baseUrl of baseUrls) {
+      for (const variantPath of variantPaths) {
+        candidates.push(`${baseUrl}/${variantPath}/${videoId}/${playlistName}`);
+      }
+    }
+
+    return [...new Set(candidates)];
+  }
+
+  getDownloadUrl(status = {}) {
+    return this.getDownloadUrlCandidates(status)[0] || null;
   }
 
   getDownloadHeaders() {

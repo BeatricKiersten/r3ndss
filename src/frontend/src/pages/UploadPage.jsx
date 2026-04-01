@@ -97,7 +97,7 @@ function ProviderSelector({
                     <span className={`w-3 h-3 rounded ${isSelected ? config.bgColor : 'bg-[#333]'}`}>
                       {isSelected && <CheckCircle className="w-3 h-3" />}
                     </span>
-                    <span className="text-xs font-medium">{config.short}</span>
+                    <span className="text-xs font-medium">{info.name || config.short}</span>
                   </div>
                 </button>
               );
@@ -106,7 +106,7 @@ function ProviderSelector({
           <p className="text-xs text-[#555] mt-2">
             {selectedProviders.length === 0
               ? 'All enabled providers will be used'
-              : `Will upload to: ${selectedProviders.map((provider) => getProviderConfig(provider)?.short).join(', ')}`}
+              : `Will upload to: ${selectedProviders.map((provider) => providers?.[provider]?.name || getProviderConfig(provider)?.short).join(', ')}`}
           </p>
         </div>
       )}
