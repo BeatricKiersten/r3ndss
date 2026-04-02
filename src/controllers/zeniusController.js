@@ -26,6 +26,13 @@ const BATCH_UPSTREAM_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_BATCH_UPSTR
 const BATCH_UPSTREAM_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_BATCH_UPSTREAM_MAX_RETRIES || '1', 10);
 const BATCH_DEADLINE_GUARD_MS = Number.parseInt(process.env.ZENIUS_BATCH_DEADLINE_GUARD_MS || '1200', 10);
 const batchChainSessions = new Map();
+
+// Download concurrency control - max 10 videos at a time
+const MAX_CONCURRENT_DOWNLOADS = 10;
+const activeZeniusDownloads = new Map(); // fileId -> { urlShortId, startTime, abortController }
+const zeniusDownloadQueue = []; // Queue of pending downloads
+let isProcessingQueue = false;
+
 const KNOWN_REQUEST_HEADERS = new Set([
   'accept',
   'accept-language',
@@ -1130,6 +1137,221 @@ async function getInstanceDetails({ urlShortId, refererPath, fallbackRefererPath
   };
 }
 
+// ==================== CONCURRENCY CONTROL ====================
+
+function getActiveDownloadCount() {
+  return activeZeniusDownloads.size;
+}
+
+function canStartNewDownload() {
+  return getActiveDownloadCount() < MAX_CONCURRENT_DOWNLOADS;
+}
+
+function getQueueStatus() {
+  return {
+    active: getActiveDownloadCount(),
+    max: MAX_CONCURRENT_DOWNLOADS,
+    queued: zeniusDownloadQueue.length,
+    isProcessing: isProcessingQueue
+  };
+}
+
+async function processDownloadQueue() {
+  if (isProcessingQueue) return;
+  isProcessingQueue = true;
+
+  while (zeniusDownloadQueue.length > 0 && canStartNewDownload()) {
+    const downloadTask = zeniusDownloadQueue.shift();
+    if (downloadTask && !downloadTask.cancelled) {
+      try {
+        await executeDownloadWithTracking(downloadTask);
+      } catch (error) {
+        console.error(`[Zenius] Queue download failed for ${downloadTask.urlShortId}:`, error.message);
+      }
+    }
+  }
+
+  isProcessingQueue = false;
+}
+
+async function executeDownloadWithTracking(task) {
+  const { urlShortId, videoUrl, folderId, outputName, ffmpegHeaders, selectedProviders, resolve, reject } = task;
+  
+  console.log(`[Zenius] Starting download ${urlShortId} (active: ${getActiveDownloadCount() + 1}/${MAX_CONCURRENT_DOWNLOADS})`);
+  
+  let fileId = null;
+  
+  try {
+    const result = await videoProcessor.processHls(videoUrl, {
+      folderId,
+      outputName,
+      outputDir: config.uploadDir,
+      headers: ffmpegHeaders
+    });
+    
+    fileId = result.fileId;
+    activeZeniusDownloads.set(fileId, {
+      urlShortId,
+      startTime: Date.now(),
+      outputName,
+      fileId
+    });
+    
+    console.log(`[Zenius] Download completed ${urlShortId}, fileId=${fileId}, queuing upload`);
+    
+    await uploaderService.queueFileUpload(
+      result.fileId,
+      result.outputPath,
+      folderId,
+      selectedProviders
+    );
+    
+    activeZeniusDownloads.delete(fileId);
+    resolve({ success: true, fileId, urlShortId });
+    
+  } catch (error) {
+    if (fileId) activeZeniusDownloads.delete(fileId);
+    console.error(`[Zenius] Download failed ${urlShortId}:`, error.message);
+    reject(error);
+  } finally {
+    // Process next in queue
+    setImmediate(() => processDownloadQueue());
+  }
+}
+
+function queueDownload(task) {
+  return new Promise((resolve, reject) => {
+    const taskWithPromise = { ...task, resolve, reject, cancelled: false };
+    
+    if (canStartNewDownload()) {
+      // Start immediately
+      executeDownloadWithTracking(taskWithPromise).catch(reject);
+    } else {
+      // Add to queue
+      zeniusDownloadQueue.push(taskWithPromise);
+      console.log(`[Zenius] Download queued for ${task.urlShortId}. Queue: ${zeniusDownloadQueue.length}, Active: ${getActiveDownloadCount()}`);
+      
+      // Try to process queue (in case slot opened up)
+      processDownloadQueue();
+    }
+  });
+}
+
+// ==================== CANCEL & RESET FUNCTIONS ====================
+
+async function cancelAllZeniusDownloads() {
+  const cancelled = {
+    downloads: [],
+    uploads: [],
+    errors: []
+  };
+  
+  // 1. Cancel queued downloads
+  for (const task of zeniusDownloadQueue) {
+    task.cancelled = true;
+    task.resolve({ cancelled: true, reason: 'User cancelled all' });
+    cancelled.downloads.push({ urlShortId: task.urlShortId, fromQueue: true });
+  }
+  zeniusDownloadQueue.length = 0;
+  
+  // 2. Cancel active FFmpeg processes
+  for (const [fileId, downloadInfo] of activeZeniusDownloads.entries()) {
+    try {
+      // Cancel FFmpeg job
+      const jobs = await db.getJobsByFile(fileId);
+      for (const job of jobs) {
+        if (job.type === 'process') {
+          await videoProcessor.cancelJob(job.id);
+          await db.updateJob(job.id, { status: 'cancelled', error: 'Cancelled by user (cancel all)' });
+        }
+      }
+      cancelled.downloads.push({ fileId, urlShortId: downloadInfo.urlShortId, fromActive: true });
+      activeZeniusDownloads.delete(fileId);
+    } catch (error) {
+      cancelled.errors.push({ fileId, error: error.message });
+    }
+  }
+  
+  // 3. Cancel pending uploads
+  try {
+    const allFiles = await db.listFiles();
+    const zeniusFiles = allFiles.filter(f => 
+      f.originalUrl?.includes('zenius.net') || 
+      f.name?.startsWith('zenius-') ||
+      f.name?.toLowerCase().includes('zenius')
+    );
+    
+    for (const file of zeniusFiles) {
+      const jobs = await db.getJobsByFile(file.id);
+      for (const job of jobs) {
+        if (job.status === 'pending' || job.status === 'processing') {
+          await uploaderService.cancelJob(job.id);
+          cancelled.uploads.push({ fileId: file.id, jobId: job.id });
+        }
+      }
+    }
+  } catch (error) {
+    cancelled.errors.push({ phase: 'uploads', error: error.message });
+  }
+  
+  return cancelled;
+}
+
+async function resetAllZeniusFiles() {
+  const result = {
+    deleted: [],
+    errors: []
+  };
+  
+  try {
+    // Get all files that look like zenius files
+    const allFiles = await db.listFiles();
+    const zeniusFiles = allFiles.filter(f => 
+      f.originalUrl?.includes('zenius.net') || 
+      f.name?.startsWith('zenius-') ||
+      f.name?.toLowerCase().includes('zenius')
+    );
+    
+    console.log(`[Zenius] Found ${zeniusFiles.length} zenius files to reset`);
+    
+    for (const file of zeniusFiles) {
+      try {
+        // Cancel any active jobs first
+        const jobs = await db.getJobsByFile(file.id);
+        for (const job of jobs) {
+          if (job.status === 'pending' || job.status === 'processing') {
+            if (job.type === 'process') {
+              await videoProcessor.cancelJob(job.id);
+            } else {
+              await uploaderService.cancelJob(job.id);
+            }
+          }
+        }
+        
+        // Delete remote resources
+        await uploaderService.deleteFileResources(file.id);
+        
+        // Purge file and jobs from DB
+        await db.purgeFileAndJobs(file.id);
+        
+        result.deleted.push({ fileId: file.id, name: file.name });
+      } catch (error) {
+        result.errors.push({ fileId: file.id, error: error.message });
+      }
+    }
+    
+    // Clear sessions
+    batchChainSessions.clear();
+    activeZeniusDownloads.clear();
+    zeniusDownloadQueue.length = 0;
+    
+  } catch (error) {
+    result.errors.push({ phase: 'global', error: error.message });
+  }
+  
+  return result;
+}
+
 const zeniusController = {
   async getInstanceDetails(req, res) {
     try {
@@ -1208,25 +1430,30 @@ const zeniusController = {
         ffmpegHeaders.Cookie = requestContext.cookieHeader;
       }
 
-      videoProcessor.processHls(videoUrl, {
+      // Queue download with concurrency control
+      const queueStatus = getQueueStatus();
+      const willQueue = !canStartNewDownload();
+      
+      queueDownload({
+        urlShortId,
+        videoUrl,
         folderId,
         outputName,
-        outputDir: config.uploadDir,
-        headers: ffmpegHeaders
-      }).then(async (result) => {
-        await uploaderService.queueFileUpload(
-          result.fileId,
-          result.outputPath,
-          folderId,
-          selectedProviders
-        );
+        ffmpegHeaders,
+        selectedProviders
+      }).then((result) => {
+        if (result.cancelled) {
+          console.log(`[Zenius] Download ${urlShortId} was cancelled`);
+        } else {
+          console.log(`[Zenius] Download ${urlShortId} completed successfully`);
+        }
       }).catch((error) => {
-        console.error('[Zenius] Download pipeline failed:', error.message);
+        console.error(`[Zenius] Download pipeline failed for ${urlShortId}:`, error.message);
       });
 
       res.status(202).json({
         success: true,
-        message: 'Zenius download queued',
+        message: willQueue ? 'Zenius download queued (waiting for slot)' : 'Zenius download started',
         data: {
           urlShortId,
           name: instanceValue.name || null,
@@ -1235,7 +1462,8 @@ const zeniusController = {
           cleanupLocalFile: true,
           folderInput: stripWrappingQuotes(requestedFolder),
           folderId,
-          providers: selectedProviders
+          providers: selectedProviders,
+          queueStatus
         }
       });
     } catch (error) {
@@ -1336,18 +1564,20 @@ const zeniusController = {
             ffmpegHeaders.Cookie = requestContext.cookieHeader;
           }
 
-          videoProcessor.processHls(videoUrl, {
+          // Queue download with concurrency control (don't await, fire and forget)
+          queueDownload({
+            urlShortId,
+            videoUrl,
             folderId,
             outputName,
-            outputDir: config.uploadDir,
-            headers: ffmpegHeaders
-          }).then(async (result) => {
-            await uploaderService.queueFileUpload(
-              result.fileId,
-              result.outputPath,
-              folderId,
-              selectedProviders
-            );
+            ffmpegHeaders,
+            selectedProviders
+          }).then((result) => {
+            if (result.cancelled) {
+              console.log(`[Zenius] Batch download ${urlShortId} was cancelled`);
+            } else {
+              console.log(`[Zenius] Batch download ${urlShortId} completed successfully`);
+            }
           }).catch((error) => {
             console.error(`[Zenius] Batch download pipeline failed for ${urlShortId}:`, error.message);
           });
@@ -1366,7 +1596,7 @@ const zeniusController = {
 
       res.status(202).json({
         success: true,
-        message: 'Zenius batch download queued',
+        message: 'Zenius batch download queued with concurrency control',
         data: {
           sessionId: chain.sessionId,
           rootCgId: chain.rootCgId,
@@ -1392,12 +1622,60 @@ const zeniusController = {
           chainErrors: Array.isArray(chain.errors) ? chain.errors : [],
           providers: selectedProviders,
           cleanupLocalFile: true,
-          baseFolderInput
+          baseFolderInput,
+          queueStatus: getQueueStatus()
         }
       });
     } catch (error) {
       res.status(400).json({ success: false, error: error.message });
     }
+  },
+
+  async cancelAll(req, res) {
+    try {
+      console.log('[Zenius] Cancelling all downloads and uploads...');
+      const result = await cancelAllZeniusDownloads();
+      
+      res.json({
+        success: true,
+        message: 'All Zenius downloads and uploads cancelled',
+        data: {
+          cancelledDownloads: result.downloads.length,
+          cancelledUploads: result.uploads.length,
+          errors: result.errors,
+          details: result
+        }
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  async resetFiles(req, res) {
+    try {
+      console.log('[Zenius] Resetting all Zenius files...');
+      const result = await resetAllZeniusFiles();
+      
+      res.json({
+        success: true,
+        message: `Reset ${result.deleted.length} Zenius files`,
+        data: {
+          deletedCount: result.deleted.length,
+          errorCount: result.errors.length,
+          deleted: result.deleted,
+          errors: result.errors
+        }
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  getQueueStatus(req, res) {
+    res.json({
+      success: true,
+      data: getQueueStatus()
+    });
   }
 };
 

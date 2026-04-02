@@ -313,6 +313,44 @@ export const useZeniusBatchDownload = () => {
   });
 };
 
+export const useZeniusCancelAll = () => {
+  return useMutation(async () => {
+    const response = await api.post('/api/zenius/cancel-all');
+    return response.data;
+  });
+};
+
+export const useZeniusResetFiles = () => {
+  const queryClient = useQueryClient();
+  
+  return useMutation(
+    async () => {
+      const response = await api.post('/api/zenius/reset-files');
+      return response.data;
+    },
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('files');
+        queryClient.invalidateQueries('jobs');
+        queryClient.invalidateQueries('dashboard');
+      }
+    }
+  );
+};
+
+export const useZeniusQueueStatus = () => {
+  return useQuery(
+    ['zenius-queue-status'],
+    async () => {
+      const response = await api.get('/api/zenius/queue-status');
+      return response.data.data;
+    },
+    {
+      refetchInterval: 5000 // Refetch every 5 seconds
+    }
+  );
+};
+
 export const useRetryUpload = () => {
   const queryClient = useQueryClient();
   

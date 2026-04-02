@@ -10,7 +10,10 @@ import {
   AlertCircle,
   Trash2,
   Link as LinkIcon,
-  Shield
+  Shield,
+  XCircle,
+  RotateCcw,
+  Activity
 } from 'lucide-react';
 import {
   useDeleteFolder,
@@ -18,10 +21,14 @@ import {
   useProviders,
   useZeniusBatchChain,
   useZeniusBatchDownload,
+  useZeniusCancelAll,
   useZeniusDownload,
-  useZeniusInstanceDetails
+  useZeniusInstanceDetails,
+  useZeniusQueueStatus,
+  useZeniusResetFiles
 } from '../hooks/api';
 import { getProviderConfig } from '../config/providers';
+import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 
 const HEADERS_STORAGE_KEY = 'zenius-headers-raw';
 const BATCH_CHAIN_CHUNK_SIZE = 8;
@@ -167,8 +174,14 @@ export default function ZeniusPage() {
   const batchChainMutation = useZeniusBatchChain();
   const batchDownloadMutation = useZeniusBatchDownload();
   const deleteFolderMutation = useDeleteFolder();
+  const cancelAllMutation = useZeniusCancelAll();
+  const resetFilesMutation = useZeniusResetFiles();
+  const { data: queueStatus } = useZeniusQueueStatus();
   const { data: providers } = useProviders();
   const { data: folderTree } = useFolders();
+
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
 
   useEffect(() => {
     const savedHeaders = localStorage.getItem(HEADERS_STORAGE_KEY);
@@ -476,6 +489,96 @@ export default function ZeniusPage() {
         <p className="text-sm text-[#888]">
           Ambil instance details dari raw headers, download HLS dari `video-url` dengan FFmpeg, distribusikan ke storage, lalu hapus file lokal otomatis.
         </p>
+      </div>
+
+      {/* Queue Status & Controls */}
+      <div className="card p-4 space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Activity className="w-4 h-4 text-[#666]" />
+            <span className="text-sm font-medium text-[#aaa]">Status Download Queue</span>
+          </div>
+          <div className="flex items-center gap-3">
+            {queueStatus && (
+              <div className="flex items-center gap-3 text-sm">
+                <span className="text-[#666]">
+                  Aktif: <span className="text-white">{queueStatus.active}/{queueStatus.max}</span>
+                </span>
+                <span className="text-[#666]">
+                  Menunggu: <span className="text-white">{queueStatus.queued}</span>
+                </span>
+                {queueStatus.isProcessing && (
+                  <span className="text-emerald-400">Memproses...</span>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Progress Bar */}
+        {queueStatus && (
+          <div className="w-full bg-[#1a1a1a] rounded-full h-2">
+            <div
+              className="bg-gradient-to-r from-blue-500 to-blue-400 h-2 rounded-full transition-all"
+              style={{
+                width: `${Math.min((queueStatus.active / queueStatus.max) * 100, 100)}%`
+              }}
+            />
+          </div>
+        )}
+
+        {/* Control Buttons */}
+        <div className="flex gap-3">
+          <button
+            type="button"
+            onClick={() => setShowCancelConfirm(true)}
+            disabled={cancelAllMutation.isLoading || (queueStatus?.active === 0 && queueStatus?.queued === 0)}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-amber-500/40 text-amber-300 hover:bg-amber-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            {cancelAllMutation.isLoading ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <XCircle className="w-4 h-4" />
+            )}
+            Cancel All
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowResetConfirm(true)}
+            disabled={resetFilesMutation.isLoading}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            {resetFilesMutation.isLoading ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <RotateCcw className="w-4 h-4" />
+            )}
+            Reset All Files
+          </button>
+        </div>
+
+        {/* Status Messages */}
+        {cancelAllMutation.isSuccess && (
+          <div className="text-sm text-emerald-400">
+            Cancelled {cancelAllMutation.data?.data?.cancelledDownloads} downloads and {cancelAllMutation.data?.data?.cancelledUploads} uploads.
+          </div>
+        )}
+        {cancelAllMutation.isError && (
+          <div className="text-sm text-red-400">
+            Failed to cancel: {cancelAllMutation.error?.message}
+          </div>
+        )}
+        {resetFilesMutation.isSuccess && (
+          <div className="text-sm text-emerald-400">
+            Reset {resetFilesMutation.data?.data?.deletedCount} files successfully.
+          </div>
+        )}
+        {resetFilesMutation.isError && (
+          <div className="text-sm text-red-400">
+            Failed to reset: {resetFilesMutation.error?.message}
+          </div>
+        )}
       </div>
 
       <form onSubmit={handleGetDetails} className="card p-5 space-y-4">
@@ -939,6 +1042,34 @@ export default function ZeniusPage() {
           </div>
         </div>
       )}
+
+      {/* Cancel All Confirmation Dialog */}
+      <ConfirmDialog
+        isOpen={showCancelConfirm}
+        onClose={() => setShowCancelConfirm(false)}
+        onConfirm={async () => {
+          await cancelAllMutation.mutateAsync();
+          setShowCancelConfirm(false);
+        }}
+        title="Cancel All Downloads"
+        message="This will cancel all active and queued Zenius downloads and uploads. Are you sure?"
+        confirmText="Cancel All"
+        variant="danger"
+      />
+
+      {/* Reset Files Confirmation Dialog */}
+      <ConfirmDialog
+        isOpen={showResetConfirm}
+        onClose={() => setShowResetConfirm(false)}
+        onConfirm={async () => {
+          await resetFilesMutation.mutateAsync();
+          setShowResetConfirm(false);
+        }}
+        title="Reset All Zenius Files"
+        message="This will permanently delete all Zenius files from the database and cancel all related jobs. This action cannot be undone. Are you sure?"
+        confirmText="Reset All"
+        variant="danger"
+      />
     </div>
   );
 }
