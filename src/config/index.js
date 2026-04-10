@@ -13,7 +13,7 @@ module.exports = {
     user: process.env.MYSQL_USER || 'root',
     password: process.env.MYSQL_PASSWORD || '',
     database: process.env.MYSQL_DATABASE || 'zenius',
-    connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 10),
+    connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 25),
     autoCreateDatabase: String(process.env.MYSQL_AUTO_CREATE_DATABASE || 'true').toLowerCase() !== 'false',
     ssl: String(process.env.MYSQL_SSL || 'false').toLowerCase() === 'true',
     sslRejectUnauthorized: String(process.env.MYSQL_SSL_REJECT_UNAUTHORIZED || 'true').toLowerCase() !== 'false'

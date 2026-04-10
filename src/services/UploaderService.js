@@ -166,13 +166,17 @@ class UploaderService extends EventEmitter {
     
     this.isRunning = true;
     console.log('[Uploader] Service started');
+
+    await this._recoverStaleJobs();
     
-    // Process queue periodically
     this.processInterval = setInterval(() => {
       this._processQueue();
     }, 2000);
 
-    // Initial processing
+    this.staleJobCheckInterval = setInterval(() => {
+      this._recoverStaleJobs();
+    }, 60000);
+
     this._processQueue();
   }
 
@@ -184,8 +188,10 @@ class UploaderService extends EventEmitter {
     if (this.processInterval) {
       clearInterval(this.processInterval);
     }
+    if (this.staleJobCheckInterval) {
+      clearInterval(this.staleJobCheckInterval);
+    }
     
-    // Cancel all active uploads
     for (const [key, controller] of this.activeUploads.entries()) {
       try {
         controller.abort();
@@ -195,6 +201,13 @@ class UploaderService extends EventEmitter {
     }
     
     this.activeUploads.clear();
+
+    if (this._jobHeartbeats) {
+      for (const timer of this._jobHeartbeats.values()) {
+        clearInterval(timer);
+      }
+      this._jobHeartbeats.clear();
+    }
 
     for (const timer of this.localCleanupTimers.values()) {
       clearTimeout(timer);
@@ -1121,6 +1134,18 @@ class UploaderService extends EventEmitter {
   /**
    * Process upload queue
    */
+  async _recoverStaleJobs() {
+    try {
+      const result = await this.db.resetStaleProcessingJobs(10);
+      if (result.resetCount > 0) {
+        console.log(`[Uploader] Recovered ${result.resetCount} stale processing jobs back to pending`);
+        this.processingJobIds.clear();
+      }
+    } catch (error) {
+      console.error('[Uploader] Stale job recovery failed:', error.message);
+    }
+  }
+
   async _processQueue() {
     if (!this.isRunning) return;
 
@@ -1529,6 +1554,8 @@ class UploaderService extends EventEmitter {
         attempts: currentAttempt
       });
 
+      this._startJobHeartbeat(job.id);
+
       // Update provider status to uploading
       await this.db.updateProviderStatus(job.fileId, provider, 'uploading');
       this.emit('upload:started', { jobId: job.id, fileId: job.fileId, provider, attempt: currentAttempt });
@@ -1565,6 +1592,8 @@ class UploaderService extends EventEmitter {
           metadata: { ...job.metadata, normalizedFileName, result }
         });
 
+        this._stopJobHeartbeat(job.id);
+
         this.emit('upload:completed', {
           jobId: job.id,
           fileId: job.fileId,
@@ -1580,6 +1609,8 @@ class UploaderService extends EventEmitter {
 
       } catch (error) {
         console.error(`[Uploader] Upload to ${provider} failed (attempt ${currentAttempt}/${job.maxAttempts}):`, error.message);
+
+        this._stopJobHeartbeat(job.id);
 
         const finalStatus = isLastAttempt ? 'failed' : 'pending';
 
@@ -1675,6 +1706,26 @@ class UploaderService extends EventEmitter {
     }
 
     throw lastError;
+  }
+
+  _startJobHeartbeat(jobId) {
+    this._stopJobHeartbeat(jobId);
+    const timer = setInterval(async () => {
+      try {
+        await this.db.updateJobHeartbeat(jobId);
+      } catch (_) {}
+    }, 30000);
+    if (!this._jobHeartbeats) this._jobHeartbeats = new Map();
+    this._jobHeartbeats.set(jobId, timer);
+  }
+
+  _stopJobHeartbeat(jobId) {
+    if (!this._jobHeartbeats) return;
+    const timer = this._jobHeartbeats.get(jobId);
+    if (timer) {
+      clearInterval(timer);
+      this._jobHeartbeats.delete(jobId);
+    }
   }
 
   /**

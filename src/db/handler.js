@@ -60,7 +60,7 @@ function buildMysqlConfigFromEnv() {
     user: process.env.MYSQL_USER || 'root',
     password: process.env.MYSQL_PASSWORD || '',
     database: process.env.MYSQL_DATABASE || 'zenius',
-    connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 10),
+    connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 25),
     autoCreateDatabase: String(process.env.MYSQL_AUTO_CREATE_DATABASE || 'true').toLowerCase() !== 'false',
     ssl: String(process.env.MYSQL_SSL || 'false').toLowerCase() === 'true',
     sslRejectUnauthorized: String(process.env.MYSQL_SSL_REJECT_UNAUTHORIZED || 'true').toLowerCase() !== 'false'
@@ -207,7 +207,8 @@ class DatabaseHandler {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       startedAt: row.started_at,
-      completedAt: row.completed_at
+      completedAt: row.completed_at,
+      heartbeatAt: row.heartbeat_at || null
     };
   }
 
@@ -365,10 +366,38 @@ class DatabaseHandler {
         updated_at VARCHAR(40) NOT NULL,
         started_at VARCHAR(40) NULL,
         completed_at VARCHAR(40) NULL,
+        heartbeat_at VARCHAR(40) NULL,
         INDEX idx_jobs_status (status),
         INDEX idx_jobs_file (file_id),
         INDEX idx_jobs_type (type),
-        INDEX idx_jobs_created (created_at)
+        INDEX idx_jobs_created (created_at),
+        INDEX idx_jobs_heartbeat (heartbeat_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS batch_sessions (
+        id VARCHAR(64) PRIMARY KEY,
+        run_id VARCHAR(64) NULL,
+        root_cg_id VARCHAR(64) NOT NULL,
+        root_cg_name VARCHAR(255) NULL,
+        target_cg_selector VARCHAR(255) NULL,
+        parent_container_name VARCHAR(255) NULL,
+        status VARCHAR(32) NOT NULL DEFAULT 'running',
+        total_containers INT NOT NULL DEFAULT 0,
+        processed_containers INT NOT NULL DEFAULT 0,
+        queued_count INT NOT NULL DEFAULT 0,
+        skipped_count INT NOT NULL DEFAULT 0,
+        next_container_offset INT NOT NULL DEFAULT 0,
+        has_more TINYINT(1) NOT NULL DEFAULT 1,
+        error TEXT NULL,
+        session_data LONGTEXT NULL,
+        queued_items LONGTEXT NULL,
+        skipped_items LONGTEXT NULL,
+        chain_errors LONGTEXT NULL,
+        created_at VARCHAR(40) NOT NULL,
+        updated_at VARCHAR(40) NOT NULL,
+        expires_at VARCHAR(40) NULL,
+        finished_at VARCHAR(40) NULL,
+        INDEX idx_batch_status (status),
+        INDEX idx_batch_run (run_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
       `CREATE TABLE IF NOT EXISTS provider_configs (
         provider VARCHAR(64) PRIMARY KEY,
@@ -465,7 +494,37 @@ class DatabaseHandler {
       await this._ensureFileProvidersForFile(this.pool, row.id);
     }
 
+    await this._runMigrations();
+
     await this._migrateLegacyRcloneProviderRows();
+  }
+
+  async _runMigrations() {
+    const migrations = [
+      {
+        name: 'add_heartbeat_at_to_jobs',
+        check: async () => {
+          const [columns] = await this.pool.query(
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'jobs' AND COLUMN_NAME = 'heartbeat_at'"
+          );
+          return columns.length === 0;
+        },
+        sql: "ALTER TABLE jobs ADD COLUMN heartbeat_at VARCHAR(40) NULL, ADD INDEX idx_jobs_heartbeat (heartbeat_at)"
+      }
+    ];
+
+    for (const migration of migrations) {
+      try {
+        const needsRun = await migration.check();
+        if (needsRun) {
+          console.log(`[DB Migration] Running: ${migration.name}`);
+          await this.pool.query(migration.sql);
+          console.log(`[DB Migration] Completed: ${migration.name}`);
+        }
+      } catch (error) {
+        console.warn(`[DB Migration] Failed ${migration.name}: ${error.message}`);
+      }
+    }
   }
 
   async _ready() {
@@ -1525,6 +1584,11 @@ class DatabaseHandler {
 
     if (['completed', 'failed', 'cancelled'].includes(updates.status)) {
       next.completedAt = now;
+      next.heartbeatAt = null;
+    }
+
+    if (updates.status === 'processing') {
+      next.heartbeatAt = now;
     }
 
     await this.pool.query(
@@ -1539,7 +1603,8 @@ class DatabaseHandler {
            metadata = ?,
            updated_at = ?,
            started_at = ?,
-           completed_at = ?
+           completed_at = ?,
+           heartbeat_at = ?
        WHERE id = ?`,
       [
         next.type,
@@ -1553,6 +1618,7 @@ class DatabaseHandler {
         next.updatedAt,
         next.startedAt || null,
         next.completedAt || null,
+        next.heartbeatAt || null,
         jobId
       ]
     );
@@ -1871,8 +1937,33 @@ class DatabaseHandler {
         pending: toInt(pendingRows[0]?.count),
         processing: toInt(processingRows[0]?.count)
       },
+      batchSessions: await this._getBatchSessionSummary(),
       system: await this._getSystemPayload()
     };
+  }
+
+  async _getBatchSessionSummary() {
+    try {
+      await this._ready();
+      const [rows] = await this.pool.query(
+        "SELECT id, status, root_cg_id, root_cg_name, total_containers, processed_containers, queued_count, skipped_count, has_more, created_at, updated_at FROM batch_sessions WHERE status IN ('running', 'pending') ORDER BY created_at DESC LIMIT 20"
+      );
+      return rows.map((row) => ({
+        id: row.id,
+        status: row.status,
+        rootCgId: row.root_cg_id,
+        rootCgName: row.root_cg_name,
+        totalContainers: toInt(row.total_containers),
+        processedContainers: toInt(row.processed_containers),
+        queuedCount: toInt(row.queued_count),
+        skippedCount: toInt(row.skipped_count),
+        hasMore: toBool(row.has_more),
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+      }));
+    } catch {
+      return [];
+    }
   }
 
   // ==================== SYSTEM OPERATIONS ====================
@@ -2180,6 +2271,211 @@ class DatabaseHandler {
       ['__webhook_config', payload, now, payload, now]
     );
     return config;
+  }
+
+  async updateJobHeartbeat(jobId) {
+    await this._ready();
+    const now = this._now();
+    await this.pool.query(
+      'UPDATE jobs SET heartbeat_at = ? WHERE id = ?',
+      [now, jobId]
+    );
+  }
+
+  async getStaleProcessingJobs(staleThresholdMinutes = 10) {
+    await this._ready();
+    const cutoffIso = new Date(Date.now() - staleThresholdMinutes * 60 * 1000).toISOString();
+    const [rows] = await this.pool.query(
+      `SELECT * FROM jobs
+       WHERE status = 'processing'
+         AND (heartbeat_at IS NULL OR heartbeat_at < ?)
+         AND updated_at < ?`,
+      [cutoffIso, cutoffIso]
+    );
+    return rows.map((row) => this._mapJobRow(row));
+  }
+
+  async resetStaleProcessingJobs(staleThresholdMinutes = 10) {
+    await this._ready();
+    const now = this._now();
+    const cutoffIso = new Date(Date.now() - staleThresholdMinutes * 60 * 1000).toISOString();
+    const [result] = await this.pool.query(
+      `UPDATE jobs
+       SET status = 'pending',
+           heartbeat_at = NULL,
+           updated_at = ?
+       WHERE status = 'processing'
+         AND (heartbeat_at IS NULL OR heartbeat_at < ?)
+         AND updated_at < ?`,
+      [now, cutoffIso, cutoffIso]
+    );
+    return { resetCount: result.affectedRows || 0 };
+  }
+
+  async createBatchSession(sessionData) {
+    await this._ready();
+    const now = this._now();
+    const id = sessionData.id || uuidv4();
+    const expiresAt = sessionData.expiresAt
+      ? new Date(sessionData.expiresAt).toISOString()
+      : new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
+
+    await this.pool.query(
+      `INSERT INTO batch_sessions (
+        id, run_id, root_cg_id, root_cg_name, target_cg_selector, parent_container_name,
+        status, total_containers, processed_containers, queued_count, skipped_count,
+        next_container_offset, has_more, error, session_data, queued_items, skipped_items,
+        chain_errors, created_at, updated_at, expires_at, finished_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        sessionData.runId || null,
+        sessionData.rootCgId || '',
+        sessionData.rootCgName || null,
+        sessionData.targetCgSelector || null,
+        sessionData.parentContainerName || null,
+        sessionData.status || 'running',
+        toInt(sessionData.totalContainers, 0),
+        toInt(sessionData.processedContainers, 0),
+        toInt(sessionData.queuedCount, 0),
+        toInt(sessionData.skippedCount, 0),
+        toInt(sessionData.nextContainerOffset, 0),
+        sessionData.hasMore !== false ? 1 : 0,
+        sessionData.error || null,
+        stringifyJson(sessionData.sessionData || {}),
+        stringifyJson(sessionData.queuedItems || []),
+        stringifyJson(sessionData.skippedItems || []),
+        stringifyJson(sessionData.chainErrors || []),
+        now,
+        now,
+        expiresAt,
+        null
+      ]
+    );
+
+    return this.getBatchSession(id);
+  }
+
+  async updateBatchSession(sessionId, updates) {
+    await this._ready();
+    const now = this._now();
+
+    const fields = [];
+    const params = [];
+
+    const allowedFields = {
+      status: 'status',
+      rootCgName: 'root_cg_name',
+      targetCgSelector: 'target_cg_selector',
+      parentContainerName: 'parent_container_name',
+      totalContainers: 'total_containers',
+      processedContainers: 'processed_containers',
+      queuedCount: 'queued_count',
+      skippedCount: 'skipped_count',
+      nextContainerOffset: 'next_container_offset',
+      hasMore: 'has_more',
+      error: 'error',
+      sessionData: 'session_data',
+      queuedItems: 'queued_items',
+      skippedItems: 'skipped_items',
+      chainErrors: 'chain_errors',
+      runId: 'run_id'
+    };
+
+    for (const [key, column] of Object.entries(allowedFields)) {
+      if (updates[key] !== undefined) {
+        fields.push(`${column} = ?`);
+        if (['sessionData', 'queuedItems', 'skippedItems', 'chainErrors'].includes(key)) {
+          params.push(stringifyJson(updates[key]));
+        } else if (key === 'hasMore') {
+          params.push(updates[key] ? 1 : 0);
+        } else if (['totalContainers', 'processedContainers', 'queuedCount', 'skippedCount', 'nextContainerOffset'].includes(key)) {
+          params.push(toInt(updates[key]));
+        } else {
+          params.push(updates[key]);
+        }
+      }
+    }
+
+    if (updates.status && ['completed', 'failed', 'cancelled'].includes(updates.status)) {
+      fields.push('finished_at = ?');
+      params.push(now);
+    }
+
+    fields.push('updated_at = ?');
+    params.push(now);
+    params.push(sessionId);
+
+    await this.pool.query(
+      `UPDATE batch_sessions SET ${fields.join(', ')} WHERE id = ?`,
+      params
+    );
+
+    return this.getBatchSession(sessionId);
+  }
+
+  async getBatchSession(sessionId) {
+    await this._ready();
+    const [rows] = await this.pool.query(
+      'SELECT * FROM batch_sessions WHERE id = ? LIMIT 1',
+      [sessionId]
+    );
+    if (!rows[0]) return null;
+    return this._mapBatchSessionRow(rows[0]);
+  }
+
+  async getActiveBatchSessions() {
+    await this._ready();
+    const [rows] = await this.pool.query(
+      "SELECT * FROM batch_sessions WHERE status IN ('running', 'pending') ORDER BY created_at DESC"
+    );
+    return rows.map((row) => this._mapBatchSessionRow(row));
+  }
+
+  async getBatchSessionsByRunId(runId) {
+    await this._ready();
+    const [rows] = await this.pool.query(
+      'SELECT * FROM batch_sessions WHERE run_id = ? ORDER BY created_at DESC',
+      [runId]
+    );
+    return rows.map((row) => this._mapBatchSessionRow(row));
+  }
+
+  async cleanupExpiredBatchSessions() {
+    await this._ready();
+    const now = this._now();
+    const [result] = await this.pool.query(
+      'DELETE FROM batch_sessions WHERE expires_at IS NOT NULL AND expires_at < ?',
+      [now]
+    );
+    return { deletedCount: result.affectedRows || 0 };
+  }
+
+  _mapBatchSessionRow(row) {
+    return {
+      id: row.id,
+      runId: row.run_id,
+      rootCgId: row.root_cg_id,
+      rootCgName: row.root_cg_name,
+      targetCgSelector: row.target_cg_selector,
+      parentContainerName: row.parent_container_name,
+      status: row.status,
+      totalContainers: toInt(row.total_containers),
+      processedContainers: toInt(row.processed_containers),
+      queuedCount: toInt(row.queued_count),
+      skippedCount: toInt(row.skipped_count),
+      nextContainerOffset: toInt(row.next_container_offset),
+      hasMore: toBool(row.has_more),
+      error: row.error,
+      sessionData: parseJson(row.session_data, {}),
+      queuedItems: parseJson(row.queued_items, []),
+      skippedItems: parseJson(row.skipped_items, []),
+      chainErrors: parseJson(row.chain_errors, []),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      expiresAt: row.expires_at,
+      finishedAt: row.finished_at
+    };
   }
 
   async close() {

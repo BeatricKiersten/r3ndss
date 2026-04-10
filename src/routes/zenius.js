@@ -6,6 +6,8 @@ router.post('/details', zeniusController.getInstanceDetails);
 router.post('/download', zeniusController.download);
 router.post('/batch-chain', zeniusController.getBatchChain);
 router.post('/batch-download', zeniusController.downloadBatch);
+router.get('/batch-sessions', zeniusController.getBatchSessions);
+router.get('/batch-sessions/:id', zeniusController.getBatchSessionStatus);
 
 // New management endpoints
 router.post('/cancel-all', zeniusController.cancelAll);

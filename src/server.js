@@ -248,6 +248,35 @@ async function startServer() {
     }
 
     await uploaderService.start();
+
+    try {
+      const staleResult = await db.resetStaleProcessingJobs(10);
+      if (staleResult.resetCount > 0) {
+        console.log(`[Server] Recovered ${staleResult.resetCount} stale jobs from previous session`);
+      }
+    } catch (_) {}
+
+    try {
+      const expiredSessions = await db.cleanupExpiredBatchSessions();
+      if (expiredSessions.deletedCount > 0) {
+        console.log(`[Server] Cleaned up ${expiredSessions.deletedCount} expired batch sessions`);
+      }
+    } catch (_) {}
+
+    try {
+      const activeSessions = await db.getActiveBatchSessions();
+      for (const session of activeSessions) {
+        if (session.status === 'running') {
+          console.log(`[Server] Marking orphaned batch session ${session.id} as failed (server restarted)`);
+          await db.updateBatchSession(session.id, {
+            status: 'failed',
+            error: 'Server restarted during batch processing',
+            hasMore: false
+          });
+        }
+      }
+    } catch (_) {}
+
     startWeeklyChecker();
     
     console.log('[Server] All services initialized successfully');

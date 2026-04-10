@@ -2,9 +2,10 @@ const axios = require('axios');
 const { randomUUID } = require('crypto');
 const path = require('path');
 const pLimit = require('p-limit');
+const { EventEmitter } = require('events');
 
 const config = require('../config');
-const { db, videoProcessor, uploaderService } = require('../services/runtime');
+const { db, videoProcessor, uploaderService, eventEmitter } = require('../services/runtime');
 const webhookService = require('../services/webhookService');
 
 const ZENIUS_BASE_URL = 'https://www.zenius.net';
@@ -22,7 +23,7 @@ const DEFAULT_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_
 const MAX_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_MAX_CHUNK_SIZE || '20', 10);
 const DEFAULT_BATCH_REQUEST_BUDGET_MS = Number.parseInt(process.env.ZENIUS_BATCH_REQUEST_BUDGET_MS || '24000', 10);
 const MAX_BATCH_REQUEST_BUDGET_MS = Number.parseInt(process.env.ZENIUS_BATCH_REQUEST_MAX_BUDGET_MS || '28000', 10);
-const BATCH_SESSION_TTL_MS = Number.parseInt(process.env.ZENIUS_BATCH_SESSION_TTL_MS || '900000', 10);
+const BATCH_SESSION_TTL_MS = Number.parseInt(process.env.ZENIUS_BATCH_SESSION_TTL_MS || '7200000', 10);
 const BATCH_UPSTREAM_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_BATCH_UPSTREAM_TIMEOUT_MS || '7000', 10);
 const BATCH_UPSTREAM_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_BATCH_UPSTREAM_MAX_RETRIES || '1', 10);
 const BATCH_DEADLINE_GUARD_MS = Number.parseInt(process.env.ZENIUS_BATCH_DEADLINE_GUARD_MS || '1200', 10);
@@ -122,6 +123,15 @@ class DownloadQueue {
     console.log(`[DownloadQueue] Starting #${task.id} ${urlShortId} (active: ${this._active.size}/${this._maxConcurrent}, queued: ${this._queue.length})`);
 
     let fileId = null;
+    const startTime = Date.now();
+
+    broadcastDownloadProgress({
+      urlShortId,
+      taskId: task.id,
+      phase: 'starting',
+      progress: 0,
+      message: 'Starting download'
+    });
 
     try {
       const result = await videoProcessor.processHls(videoUrl, {
@@ -134,12 +144,31 @@ class DownloadQueue {
 
       fileId = result.fileId;
 
+      broadcastDownloadProgress({
+        urlShortId,
+        taskId: task.id,
+        phase: 'downloaded',
+        progress: 50,
+        fileId,
+        message: 'Download complete, queuing upload'
+      });
+
       if (result.skipped) {
         let uploadQueueResult = null;
         if (result.reason === 'File already exists') {
           uploadQueueResult = await uploaderService.queueFileUpload(result.fileId, result.outputPath, folderId, selectedProviders);
         }
         console.log(`[DownloadQueue] #${task.id} ${urlShortId} skipped: ${result.reason}`);
+
+        broadcastDownloadComplete({
+          urlShortId,
+          taskId: task.id,
+          fileId,
+          skipped: true,
+          reason: result.reason,
+          durationMs: Date.now() - startTime
+        });
+
         return { success: true, id: task.id, fileId, urlShortId, skipped: true, reason: result.reason, uploadQueue: uploadQueueResult };
       }
 
@@ -147,9 +176,24 @@ class DownloadQueue {
 
       await uploaderService.queueFileUpload(result.fileId, result.outputPath, folderId, selectedProviders);
 
+      broadcastDownloadComplete({
+        urlShortId,
+        taskId: task.id,
+        fileId,
+        durationMs: Date.now() - startTime
+      });
+
       return { success: true, id: task.id, fileId, urlShortId };
     } catch (error) {
       console.error(`[DownloadQueue] #${task.id} ${urlShortId} failed:`, error.message);
+
+      broadcastDownloadFailed({
+        urlShortId,
+        taskId: task.id,
+        error: error.message,
+        durationMs: Date.now() - startTime
+      });
+
       throw error;
     }
   }
@@ -189,6 +233,23 @@ class DownloadQueue {
 }
 
 const downloadQueue = new DownloadQueue(DEFAULT_MAX_CONCURRENT_DOWNLOADS);
+const downloadEvents = new EventEmitter();
+downloadEvents.setMaxListeners(50);
+
+function broadcastDownloadProgress(data) {
+  downloadEvents.emit('progress', data);
+  eventEmitter.emit('download:progress', data);
+}
+
+function broadcastDownloadComplete(data) {
+  downloadEvents.emit('completed', data);
+  eventEmitter.emit('download:completed', data);
+}
+
+function broadcastDownloadFailed(data) {
+  downloadEvents.emit('failed', data);
+  eventEmitter.emit('download:failed', data);
+}
 
 const KNOWN_REQUEST_HEADERS = new Set([
   'accept',
@@ -438,12 +499,23 @@ function createBatchChainSession({ rootCgId, targetCgSelector, parentContainerNa
 function touchBatchChainSession(session) {
   const now = Date.now();
   session.updatedAt = now;
-  session.expiresAt = now + clampPositiveInt(BATCH_SESSION_TTL_MS, 900000);
+  session.expiresAt = now + clampPositiveInt(BATCH_SESSION_TTL_MS, 7200000);
 }
 
 function cleanupExpiredBatchChainSessions() {
   const now = Date.now();
+  const activeSessionIds = new Set();
+  for (const run of backgroundBatchRuns.values()) {
+    if (run?.status === 'running' && run?.sessionId) {
+      activeSessionIds.add(run.sessionId);
+    }
+  }
+
   for (const [sessionId, session] of batchChainSessions.entries()) {
+    if (activeSessionIds.has(sessionId)) {
+      if (session) session.expiresAt = now + clampPositiveInt(BATCH_SESSION_TTL_MS, 7200000);
+      continue;
+    }
     if (!session || session.expiresAt <= now) {
       batchChainSessions.delete(sessionId);
     }
@@ -471,6 +543,8 @@ function createBackgroundBatchRun({ rootCgId, targetCgSelector, baseFolderInput,
     processedContainers: 0,
     queuedCount: 0,
     skippedCount: 0,
+    downloadCompletedCount: 0,
+    downloadFailedCount: 0,
     queued: [],
     skipped: [],
     chainErrors: [],
@@ -503,6 +577,8 @@ function summarizeBackgroundBatchRun(run) {
     processedContainers: run.processedContainers,
     queuedCount: run.queuedCount,
     skippedCount: run.skippedCount,
+    downloadCompletedCount: run.downloadCompletedCount || 0,
+    downloadFailedCount: run.downloadFailedCount || 0,
     hasMoreContainers: run.hasMoreContainers,
     nextContainerOffset: run.nextContainerOffset,
     chainErrors: Array.isArray(run.chainErrors) ? run.chainErrors : [],
@@ -1678,7 +1754,7 @@ function queueDownload(task) {
   return downloadQueue.add(task);
 }
 
-async function queueBatchDownloadChunk({ chain, requestContext, refererPath, baseFolderInput, selectedProviders, cancelled = () => false }) {
+async function queueBatchDownloadChunk({ chain, requestContext, refererPath, baseFolderInput, selectedProviders, runId = null, cancelled = () => false }) {
   const queued = [];
   const skipped = [];
 
@@ -1767,9 +1843,19 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
           console.log(`[Zenius] Batch download ${urlShortId} was cancelled`);
         } else {
           console.log(`[Zenius] Batch download ${urlShortId} completed successfully`);
+          if (runId && backgroundBatchRuns.has(runId)) {
+            const run = backgroundBatchRuns.get(runId);
+            run.downloadCompletedCount = (run.downloadCompletedCount || 0) + 1;
+            touchBackgroundBatchRun(run);
+          }
         }
       }).catch((error) => {
         console.error(`[Zenius] Batch download pipeline failed for ${urlShortId}:`, error.message);
+        if (runId && backgroundBatchRuns.has(runId)) {
+          const run = backgroundBatchRuns.get(runId);
+          run.downloadFailedCount = (run.downloadFailedCount || 0) + 1;
+          touchBackgroundBatchRun(run);
+        }
       });
 
       queued.push({
@@ -1788,6 +1874,32 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
 }
 
 async function processBackgroundBatchRun(run, payload) {
+  let dbSession = null;
+  try {
+    dbSession = await db.createBatchSession({
+      id: run.id,
+      runId: run.id,
+      rootCgId: payload.rootCgId || DEFAULT_BATCH_ROOT_CGROUP_ID,
+      rootCgName: null,
+      targetCgSelector: payload.targetCgSelector || null,
+      parentContainerName: payload.parentContainerName || '',
+      status: 'running',
+      totalContainers: 0,
+      processedContainers: 0,
+      queuedCount: 0,
+      skippedCount: 0,
+      nextContainerOffset: 0,
+      hasMore: true,
+      sessionData: {},
+      queuedItems: [],
+      skippedItems: [],
+      chainErrors: [],
+      expiresAt: run.expiresAt
+    });
+  } catch (dbError) {
+    console.warn(`[Zenius] Failed to persist batch session to DB: ${dbError.message}`);
+  }
+
   try {
     let currentSessionId = run.sessionId || null;
     let nextOffset = 0;
@@ -1831,6 +1943,7 @@ async function processBackgroundBatchRun(run, payload) {
         refererPath: payload.refererPath,
         baseFolderInput: payload.baseFolderInput,
         selectedProviders: payload.selectedProviders,
+        runId: run.id,
         cancelled: () => run.status !== 'running'
       });
 
@@ -1843,6 +1956,40 @@ async function processBackgroundBatchRun(run, payload) {
         : Number(chain.totalContainers || run.processedContainers || 0);
 
       touchBackgroundBatchRun(run);
+
+      if (dbSession) {
+        try {
+          dbSession = await db.updateBatchSession(run.id, {
+            status: 'running',
+            rootCgName: run.rootCgName,
+            parentContainerName: run.parentContainerName,
+            totalContainers: run.totalContainers,
+            processedContainers: run.processedContainers,
+            queuedCount: run.queuedCount,
+            skippedCount: run.skippedCount,
+            nextContainerOffset: run.nextContainerOffset,
+            hasMore: run.hasMoreContainers,
+            queuedItems: run.queued,
+            skippedItems: run.skipped,
+            chainErrors: run.chainErrors,
+            sessionData: { sessionId: currentSessionId }
+          });
+        } catch (dbErr) {
+          console.warn(`[Zenius] Failed to update batch session in DB: ${dbErr.message}`);
+        }
+      }
+
+      eventEmitter.emit('batch:progress', {
+        batchRunId: run.id,
+        rootCgId: run.rootCgId,
+        rootCgName: run.rootCgName,
+        totalContainers: run.totalContainers,
+        processedContainers: run.processedContainers,
+        queuedCount: run.queuedCount,
+        skippedCount: run.skippedCount,
+        hasMore: run.hasMoreContainers,
+        sessionId: currentSessionId
+      });
 
       hasMore = Boolean(chain.hasMoreContainers);
       nextOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : 0;
@@ -1860,6 +2007,24 @@ async function processBackgroundBatchRun(run, payload) {
     touchBackgroundBatchRun(run);
     console.error(`[Zenius] Background batch run ${run.id} failed:`, error.message);
   } finally {
+    if (dbSession) {
+      try {
+        await db.updateBatchSession(run.id, {
+          status: run.status,
+          error: run.error,
+          queuedCount: run.queuedCount,
+          skippedCount: run.skippedCount,
+          processedContainers: run.processedContainers,
+          hasMore: false,
+          queuedItems: run.queued,
+          skippedItems: run.skipped,
+          chainErrors: run.chainErrors
+        });
+      } catch (dbErr) {
+        console.warn(`[Zenius] Failed to finalize batch session in DB: ${dbErr.message}`);
+      }
+    }
+
     if (run.status === 'completed' || run.status === 'failed') {
       webhookService.sendBatchComplete(db, {
         id: run.id,
@@ -2140,6 +2305,20 @@ const zeniusController = {
 
   async downloadBatch(req, res) {
     try {
+      const sessionId = normalizeSessionId(req.body?.sessionId);
+      if (!sessionId || !batchChainSessions.has(sessionId)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Preview chain required before batch download. Call /batch-chain first to build a preview session, then pass the sessionId here.'
+        });
+      }
+
+      // Touch the session BEFORE cleanup to ensure it won't be expired
+      const session = batchChainSessions.get(sessionId);
+      if (session) {
+        touchBatchChainSession(session);
+      }
+
       cleanupExpiredBatchChainSessions();
       cleanupExpiredBackgroundBatchRuns();
 
@@ -2150,14 +2329,6 @@ const zeniusController = {
         || clampPositiveInt(BACKGROUND_BATCH_CHUNK_SIZE, 6);
       const timeBudgetMs = normalizeBatchRequestBudgetMs(req.body?.timeBudgetMs);
       const keepaliveUrl = resolveBackgroundKeepaliveUrl(req);
-
-      const sessionId = normalizeSessionId(req.body?.sessionId);
-      if (!sessionId || !batchChainSessions.has(sessionId)) {
-        return res.status(400).json({
-          success: false,
-          error: 'Preview chain required before batch download. Call /batch-chain first to build a preview session, then pass the sessionId here.'
-        });
-      }
 
       const run = createBackgroundBatchRun({
         rootCgId: normalizeCgId(req.body?.rootCgId, DEFAULT_BATCH_ROOT_CGROUP_ID),
@@ -2298,6 +2469,44 @@ const zeniusController = {
       res.json({ success: true, data: result });
     } catch (error) {
       res.status(400).json({ success: false, error: error.message });
+    }
+  },
+
+  async getBatchSessions(req, res) {
+    try {
+      await db.cleanupExpiredBatchSessions();
+      const activeSessions = await db.getActiveBatchSessions();
+      const inMemoryBatches = getBackgroundBatchRunsSummary();
+      res.json({
+        success: true,
+        data: {
+          dbSessions: activeSessions,
+          inMemoryBatches,
+          queueStatus: getZeniusStatusSnapshot()
+        }
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  async getBatchSessionStatus(req, res) {
+    try {
+      const sessionId = req.params.id;
+      const dbSession = await db.getBatchSession(sessionId);
+      if (!dbSession) {
+        return res.status(404).json({ success: false, error: 'Batch session not found' });
+      }
+      const inMemoryRun = backgroundBatchRuns.get(sessionId);
+      res.json({
+        success: true,
+        data: {
+          dbSession,
+          inMemoryRun: inMemoryRun ? summarizeBackgroundBatchRun(inMemoryRun) : null
+        }
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
     }
   }
 };

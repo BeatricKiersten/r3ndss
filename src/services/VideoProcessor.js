@@ -32,6 +32,7 @@ class VideoProcessor {
     this.db = dbHandler;
     this.eventEmitter = eventEmitter;
     this.activeProcesses = new Map();
+    this._jobHeartbeats = new Map();
   }
 
   /**
@@ -53,18 +54,15 @@ class VideoProcessor {
     let createdJobId = null;
     
     try {
-      // Resolve output directory and ensure it exists
       const resolvedOutputDir = this._resolveOutputDir(outputDir);
       await fs.ensureDir(resolvedOutputDir);
       
-      // Generate output filename
       const timestamp = Date.now();
       const baseName = this._sanitizeFileBaseName(outputName) || `video_${timestamp}`;
       const outputFileName = `${baseName}.mp4`;
       const outputPath = path.join(resolvedOutputDir, outputFileName);
       const tempPlaylistPath = path.join(resolvedOutputDir, `playlist_${processId}.m3u8`);
 
-      // Check for duplicate file in the same folder
       if (skipIfExists) {
         const existingFile = await this.db.findFileByNameInFolder(folderId, outputFileName);
         if (existingFile) {
@@ -97,7 +95,6 @@ class VideoProcessor {
         }
       }
 
-      // Create file record
       const file = await this.db.createFile({
         folderId,
         name: outputFileName,
@@ -105,7 +102,6 @@ class VideoProcessor {
         localPath: outputPath
       });
 
-      // Create processing job
       const job = await this.db.createJob({
         type: 'process',
         fileId: file.id,
@@ -119,63 +115,117 @@ class VideoProcessor {
       });
       createdJobId = job.id;
 
-      // Emit event for real-time updates
       this.eventEmitter.emit('job:started', { jobId: job.id, fileId: file.id, type: 'process' });
 
-      // Start processing
-      await this._executeFfmpeg(job.id, file.id, hlsUrl, outputPath, {
-        decryptionKey,
-        headers,
-        cookies,
-        tempPlaylistPath
-      });
+      let lastError = null;
+      let succeeded = false;
 
-      // Verify output file
-      const stats = await fs.stat(outputPath);
-      if (stats.size === 0) {
-        throw new Error('Output file is empty');
+      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          console.log(`[VideoProcessor] Attempt ${attempt}/${MAX_RETRIES} for ${outputFileName}`);
+
+          await this.db.updateJob(job.id, {
+            status: 'processing',
+            attempts: attempt,
+            progress: 0
+          });
+
+          await this.db.updateFileProgress(file.id, 'processing', 0);
+
+          this._startJobHeartbeat(job.id);
+
+          await this._executeFfmpeg(job.id, file.id, hlsUrl, outputPath, {
+            decryptionKey,
+            headers,
+            cookies,
+            tempPlaylistPath
+          });
+
+          this._stopJobHeartbeat(job.id);
+
+          const stats = await fs.stat(outputPath);
+          if (stats.size === 0) {
+            throw new Error('Output file is empty');
+          }
+
+          const duration = await this._getVideoDuration(outputPath);
+          await this.db.updateFileProgress(file.id, 'processing', 100);
+          
+          await this.db.updateJob(job.id, {
+            status: 'completed',
+            progress: 100,
+            metadata: {
+              ...(job.metadata || {}),
+              fileSize: stats.size,
+              duration,
+              completedAt: new Date().toISOString()
+            }
+          });
+
+          await this.db.updateFileMetadata(file.id, {
+            size: stats.size,
+            duration
+          });
+
+          await this._cleanup(tempPlaylistPath);
+
+          this.eventEmitter.emit('job:completed', { jobId: job.id, fileId: file.id });
+          this.eventEmitter.emit('file:ready', { fileId: file.id, filePath: outputPath });
+
+          succeeded = true;
+          lastError = null;
+          break;
+        } catch (error) {
+          this._stopJobHeartbeat(job.id);
+          lastError = error;
+          console.error(`[VideoProcessor] Attempt ${attempt}/${MAX_RETRIES} failed for ${outputFileName}:`, error.message);
+
+          if (attempt < MAX_RETRIES) {
+            await this.db.updateJob(job.id, {
+              status: 'pending',
+              progress: 0,
+              error: `Attempt ${attempt} failed: ${error.message}`
+            });
+            await this.db.updateFileProgress(file.id, 'processing', 0);
+
+            try {
+              if (await fs.pathExists(outputPath)) {
+                await fs.remove(outputPath);
+              }
+            } catch (_) {}
+
+            const delay = RETRY_DELAY * attempt;
+            console.log(`[VideoProcessor] Retrying in ${delay}ms...`);
+            await this._sleep(delay);
+          }
+        }
       }
 
-      // Update file record with success
-      const duration = await this._getVideoDuration(outputPath);
-      await this.db.updateFileProgress(file.id, 'processing', 100);
-      
-      const updatedFile = await this.db.updateJob(job.id, {
-        status: 'completed',
-        progress: 100,
-        metadata: {
-          ...job.metadata,
-          fileSize: stats.size,
-          duration
-        }
-      });
+      if (!succeeded) {
+        await this.db.updateJob(createdJobId, {
+          status: 'failed',
+          error: lastError?.message || 'All retry attempts exhausted'
+        });
 
-      // Update file size and duration
-      await this.db.updateFileMetadata(file.id, {
-        size: stats.size,
-        duration
-      });
+        this.eventEmitter.emit('job:failed', { jobId: createdJobId, error: lastError?.message });
+        throw lastError || new Error('Processing failed after all retries');
+      }
 
-      // Cleanup temp files
-      await this._cleanup(tempPlaylistPath);
-
-      this.eventEmitter.emit('job:completed', { jobId: job.id, fileId: file.id });
-      this.eventEmitter.emit('file:ready', { fileId: file.id, filePath: outputPath });
-
+      const finalFile = await this.db.getFile(file.id);
       return {
         success: true,
         fileId: file.id,
         jobId: job.id,
         outputPath,
-        size: stats.size,
-        duration
+        size: finalFile.size,
+        duration: finalFile.duration
       };
 
     } catch (error) {
       console.error('Video processing failed:', error);
       
-      // Update job with failure
       if (createdJobId) {
+        this._stopJobHeartbeat(createdJobId);
         await this.db.updateJob(createdJobId, {
           status: 'failed',
           error: error.message
@@ -440,10 +490,29 @@ class VideoProcessor {
     return lastError || `FFmpeg process exited with code ${code}`;
   }
 
+  _startJobHeartbeat(jobId) {
+    this._stopJobHeartbeat(jobId);
+    const timer = setInterval(async () => {
+      try {
+        await this.db.updateJobHeartbeat(jobId);
+      } catch (_) {}
+    }, 15000);
+    this._jobHeartbeats.set(jobId, timer);
+  }
+
+  _stopJobHeartbeat(jobId) {
+    const timer = this._jobHeartbeats.get(jobId);
+    if (timer) {
+      clearInterval(timer);
+      this._jobHeartbeats.delete(jobId);
+    }
+  }
+
   /**
    * Cancel active FFmpeg process
    */
   async cancelJob(jobId) {
+    this._stopJobHeartbeat(jobId);
     const process = this.activeProcesses.get(jobId);
     if (process) {
       process.kill('SIGTERM');

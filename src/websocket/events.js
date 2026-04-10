@@ -47,6 +47,10 @@ const websocketHandler = {
       'upload:failed',
       'upload:progress',
       'upload:queued',
+      'download:progress',
+      'download:completed',
+      'download:failed',
+      'batch:progress',
       'provider:checked',
       'provider:checked:bulk',
       'system:checked'
@@ -56,7 +60,7 @@ const websocketHandler = {
       emitter.on(event, (data) => {
         this.broadcast(event, data);
 
-        if (['job:completed', 'job:failed', 'upload:completed', 'upload:failed'].includes(event)) {
+        if (['job:completed', 'job:failed', 'upload:completed', 'upload:failed', 'download:completed', 'download:failed', 'batch:progress'].includes(event)) {
           setTimeout(() => {
             clients.forEach(client => sendDashboardData(client));
           }, 500);
