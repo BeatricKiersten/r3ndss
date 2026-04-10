@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { useCancelJob, useDeleteJob, useJobs, useProviders, useQueueTransferJob } from '../hooks/api';
-import { Trash2, Plus, Loader2, XCircle, CheckCircle2, Clock3, RefreshCw } from 'lucide-react';
+import { useCancelJob, useCancelAllJobs, useClearJobLogs, useDeleteJob, useJobs, useProviders, useQueueTransferJob } from '../hooks/api';
+import { Trash2, Plus, Loader2, XCircle, CheckCircle2, Clock3, RefreshCw, AlertOctagon, Eraser } from 'lucide-react';
+import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 
 const JOB_STATUS_OPTIONS = ['', 'pending', 'processing', 'completed', 'failed', 'cancelled'];
 
@@ -23,9 +24,13 @@ export default function JobsPage() {
   const [targetProvider, setTargetProvider] = useState('seekstreaming');
   const [statusFilter, setStatusFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
+  const [showCancelAllConfirm, setShowCancelAllConfirm] = useState(false);
+  const [showClearLogsConfirm, setShowClearLogsConfirm] = useState(false);
 
   const queueTransfer = useQueueTransferJob();
   const cancelJob = useCancelJob();
+  const cancelAllJobs = useCancelAllJobs();
+  const clearJobLogs = useClearJobLogs();
   const deleteJob = useDeleteJob();
   const { data: providers = {} } = useProviders();
 
@@ -72,6 +77,21 @@ export default function JobsPage() {
     if (!window.confirm(`Delete job ${job.id}?`)) return;
     await deleteJob.mutateAsync(job.id);
   };
+
+  const handleCancelAll = async () => {
+    await cancelAllJobs.mutateAsync();
+    setShowCancelAllConfirm(false);
+  };
+
+  const handleClearLogs = async () => {
+    await clearJobLogs.mutateAsync();
+    setShowClearLogsConfirm(false);
+  };
+
+  // Count active jobs
+  const activeJobsCount = useMemo(() => {
+    return jobs.filter(job => job.status === 'pending' || job.status === 'processing').length;
+  }, [jobs]);
 
   return (
     <div className="space-y-5 max-w-6xl mx-auto">
@@ -138,6 +158,36 @@ export default function JobsPage() {
             </select>
             <button onClick={() => refetch()} className="btn !py-1.5 !px-2" type="button">
               <RefreshCw className={`w-3.5 h-3.5 ${isFetching ? 'animate-spin' : ''}`} />
+            </button>
+            {activeJobsCount > 0 && (
+              <button
+                onClick={() => setShowCancelAllConfirm(true)}
+                disabled={cancelAllJobs.isLoading}
+                className="btn !py-1.5 !px-2 bg-red-500/20 text-red-400 hover:bg-red-500/30 border-red-500/40"
+                type="button"
+                title={`Cancel all ${activeJobsCount} running jobs`}
+              >
+                {cancelAllJobs.isLoading ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <AlertOctagon className="w-3.5 h-3.5" />
+                )}
+                <span className="ml-1 text-xs">Stop All ({activeJobsCount})</span>
+              </button>
+            )}
+            <button
+              onClick={() => setShowClearLogsConfirm(true)}
+              disabled={clearJobLogs.isLoading}
+              className="btn !py-1.5 !px-2 bg-orange-500/20 text-orange-400 hover:bg-orange-500/30 border-orange-500/40"
+              type="button"
+              title="Clear completed/failed/cancelled job logs"
+            >
+              {clearJobLogs.isLoading ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Eraser className="w-3.5 h-3.5" />
+              )}
+              <span className="ml-1 text-xs">Clear Logs</span>
             </button>
           </div>
         </div>
@@ -224,6 +274,52 @@ export default function JobsPage() {
           </div>
         )}
       </div>
+
+      {/* Cancel All Confirmation Dialog */}
+      <ConfirmDialog
+        isOpen={showCancelAllConfirm}
+        onClose={() => setShowCancelAllConfirm(false)}
+        onConfirm={handleCancelAll}
+        title="Cancel All Running Jobs"
+        message={`This will cancel all ${activeJobsCount} running jobs (pending and processing). This action cannot be undone. Are you sure?`}
+        confirmText="Cancel All"
+        variant="danger"
+      />
+
+      {/* Success/Error Messages */}
+      {cancelAllJobs.isSuccess && (
+        <div className="fixed bottom-4 right-4 bg-[#1a1a1a] border border-emerald-500/40 text-emerald-400 px-4 py-3 rounded-lg shadow-lg z-50">
+          Cancelled {cancelAllJobs.data?.data?.cancelled} jobs successfully
+        </div>
+      )}
+      {cancelAllJobs.isError && (
+        <div className="fixed bottom-4 right-4 bg-[#1a1a1a] border border-red-500/40 text-red-400 px-4 py-3 rounded-lg shadow-lg z-50">
+          Failed to cancel jobs: {cancelAllJobs.error?.message}
+        </div>
+      )}
+
+      {/* Clear Logs Confirmation Dialog */}
+      <ConfirmDialog
+        isOpen={showClearLogsConfirm}
+        onClose={() => setShowClearLogsConfirm(false)}
+        onConfirm={handleClearLogs}
+        title="Clear Job Logs"
+        message="This will permanently delete all completed, failed, and cancelled jobs from the database. Active jobs (pending/processing) will not be affected. Are you sure?"
+        confirmText="Clear Logs"
+        variant="warning"
+      />
+
+      {/* Clear Logs Success/Error Messages */}
+      {clearJobLogs.isSuccess && (
+        <div className="fixed bottom-4 right-4 bg-[#1a1a1a] border border-emerald-500/40 text-emerald-400 px-4 py-3 rounded-lg shadow-lg z-50">
+          Cleared {clearJobLogs.data?.data?.deletedCount} job logs successfully
+        </div>
+      )}
+      {clearJobLogs.isError && (
+        <div className="fixed bottom-4 right-4 bg-[#1a1a1a] border border-red-500/40 text-red-400 px-4 py-3 rounded-lg shadow-lg z-50">
+          Failed to clear logs: {clearJobLogs.error?.message}
+        </div>
+      )}
     </div>
   );
 }

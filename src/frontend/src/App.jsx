@@ -24,6 +24,7 @@ const shortcuts = [
   { key: 'r', description: 'Go to Rclone' },
   { key: 's', description: 'Go to Status' },
   { key: 'z', description: 'Go to Zenius' },
+  { key: 'Ctrl+B', description: 'Focus batch input (Zenius)' },
   { key: '1-8', description: 'Navigate by position' },
   { key: '?', description: 'Show shortcuts' },
   { key: 'Esc', description: 'Close modal/drawer' },

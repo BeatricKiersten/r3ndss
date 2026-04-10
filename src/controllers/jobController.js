@@ -46,6 +46,66 @@ const jobController = {
     } catch (error) {
       res.status(400).json({ success: false, error: error.message });
     }
+  },
+
+  async cancelAll(req, res) {
+    try {
+      // Get all active jobs (pending or processing)
+      const activeJobs = await uploaderService.listJobs({
+        status: null,
+        limit: 1000
+      });
+      
+      const jobsToCancel = activeJobs.filter(job => 
+        job.status === 'pending' || job.status === 'processing'
+      );
+      
+      const results = {
+        cancelled: 0,
+        failed: 0,
+        details: []
+      };
+      
+      for (const job of jobsToCancel) {
+        try {
+          if (job.type === 'process') {
+            await videoProcessor.cancelJob(job.id);
+            await db.updateJob(job.id, {
+              status: 'cancelled',
+              error: 'Cancelled by user (bulk cancel)'
+            });
+          } else {
+            await uploaderService.cancelJob(job.id);
+          }
+          results.cancelled++;
+          results.details.push({ jobId: job.id, status: 'cancelled' });
+        } catch (err) {
+          results.failed++;
+          results.details.push({ jobId: job.id, status: 'error', error: err.message });
+        }
+      }
+      
+      res.json({
+        success: true,
+        message: `Cancelled ${results.cancelled} jobs`,
+        data: results
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  async clearLogs(req, res) {
+    try {
+      const result = await db.deleteCompletedJobs();
+      res.json({
+        success: true,
+        message: `Cleared ${result.deletedCount} completed/failed/cancelled jobs`,
+        data: result
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
   }
 };
 

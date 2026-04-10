@@ -222,23 +222,40 @@ app.use(errorHandler);
 
 async function startServer() {
   try {
-    // Validate database connectivity before starting workers.
-    await db.getProviderConfigs();
-
-    await uploaderService.start();
-    startWeeklyChecker();
-    
+    // Bind server to port ASAP to satisfy Heroku's 60s startup requirement
     server.listen(config.port, () => {
       console.log(`========================================`);
       console.log(`HLS-to-MP4 Backup Platform Server`);
       console.log(`Running on port ${config.port}`);
-      console.log(`WebSocket enabled for real-time updates`);
-      console.log(`Weekly checker enabled`);
+      console.log(`Initializing services...`);
       console.log(`========================================`);
     });
+
+    // Validate database connectivity with timeout
+    const DB_TIMEOUT_MS = 30000; // 30 seconds max for DB connection
+    const dbCheckPromise = db.getProviderConfigs();
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Database connection timeout (30s)')), DB_TIMEOUT_MS)
+    );
+    
+    try {
+      await Promise.race([dbCheckPromise, timeoutPromise]);
+      console.log('[Server] Database connected successfully');
+    } catch (dbError) {
+      console.error('[Server] Database connection failed:', dbError.message);
+      console.error('[Server] Please check MYSQL_URL environment variable');
+      // Don't crash - let the server run but APIs will fail
+    }
+
+    await uploaderService.start();
+    startWeeklyChecker();
+    
+    console.log('[Server] All services initialized successfully');
+    console.log('[Server] Server is fully ready');
   } catch (error) {
     console.error('Failed to start server:', error);
-    process.exit(1);
+    // Keep server running even if some services fail
+    console.log('[Server] Server running with degraded functionality');
   }
 }
 

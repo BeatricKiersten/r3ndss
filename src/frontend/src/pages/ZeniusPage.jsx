@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Download,
   KeyRound,
@@ -13,12 +13,36 @@ import {
   Shield,
   XCircle,
   RotateCcw,
-  Activity
+  Activity,
+  Folder,
+  Trash,
+  ChevronDown,
+  ChevronUp,
+  ChevronRight,
+  Copy,
+  Eye,
+  Zap,
+  HelpCircle,
+  ExternalLink,
+  RefreshCw,
+  Pause,
+  Play,
+  X,
+  Bell,
+  BellOff,
+  Send,
+  FolderTree,
+  Home
 } from 'lucide-react';
 import {
+  useDeleteAllFolders,
   useDeleteFolder,
   useFolders,
   useProviders,
+  useSetMaxConcurrent,
+  useTestWebhook,
+  useUpdateWebhookConfig,
+  useWebhookConfig,
   useZeniusBatchChain,
   useZeniusBatchDownload,
   useZeniusCancelAll,
@@ -29,17 +53,16 @@ import {
 } from '../hooks/api';
 import { getProviderConfig } from '../config/providers';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
+import { toast } from '../store/toastStore';
 
 const HEADERS_STORAGE_KEY = 'zenius-headers-raw';
+const PROVIDERS_STORAGE_KEY = 'zenius-selected-providers';
 const BATCH_CHAIN_CHUNK_SIZE = 8;
 const BATCH_DOWNLOAD_CHUNK_SIZE = 6;
 const BATCH_REQUEST_BUDGET_MS = 24000;
 
 function formatDuration(seconds) {
-  if (!Number.isFinite(seconds) || seconds <= 0) {
-    return '-';
-  }
-
+  if (!Number.isFinite(seconds) || seconds <= 0) return '-';
   const totalSeconds = Math.floor(seconds);
   const hh = String(Math.floor(totalSeconds / 3600)).padStart(2, '0');
   const mm = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, '0');
@@ -49,33 +72,18 @@ function formatDuration(seconds) {
 
 function normalizeFolderInput(rawValue) {
   const raw = String(rawValue || '').trim();
-  if (!raw) {
-    return '';
-  }
-
-  const unwrapped = ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith('\'') && raw.endsWith('\'')))
+  if (!raw) return '';
+  const unwrapped = ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'")))
     ? raw.slice(1, -1).trim()
     : raw;
-
-  let normalized = unwrapped
-    .replace(/\\/g, '/')
-    .replace(/^\/+/, '')
-    .replace(/\/+/g, '/');
-
-  if (normalized.toLowerCase() === 'root') {
-    return '';
-  }
-
-  if (normalized.toLowerCase().startsWith('root/')) {
-    normalized = normalized.slice(5);
-  }
-
+  let normalized = unwrapped.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+/g, '/');
+  if (normalized.toLowerCase() === 'root') return '';
+  if (normalized.toLowerCase().startsWith('root/')) normalized = normalized.slice(5);
   return normalized.trim();
 }
 
 function flattenFolderPaths(folderTree) {
   const result = [];
-
   const walk = (node, parentPath = '') => {
     (node?.folders || []).forEach((folder) => {
       const currentPath = parentPath ? `${parentPath}/${folder.name}` : folder.name;
@@ -83,9 +91,205 @@ function flattenFolderPaths(folderTree) {
       walk(folder.children, currentPath);
     });
   };
-
   walk(folderTree, '');
   return result;
+}
+
+function loadSavedProviders() {
+  try {
+    const saved = localStorage.getItem(PROVIDERS_STORAGE_KEY);
+    return saved ? JSON.parse(saved) : [];
+  } catch {
+    return [];
+  }
+}
+
+function StatusBadge({ status }) {
+  const config = {
+    completed: { bg: 'bg-emerald-500/10', text: 'text-emerald-400', label: 'Done' },
+    processing: { bg: 'bg-blue-500/10', text: 'text-blue-400', label: 'Processing' },
+    uploading: { bg: 'bg-sky-500/10', text: 'text-sky-400', label: 'Uploading' },
+    failed: { bg: 'bg-red-500/10', text: 'text-red-400', label: 'Failed' },
+    pending: { bg: 'bg-zinc-500/10', text: 'text-zinc-400', label: 'Queued' },
+    skipped: { bg: 'bg-amber-500/10', text: 'text-amber-400', label: 'Skipped' },
+  };
+  const c = config[status] || config.pending;
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium ${c.bg} ${c.text}`}>
+      {c.label}
+    </span>
+  );
+}
+
+function CollapsibleSection({ title, icon: Icon, defaultOpen = false, children, badge, rightElement }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="card overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center justify-between p-4 hover:bg-[#1f1f1f] transition-colors"
+      >
+        <div className="flex items-center gap-2">
+          {Icon && <Icon className="w-4 h-4 text-[#666]" />}
+          <span className="text-sm font-medium text-[#ccc]">{title}</span>
+          {badge && <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#2a2a2a] text-[#888]">{badge}</span>}
+        </div>
+        <div className="flex items-center gap-2">
+          {rightElement}
+          {open ? <ChevronUp className="w-4 h-4 text-[#666]" /> : <ChevronDown className="w-4 h-4 text-[#666]" />}
+        </div>
+      </button>
+      {open && <div className="px-4 pb-4 border-t border-[#222]">{children}</div>}
+    </div>
+  );
+}
+
+function FolderPickerModal({ isOpen, onClose, onSelect, folderTree, currentValue, title, description }) {
+  const [search, setSearch] = useState('');
+  const [selectedId, setSelectedId] = useState(null);
+
+  const folders = useMemo(() => {
+    if (!folderTree) return [];
+    const result = [{ id: 'root', name: 'Root', path: '/', depth: -1, hasSubfolders: true }];
+    const walk = (node, parentPath = '', depth = 0) => {
+      (node?.folders || []).forEach((folder) => {
+        const currentPath = parentPath ? `${parentPath}/${folder.name}` : folder.name;
+        const hasSubfolders = (folder.children?.folders || []).length > 0;
+        result.push({ id: folder.id, name: folder.name, path: currentPath, depth, hasSubfolders });
+        walk(folder.children, currentPath, depth + 1);
+      });
+    };
+    walk(folderTree, '', 0);
+    return result;
+  }, [folderTree]);
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return folders;
+    const q = search.toLowerCase();
+    return folders.filter((f) => f.name.toLowerCase().includes(q) || f.path.toLowerCase().includes(q));
+  }, [folders, search]);
+
+  useEffect(() => {
+    if (isOpen) {
+      setSearch('');
+      if (currentValue === '' || currentValue === 'root' || currentValue === '/') {
+        setSelectedId('root');
+      } else {
+        const match = folders.find((f) => f.path.toLowerCase() === currentValue.toLowerCase() && f.id !== 'root');
+        setSelectedId(match?.id || null);
+      }
+    }
+  }, [isOpen, currentValue, folders]);
+
+  if (!isOpen) return null;
+
+  const handleSelect = () => {
+    if (!selectedId) { onSelect(''); onClose(); return; }
+    if (selectedId === 'root') { onSelect(''); onClose(); return; }
+    const folder = folders.find((f) => f.id === selectedId);
+    onSelect(folder?.path || '');
+    onClose();
+  };
+
+  const selectedFolder = folders.find((f) => f.id === selectedId);
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="card p-5 max-w-md w-full max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="text-lg font-medium text-white flex items-center gap-2">
+              <FolderTree className="w-5 h-5 text-amber-400" />
+              {title || 'Pilih Folder'}
+            </h3>
+            {description && <p className="text-xs text-[#888] mt-1">{description}</p>}
+          </div>
+          <button onClick={onClose} className="p-1.5 hover:bg-[#222] rounded">
+            <X className="w-5 h-5 text-[#666]" />
+          </button>
+        </div>
+
+        <div className="mb-3">
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-[#555]" />
+            <input
+              type="text"
+              placeholder="Cari folder..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full pl-9 pr-4 py-2.5 bg-[#0d0d0d] border border-[#2a2a2a] rounded-lg text-sm text-[#ccc] placeholder-[#555] focus:outline-none focus:border-[#444]"
+            />
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto border border-[#222] rounded-lg bg-[#0d0d0d] mb-4 min-h-[200px] max-h-[400px]">
+          {filtered.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-10">
+              <Folder className="w-8 h-8 text-[#333] mb-2" />
+              <p className="text-xs text-[#666]">Tidak ada folder ditemukan</p>
+            </div>
+          ) : (
+            <div className="py-1">
+              {filtered.map((f) => {
+                const isSelected = selectedId === f.id;
+                const isRoot = f.id === 'root';
+                return (
+                  <button
+                    key={f.id}
+                    onClick={() => setSelectedId(f.id)}
+                    className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+                      isSelected
+                        ? 'bg-amber-500/10 text-amber-300 border-l-2 border-amber-400'
+                        : 'text-[#aaa] hover:bg-[#141414] hover:text-white border-l-2 border-transparent'
+                    }`}
+                    style={{ paddingLeft: `${(f.depth + 1) * 16 + 12}px` }}
+                  >
+                    {isRoot ? (
+                      <Home className="w-4 h-4 flex-shrink-0 text-[#666]" />
+                    ) : (
+                      <Folder className={`w-4 h-4 flex-shrink-0 ${isSelected ? 'text-amber-400' : 'text-[#555]'}`} />
+                    )}
+                    <span className="truncate flex-1">{f.name}</span>
+                    {isSelected && (
+                      <CheckCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {selectedFolder && (
+          <div className="mb-4 p-3 rounded-lg bg-[#1a1a1a] border border-[#2a2a2a]">
+            <p className="text-xs text-[#888]">
+              Folder prefix: <strong className="text-white">{selectedFolder.id === 'root' ? '(root - tanpa prefix)' : selectedFolder.path}</strong>
+            </p>
+            <p className="text-[10px] text-[#555] mt-1">
+              Video akan disimpan di: <code className="text-[#8aa6d8]">root/{selectedFolder.id === 'root' ? '{chain path}' : `${selectedFolder.path}/{'{'}chain path{'}'}`}</code>
+            </p>
+          </div>
+        )}
+
+        <div className="flex gap-3 justify-end">
+          <button
+            onClick={onClose}
+            className="px-4 py-2.5 text-sm text-[#888] hover:text-white rounded-lg hover:bg-[#222] transition-colors"
+          >
+            Batal
+          </button>
+          <button
+            onClick={handleSelect}
+            className="px-5 py-2.5 text-sm rounded-lg font-medium bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 border border-amber-500/30 transition-colors flex items-center gap-2"
+          >
+            <FolderTree className="w-4 h-4" />
+            Pilih
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function ProviderSelector({ providers, selectedProviders, setSelectedProviders }) {
@@ -94,13 +298,15 @@ function ProviderSelector({ providers, selectedProviders, setSelectedProviders }
     [providers]
   );
 
-  const toggleProvider = (provider) => {
-    setSelectedProviders((prev) => (
-      prev.includes(provider)
+  const toggleProvider = useCallback((provider) => {
+    setSelectedProviders((prev) => {
+      const next = prev.includes(provider)
         ? prev.filter((name) => name !== provider)
-        : [...prev, provider]
-    ));
-  };
+        : [...prev, provider];
+      localStorage.setItem(PROVIDERS_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, [setSelectedProviders]);
 
   return (
     <div className="space-y-3">
@@ -114,27 +320,27 @@ function ProviderSelector({ providers, selectedProviders, setSelectedProviders }
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
         {Object.entries(providers || {}).map(([key, info]) => {
           const config = getProviderConfig(key);
           const isEnabled = info.enabled;
           const isSelected = selectedProviders.includes(key);
-
           return (
             <button
               key={key}
               type="button"
               disabled={!isEnabled}
               onClick={() => isEnabled && toggleProvider(key)}
-              className={`px-3 py-2 rounded-lg text-sm border transition-colors text-left ${
+              className={`px-3 py-2.5 rounded-lg text-sm border transition-all text-left ${
                 !isEnabled
-                  ? 'bg-[#111] border-[#1f1f1f] text-[#555] cursor-not-allowed'
+                  ? 'bg-[#111] border-[#1f1f1f] text-[#555] cursor-not-allowed opacity-50'
                   : isSelected
-                    ? `${config?.bgColor || 'bg-[#2a2a2a]'} ${config?.color || 'text-white'} border-current`
-                    : 'bg-[#0d0d0d] border-[#2a2a2a] text-[#999] hover:bg-[#161616]'
+                    ? `${config?.bgColor || 'bg-[#2a2a2a]'} ${config?.color || 'text-white'} border-current ring-1 ring-current/20`
+                    : 'bg-[#0d0d0d] border-[#2a2a2a] text-[#999] hover:bg-[#161616] hover:border-[#3a3a3a]'
               }`}
             >
-              {info?.name || config?.name || key}
+              <span className="block text-xs font-medium truncate">{info?.name || config?.name || key}</span>
+              {isSelected && <span className="block text-[10px] opacity-60 mt-0.5">Active</span>}
             </button>
           );
         })}
@@ -145,8 +351,185 @@ function ProviderSelector({ providers, selectedProviders, setSelectedProviders }
           ? 'Tidak ada provider aktif. Aktifkan provider di halaman Providers.'
           : selectedProviders.length === 0
             ? 'Semua provider aktif akan dipakai untuk distribusi.'
-            : `Akan upload ke: ${selectedProviders.map((provider) => providers?.[provider]?.name || provider).join(', ')}`}
+            : `Akan upload ke: ${selectedProviders.map((p) => providers?.[p]?.name || p).join(', ')}`}
       </p>
+    </div>
+  );
+}
+
+function BatchConfirmDialog({ isOpen, onClose, onConfirm, summary }) {
+  if (!isOpen || !summary) return null;
+
+  const totalVideos = summary.videoCount || 0;
+  const totalContainers = summary.containerCount || 0;
+  const providerNames = summary.providerNames || [];
+  const folderPath = summary.folderPath || 'root';
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="card p-6 max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start gap-4 mb-5">
+          <div className="w-12 h-12 rounded-xl bg-emerald-500/10 flex items-center justify-center flex-shrink-0">
+            <Download className="w-6 h-6 text-emerald-400" />
+          </div>
+          <div>
+            <h3 className="text-lg font-semibold text-white mb-1">Start Batch Download</h3>
+            <p className="text-sm text-[#888]">This will queue all videos for download and upload.</p>
+          </div>
+        </div>
+
+        <div className="space-y-3 mb-5">
+          <div className="bg-[#0d0d0d] rounded-lg p-3 space-y-2">
+            <div className="flex justify-between text-sm">
+              <span className="text-[#888]">Root CGroup</span>
+              <span className="text-white font-mono">{summary.rootCgId}</span>
+            </div>
+            {summary.targetCgSelector && (
+              <div className="flex justify-between text-sm">
+                <span className="text-[#888]">Target</span>
+                <span className="text-white font-mono">{summary.targetCgSelector}</span>
+              </div>
+            )}
+            <div className="flex justify-between text-sm">
+              <span className="text-[#888]">Estimated Videos</span>
+              <span className="text-white font-semibold">{totalVideos}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-[#888]">Containers</span>
+              <span className="text-white">{totalContainers}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-[#888]">Providers</span>
+              <span className="text-white">{providerNames.length > 0 ? providerNames.join(', ') : 'All enabled'}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-[#888]">Folder</span>
+              <span className="text-white font-mono">{folderPath}</span>
+            </div>
+          </div>
+
+          <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-500/5 border border-amber-500/20">
+            <AlertCircle className="w-4 h-4 text-amber-400 mt-0.5 flex-shrink-0" />
+            <p className="text-xs text-amber-300">
+              This will queue <strong>{totalVideos} videos</strong> for download &amp; upload. The process runs in the background.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex gap-3 justify-end">
+          <button
+            onClick={onClose}
+            className="px-4 py-2.5 text-sm text-[#888] hover:text-white rounded-lg hover:bg-[#222] transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            className="px-5 py-2.5 text-sm rounded-lg font-medium bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 transition-colors flex items-center gap-2"
+          >
+            <Download className="w-4 h-4" />
+            Start Batch
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BatchProgressCard({ batchResult, batchQueueProgress, trackedBatchRun, batchSessionId, onCancelBatch }) {
+  if (!batchResult && !trackedBatchRun) return null;
+
+  const status = trackedBatchRun?.status || batchResult?.status || 'running';
+  const queued = batchResult?.queuedCount || trackedBatchRun?.queuedCount || 0;
+  const skipped = batchResult?.skippedCount || trackedBatchRun?.skippedCount || 0;
+  const failed = trackedBatchRun?.failedCount || 0;
+  const processed = batchQueueProgress?.processed || trackedBatchRun?.processedContainers || 0;
+  const total = batchQueueProgress?.total ?? trackedBatchRun?.totalContainers ?? null;
+  const pct = total ? Math.round((processed / total) * 100) : 0;
+  const isRunning = status === 'running';
+
+  return (
+    <div className={`card p-5 space-y-4 ${isRunning ? 'border-blue-500/30' : status === 'completed' ? 'border-emerald-500/30' : 'border-amber-500/30'}`}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          {isRunning ? (
+            <div className="w-10 h-10 rounded-xl bg-blue-500/10 flex items-center justify-center">
+              <Loader2 className="w-5 h-5 text-blue-400 animate-spin" />
+            </div>
+          ) : status === 'completed' ? (
+            <div className="w-10 h-10 rounded-xl bg-emerald-500/10 flex items-center justify-center">
+              <CheckCircle className="w-5 h-5 text-emerald-400" />
+            </div>
+          ) : (
+            <div className="w-10 h-10 rounded-xl bg-amber-500/10 flex items-center justify-center">
+              <AlertCircle className="w-5 h-5 text-amber-400" />
+            </div>
+          )}
+          <div>
+            <p className="text-sm font-semibold text-white">
+              {isRunning ? 'Batch Download Running' : status === 'completed' ? 'Batch Download Completed' : `Batch ${status}`}
+            </p>
+            <p className="text-xs text-[#888]">
+              {isRunning ? 'Videos are being processed in the background' : `Batch finished with status: ${status}`}
+            </p>
+          </div>
+        </div>
+        {isRunning && onCancelBatch && (
+          <button
+            onClick={onCancelBatch}
+            className="px-3 py-1.5 text-xs rounded-lg border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors"
+          >
+            Cancel
+          </button>
+        )}
+      </div>
+
+      {total !== null && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-[#888]">Container Progress</span>
+            <span className="text-white font-mono">{processed}/{total} ({pct}%)</span>
+          </div>
+          <div className="w-full bg-[#1a1a1a] rounded-full h-2.5 overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all duration-500 ${pct >= 100 ? 'bg-gradient-to-r from-emerald-500 to-emerald-400' : 'bg-gradient-to-r from-blue-500 to-sky-400'}`}
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="bg-[#0d0d0d] rounded-lg p-3 text-center">
+          <p className="text-lg font-bold text-blue-400">{queued}</p>
+          <p className="text-[10px] text-[#666] uppercase tracking-wider">Queued</p>
+        </div>
+        <div className="bg-[#0d0d0d] rounded-lg p-3 text-center">
+          <p className="text-lg font-bold text-amber-400">{skipped}</p>
+          <p className="text-[10px] text-[#666] uppercase tracking-wider">Skipped</p>
+        </div>
+        <div className="bg-[#0d0d0d] rounded-lg p-3 text-center">
+          <p className="text-lg font-bold text-red-400">{failed}</p>
+          <p className="text-[10px] text-[#666] uppercase tracking-wider">Failed</p>
+        </div>
+        <div className="bg-[#0d0d0d] rounded-lg p-3 text-center">
+          <p className="text-lg font-bold text-emerald-400">{queued - failed}</p>
+          <p className="text-[10px] text-[#666] uppercase tracking-wider">Success</p>
+        </div>
+      </div>
+
+      {batchSessionId && (
+        <div className="flex items-center gap-2 text-xs text-[#666]">
+          <span>Session:</span>
+          <code className="text-[#888] bg-[#0d0d0d] px-2 py-0.5 rounded">{batchSessionId.slice(0, 16)}...</code>
+          <button
+            onClick={() => { navigator.clipboard.writeText(batchSessionId); toast.success('Copied', 'Session ID copied to clipboard'); }}
+            className="p-1 hover:bg-[#222] rounded transition-colors"
+          >
+            <Copy className="w-3 h-3" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -157,17 +540,22 @@ export default function ZeniusPage() {
   const [refererPath, setRefererPath] = useState('');
   const [folderId, setFolderId] = useState('');
   const [filename, setFilename] = useState('');
-  const [selectedProviders, setSelectedProviders] = useState([]);
+  const [selectedProviders, setSelectedProviders] = useState(loadSavedProviders);
   const [details, setDetails] = useState(null);
   const [batchRootCgId, setBatchRootCgId] = useState('34');
   const [batchTargetCgSelector, setBatchTargetCgSelector] = useState('');
-  const [batchParentContainerName, setBatchParentContainerName] = useState('Pengantar Keterampilan Matematika Dasar');
+  const [batchParentContainerName, setBatchParentContainerName] = useState('');
   const [batchFolderPrefix, setBatchFolderPrefix] = useState('');
   const [batchChain, setBatchChain] = useState(null);
   const [batchResult, setBatchResult] = useState(null);
+  const [batchRunId, setBatchRunId] = useState(null);
   const [batchSessionId, setBatchSessionId] = useState(null);
   const [batchBuildProgress, setBatchBuildProgress] = useState(null);
   const [batchQueueProgress, setBatchQueueProgress] = useState(null);
+  const [showHeadersHelp, setShowHeadersHelp] = useState(false);
+  const [showBatchConfirm, setShowBatchConfirm] = useState(false);
+  const [showFolderPrefixPicker, setShowFolderPrefixPicker] = useState(false);
+  const [activeTab, setActiveTab] = useState('single');
 
   const detailsMutation = useZeniusInstanceDetails();
   const downloadMutation = useZeniusDownload();
@@ -176,16 +564,25 @@ export default function ZeniusPage() {
   const deleteFolderMutation = useDeleteFolder();
   const cancelAllMutation = useZeniusCancelAll();
   const resetFilesMutation = useZeniusResetFiles();
+  const setMaxConcurrentMutation = useSetMaxConcurrent();
+  const { data: webhookConfig } = useWebhookConfig();
+  const updateWebhookMutation = useUpdateWebhookConfig();
+  const testWebhookMutation = useTestWebhook();
   const { data: queueStatus } = useZeniusQueueStatus();
   const { data: providers } = useProviders();
   const { data: folderTree } = useFolders();
 
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [showDeleteAllFoldersConfirm, setShowDeleteAllFoldersConfirm] = useState(false);
+  const [editingMaxConcurrent, setEditingMaxConcurrent] = useState(false);
+  const [maxConcurrentInput, setMaxConcurrentInput] = useState('');
+
+  const deleteAllFolders = useDeleteAllFolders();
+  const batchRootCgRef = useRef(null);
 
   useEffect(() => {
     const savedHeaders = localStorage.getItem(HEADERS_STORAGE_KEY);
-
     if (savedHeaders) setHeadersRaw(savedHeaders);
   }, []);
 
@@ -199,56 +596,68 @@ export default function ZeniusPage() {
   const normalizedFolderPath = useMemo(() => normalizeFolderInput(folderId), [folderId]);
   const normalizedBatchFolderPrefix = useMemo(() => normalizeFolderInput(batchFolderPrefix), [batchFolderPrefix]);
 
+  const trackedBatchRun = useMemo(() => {
+    const runs = Array.isArray(queueStatus?.backgroundBatches) ? queueStatus.backgroundBatches : [];
+    if (batchRunId) return runs.find((item) => item.id === batchRunId) || null;
+    return runs.find((item) => item.status === 'running') || null;
+  }, [queueStatus, batchRunId]);
+
+  useEffect(() => {
+    if (!trackedBatchRun) return;
+    setBatchSessionId((prev) => trackedBatchRun.sessionId || prev || null);
+    setBatchQueueProgress({
+      processed: Number(trackedBatchRun.processedContainers || 0),
+      total: Number.isFinite(Number(trackedBatchRun.totalContainers)) ? Number(trackedBatchRun.totalContainers) : null
+    });
+    setBatchResult((prev) => ({
+      ...(prev || {}),
+      ...trackedBatchRun,
+      batchRunId: trackedBatchRun.id,
+      queuedCount: Number(trackedBatchRun.queuedCount || 0),
+      skippedCount: Number(trackedBatchRun.skippedCount || 0)
+    }));
+  }, [trackedBatchRun]);
+
+  useEffect(() => {
+    const hasActiveWork = Boolean(
+      queueStatus?.active || queueStatus?.queued || queueStatus?.activeBackgroundBatchCount || trackedBatchRun?.status === 'running'
+    );
+    if (!hasActiveWork || typeof window === 'undefined') return undefined;
+    const keepalive = () => {
+      fetch(`${window.location.origin}/zenius?keepalive=${Date.now()}`, { method: 'GET', cache: 'no-store', credentials: 'same-origin' }).catch(() => {});
+    };
+    const timer = window.setInterval(keepalive, 20000);
+    return () => window.clearInterval(timer);
+  }, [queueStatus, trackedBatchRun]);
+
   const folderOptions = useMemo(() => flattenFolderPaths(folderTree), [folderTree]);
-
-  const folderPathLookup = useMemo(() => {
-    return new Set(folderOptions.map((item) => item.path.toLowerCase()));
-  }, [folderOptions]);
-
+  const folderPathLookup = useMemo(() => new Set(folderOptions.map((item) => item.path.toLowerCase())), [folderOptions]);
   const folderMapByPath = useMemo(() => {
     const map = new Map();
-    for (const item of folderOptions) {
-      map.set(item.path.toLowerCase(), item);
-    }
+    for (const item of folderOptions) map.set(item.path.toLowerCase(), item);
     return map;
   }, [folderOptions]);
 
-  const exactFolderMatch = normalizedFolderPath
-    ? folderMapByPath.get(normalizedFolderPath.toLowerCase()) || null
-    : null;
+  const exactFolderMatch = normalizedFolderPath ? folderMapByPath.get(normalizedFolderPath.toLowerCase()) || null : null;
 
   const folderSuggestions = useMemo(() => {
     const keyword = normalizedFolderPath.toLowerCase();
-    const list = keyword
-      ? folderOptions.filter((item) => item.path.toLowerCase().includes(keyword))
-      : folderOptions;
-
-    return list.slice(0, 6);
+    const list = keyword ? folderOptions.filter((item) => item.path.toLowerCase().includes(keyword)) : folderOptions;
+    return list.slice(0, 10);
   }, [folderOptions, normalizedFolderPath]);
 
-  const folderExists = normalizedFolderPath
-    ? folderPathLookup.has(normalizedFolderPath.toLowerCase())
-    : true;
-
+  const folderExists = normalizedFolderPath ? folderPathLookup.has(normalizedFolderPath.toLowerCase()) : true;
   const resolvedFolderPathPreview = normalizedFolderPath ? `root/${normalizedFolderPath}` : 'root';
 
   const handleFolderInputChange = (value) => {
     setFolderId(value);
-    if (deleteFolderMutation.isError || deleteFolderMutation.isSuccess) {
-      deleteFolderMutation.reset();
-    }
+    if (deleteFolderMutation.isError || deleteFolderMutation.isSuccess) deleteFolderMutation.reset();
   };
 
   const handleDeleteFolder = async () => {
-    if (!exactFolderMatch) {
-      return;
-    }
-
+    if (!exactFolderMatch) return;
     const confirmed = window.confirm(`Hapus folder "root/${exactFolderMatch.path}"? Folder harus kosong.`);
-    if (!confirmed) {
-      return;
-    }
-
+    if (!confirmed) return;
     try {
       await deleteFolderMutation.mutateAsync(exactFolderMatch.id);
       setFolderId('');
@@ -259,32 +668,21 @@ export default function ZeniusPage() {
 
   const handleGetDetails = async (event) => {
     event.preventDefault();
-
     try {
-      const result = await detailsMutation.mutateAsync({
-        urlShortId,
-        headersRaw,
-        refererPath
-      });
-
+      const result = await detailsMutation.mutateAsync({ urlShortId, headersRaw, refererPath });
       setDetails(result);
-
-      if (!filename && result?.value?.name) {
-        setFilename(result.value.name);
-      }
-
-      if (!refererPath && result?.value?.['path-url']) {
-        setRefererPath(result.value['path-url']);
-      }
+      if (!filename && result?.value?.name) setFilename(result.value.name);
+      if (!refererPath && result?.value?.['path-url']) setRefererPath(result.value['path-url']);
+      toast.success('Details Retrieved', `Found: ${result?.value?.name || urlShortId}`);
     } catch (error) {
       setDetails(null);
       console.error('Failed to fetch instance details:', error);
+      toast.error('Failed', error?.response?.data?.error || error.message || 'Could not get details');
     }
   };
 
   const handleDownload = async (event) => {
     event.preventDefault();
-
     try {
       await downloadMutation.mutateAsync({
         urlShortId,
@@ -294,14 +692,14 @@ export default function ZeniusPage() {
         filename,
         providers: selectedProviders.length > 0 ? selectedProviders : null
       });
+      toast.success('Download Queued', `Video ${urlShortId} added to processing queue`);
     } catch (error) {
       console.error('Failed to queue zenius download:', error);
+      toast.error('Download Failed', error?.response?.data?.error || error.message);
     }
   };
 
-  const handleGetBatchChain = async (event) => {
-    event.preventDefault();
-
+  const handleGetBatchChain = async () => {
     let aggregate = null;
     let currentSessionId = null;
     let iteration = 0;
@@ -317,14 +715,12 @@ export default function ZeniusPage() {
 
       while (hasMore) {
         iteration += 1;
-        if (iteration > 60) {
-          break;
-        }
+        if (iteration > 60) break;
 
         const result = await batchChainMutation.mutateAsync({
           rootCgId: batchRootCgId,
           targetCgSelector: batchTargetCgSelector,
-          parentContainerName: batchParentContainerName,
+          parentContainerName: batchParentContainerName || null,
           headersRaw,
           refererPath,
           sessionId: currentSessionId,
@@ -337,20 +733,13 @@ export default function ZeniusPage() {
         setBatchSessionId(currentSessionId);
 
         if (!aggregate) {
-          aggregate = {
-            ...result,
-            containerDetails: [...(result.containerDetails || [])],
-            errors: [...(result.errors || [])]
-          };
+          aggregate = { ...result, containerDetails: [...(result.containerDetails || [])], errors: [...(result.errors || [])] };
         } else {
           aggregate = {
             ...aggregate,
             ...result,
             sessionId: currentSessionId || aggregate.sessionId || null,
-            containerDetails: [
-              ...(aggregate.containerDetails || []),
-              ...(result.containerDetails || [])
-            ],
+            containerDetails: [...(aggregate.containerDetails || []), ...(result.containerDetails || [])],
             errors: [...(result.errors || aggregate.errors || [])]
           };
         }
@@ -361,133 +750,100 @@ export default function ZeniusPage() {
             ? Number(aggregate.totalContainers)
             : null;
 
-        setBatchBuildProgress({
-          processed: aggregate.containerDetails.length,
-          total
-        });
+        setBatchBuildProgress({ processed: aggregate.containerDetails.length, total });
         setBatchChain(aggregate);
 
         hasMore = Boolean(result.hasMoreContainers);
-        nextOffset = Number.isFinite(Number(result.nextContainerOffset))
-          ? Number(result.nextContainerOffset)
-          : 0;
+        nextOffset = Number.isFinite(Number(result.nextContainerOffset)) ? Number(result.nextContainerOffset) : 0;
       }
 
       setBatchBuildProgress(null);
+      const videoCount = (aggregate?.containerDetails || []).reduce((acc, c) => acc + (c.videoInstances?.length || 0), 0);
+      toast.success('Chain Built', `Found ${videoCount} videos across ${aggregate?.containerDetails?.length || 0} containers`);
     } catch (error) {
-      if (!aggregate) {
-        setBatchChain(null);
-      }
+      if (!aggregate) setBatchChain(null);
       setBatchBuildProgress(null);
       console.error('Failed to fetch zenius batch chain:', error);
+      toast.error('Chain Failed', error?.response?.data?.error || error.message);
     }
   };
 
-  const handleBatchDownload = async (event) => {
-    event.preventDefault();
+  const handleStartBatchDownload = () => {
+    const videoCount = (batchChain?.containerDetails || []).reduce((acc, c) => acc + (c.videoInstances?.length || 0), 0);
+    const providerNames = selectedProviders.length > 0
+      ? selectedProviders.map((p) => providers?.[p]?.name || p)
+      : Object.entries(providers || {}).filter(([_, v]) => v.enabled).map(([k]) => providers?.[k]?.name || k);
 
-    let aggregateResult = null;
-    let currentSessionId = batchSessionId || batchChain?.sessionId || null;
-    let iteration = 0;
+    setShowBatchConfirm({
+      rootCgId: batchRootCgId,
+      targetCgSelector: batchTargetCgSelector || null,
+      videoCount,
+      containerCount: batchChain?.containerDetails?.length || 0,
+      providerNames,
+      folderPath: normalizedBatchFolderPrefix || 'root'
+    });
+  };
 
+  const handleConfirmBatchDownload = async () => {
+    setShowBatchConfirm(null);
     try {
       setBatchResult(null);
       setBatchQueueProgress({ processed: 0, total: null });
+      const result = await batchDownloadMutation.mutateAsync({
+        rootCgId: batchRootCgId,
+        targetCgSelector: batchTargetCgSelector,
+        parentContainerName: batchParentContainerName || null,
+        headersRaw,
+        refererPath,
+        folderId: normalizedBatchFolderPrefix || null,
+        providers: selectedProviders.length > 0 ? selectedProviders : null,
+        sessionId: batchSessionId || batchChain?.sessionId || null,
+        containerLimit: BATCH_DOWNLOAD_CHUNK_SIZE,
+        timeBudgetMs: BATCH_REQUEST_BUDGET_MS
+      });
 
-      let nextOffset = 0;
-      let hasMore = true;
-
-      while (hasMore) {
-        iteration += 1;
-        if (iteration > 60) {
-          break;
-        }
-
-        const result = await batchDownloadMutation.mutateAsync({
-          rootCgId: batchRootCgId,
-          targetCgSelector: batchTargetCgSelector,
-          parentContainerName: batchParentContainerName,
-          headersRaw,
-          refererPath,
-          folderId: normalizedBatchFolderPrefix || null,
-          providers: selectedProviders.length > 0 ? selectedProviders : null,
-          sessionId: currentSessionId,
-          containerOffset: nextOffset,
-          containerLimit: BATCH_DOWNLOAD_CHUNK_SIZE,
-          timeBudgetMs: BATCH_REQUEST_BUDGET_MS
-        });
-
-        const data = result?.data || {};
-        currentSessionId = data.sessionId || currentSessionId;
-        setBatchSessionId(currentSessionId);
-
-        if (!aggregateResult) {
-          aggregateResult = {
-            ...data,
-            queued: [...(data.queued || [])],
-            skipped: [...(data.skipped || [])],
-            chainErrors: [...(data.chainErrors || [])],
-            queuedCount: Number(data.queuedCount || 0),
-            skippedCount: Number(data.skippedCount || 0)
-          };
-        } else {
-          aggregateResult = {
-            ...aggregateResult,
-            ...data,
-            sessionId: currentSessionId || aggregateResult.sessionId || null,
-            queued: [
-              ...(aggregateResult.queued || []),
-              ...(data.queued || [])
-            ],
-            skipped: [
-              ...(aggregateResult.skipped || []),
-              ...(data.skipped || [])
-            ],
-            chainErrors: [...(data.chainErrors || aggregateResult.chainErrors || [])],
-            queuedCount: Number(aggregateResult.queuedCount || 0) + Number(data.queuedCount || 0),
-            skippedCount: Number(aggregateResult.skippedCount || 0) + Number(data.skippedCount || 0)
-          };
-        }
-
-        const total = Number.isFinite(Number(data.totalContainers))
-          ? Number(data.totalContainers)
-          : Number.isFinite(Number(aggregateResult?.totalContainers))
-            ? Number(aggregateResult.totalContainers)
-            : null;
-        const processedContainers = Number.isFinite(Number(data.nextContainerOffset))
-          ? Number(data.nextContainerOffset)
-          : (Number.isFinite(Number(data.totalContainers)) ? Number(data.totalContainers) : 0);
-
-        setBatchQueueProgress({
-          processed: processedContainers,
-          total
-        });
-        setBatchResult(aggregateResult);
-
-        hasMore = Boolean(data.hasMoreContainers);
-        nextOffset = Number.isFinite(Number(data.nextContainerOffset))
-          ? Number(data.nextContainerOffset)
-          : 0;
-      }
-
-      setBatchQueueProgress(null);
-      setBatchSessionId(currentSessionId);
-      setBatchChain((prev) => prev || null);
+      const data = result?.data || {};
+      const status = data.status || {};
+      setBatchRunId(data.batchRunId || null);
+      setBatchSessionId(status.sessionId || batchSessionId || batchChain?.sessionId || null);
+      setBatchResult({
+        ...status,
+        batchRunId: data.batchRunId || null,
+        message: result?.message || 'Zenius batch download started in background',
+        queuedCount: Number(status.queuedCount || 0),
+        skippedCount: Number(status.skippedCount || 0)
+      });
+      toast.success('Batch Started', `${Number(status.queuedCount || 0)} videos queued, ${Number(status.skippedCount || 0)} skipped`);
     } catch (error) {
-      if (!aggregateResult) {
-        setBatchResult(null);
-      }
+      setBatchResult(null);
       setBatchQueueProgress(null);
       console.error('Failed to queue zenius batch download:', error);
+      toast.error('Batch Failed', error?.response?.data?.error || error.message);
     }
   };
+
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
+      if (e.ctrlKey && e.key === 'b') {
+        e.preventDefault();
+        batchRootCgRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  const batchVideoCount = useMemo(() => {
+    return (batchChain?.containerDetails || []).reduce((acc, c) => acc + (c.videoInstances?.length || 0), 0);
+  }, [batchChain]);
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
       <div>
         <h2 className="text-xl font-semibold text-white mb-1">Zenius Downloader</h2>
         <p className="text-sm text-[#888]">
-          Ambil instance details dari raw headers, download HLS dari `video-url` dengan FFmpeg, distribusikan ke storage, lalu hapus file lokal otomatis.
+          Download video dari Zenius, distribusikan ke storage, hapus file lokal otomatis.
         </p>
       </div>
 
@@ -496,511 +852,663 @@ export default function ZeniusPage() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Activity className="w-4 h-4 text-[#666]" />
-            <span className="text-sm font-medium text-[#aaa]">Status Download Queue</span>
+            <span className="text-sm font-medium text-[#aaa]">Download Queue</span>
           </div>
           <div className="flex items-center gap-3">
             {queueStatus && (
               <div className="flex items-center gap-3 text-sm">
-                <span className="text-[#666]">
-                  Aktif: <span className="text-white">{queueStatus.active}/{queueStatus.max}</span>
-                </span>
-                <span className="text-[#666]">
-                  Menunggu: <span className="text-white">{queueStatus.queued}</span>
-                </span>
-                {queueStatus.isProcessing && (
-                  <span className="text-emerald-400">Memproses...</span>
-                )}
+                <span className="text-[#666]">Aktif: <span className="text-white">{queueStatus.active}/{queueStatus.max}</span></span>
+                <span className="text-[#666]">Menunggu: <span className="text-white">{queueStatus.queued}</span></span>
+                <span className="text-[#666]">Batch: <span className="text-white">{queueStatus.activeBackgroundBatchCount || 0}</span></span>
+                {queueStatus.isProcessing && <span className="text-emerald-400 text-xs">Memproses...</span>}
               </div>
             )}
           </div>
         </div>
 
-        {/* Progress Bar */}
         {queueStatus && (
           <div className="w-full bg-[#1a1a1a] rounded-full h-2">
             <div
-              className="bg-gradient-to-r from-blue-500 to-blue-400 h-2 rounded-full transition-all"
-              style={{
-                width: `${Math.min((queueStatus.active / queueStatus.max) * 100, 100)}%`
-              }}
+              className={`h-2 rounded-full transition-all ${queueStatus.active >= queueStatus.max ? 'bg-gradient-to-r from-amber-500 to-amber-400' : 'bg-gradient-to-r from-blue-500 to-blue-400'}`}
+              style={{ width: `${Math.min((queueStatus.active / queueStatus.max) * 100, 100)}%` }}
             />
           </div>
         )}
 
-        {/* Control Buttons */}
-        <div className="flex gap-3">
-          <button
-            type="button"
-            onClick={() => setShowCancelConfirm(true)}
-            disabled={cancelAllMutation.isLoading || (queueStatus?.active === 0 && queueStatus?.queued === 0)}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-amber-500/40 text-amber-300 hover:bg-amber-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            {cancelAllMutation.isLoading ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <XCircle className="w-4 h-4" />
-            )}
+        {/* Max Concurrent Control */}
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-[#666]">Max Concurrent:</span>
+          {editingMaxConcurrent ? (
+            <div className="flex items-center gap-1.5">
+              <input
+                type="number"
+                min={1}
+                max={50}
+                value={maxConcurrentInput}
+                onChange={(e) => setMaxConcurrentInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    const v = parseInt(maxConcurrentInput, 10);
+                    if (v >= 1 && v <= 50) {
+                      setMaxConcurrentMutation.mutate(v);
+                    }
+                    setEditingMaxConcurrent(false);
+                  }
+                  if (e.key === 'Escape') {
+                    setEditingMaxConcurrent(false);
+                  }
+                }}
+                className="w-14 px-2 py-1 bg-[#0d0d0d] border border-[#3a3a3a] rounded text-xs text-white text-center focus:outline-none focus:border-blue-500"
+                autoFocus
+              />
+              <button
+                onClick={() => {
+                  const v = parseInt(maxConcurrentInput, 10);
+                  if (v >= 1 && v <= 50) {
+                    setMaxConcurrentMutation.mutate(v);
+                  }
+                  setEditingMaxConcurrent(false);
+                }}
+                disabled={setMaxConcurrentMutation.isLoading}
+                className="px-2 py-1 rounded text-xs bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-40"
+              >
+                {setMaxConcurrentMutation.isLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Set'}
+              </button>
+              <button
+                onClick={() => setEditingMaxConcurrent(false)}
+                className="px-2 py-1 rounded text-xs text-[#666] hover:text-white"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => {
+                setMaxConcurrentInput(String(queueStatus?.max || 10));
+                setEditingMaxConcurrent(true);
+              }}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#0d0d0d] border border-[#2a2a2a] text-xs text-white hover:border-[#3a3a3a] transition-colors"
+            >
+              <Activity className="w-3 h-3 text-blue-400" />
+              {queueStatus?.max || 10}
+              <span className="text-[#555]">threads</span>
+            </button>
+          )}
+        </div>
+
+        {/* Active Tasks */}
+        {queueStatus?.activeTasks?.length > 0 && (
+          <div className="space-y-1.5">
+            <p className="text-[10px] text-[#555] uppercase tracking-wider">Active Downloads</p>
+            <div className="space-y-1">
+              {queueStatus.activeTasks.map((task) => (
+                <div key={task.id} className="flex items-center gap-2 px-2.5 py-1.5 rounded bg-[#0d0d0d] border border-[#1f1f1f]">
+                  <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+                  <span className="text-xs text-[#aaa] font-mono">{task.urlShortId}</span>
+                  <span className="text-[10px] text-[#555] truncate">{task.outputName}</span>
+                  <span className="text-[10px] text-[#444] ml-auto">
+                    {Math.round((Date.now() - new Date(task.startTime).getTime()) / 1000)}s
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Queued Tasks */}
+        {queueStatus?.queuedTasks?.length > 0 && (
+          <div className="space-y-1.5">
+            <p className="text-[10px] text-[#555] uppercase tracking-wider">Queued ({queueStatus.queuedTasks.length})</p>
+            <div className="max-h-24 overflow-y-auto space-y-1">
+              {queueStatus.queuedTasks.slice(0, 20).map((task, i) => (
+                <div key={i} className="flex items-center gap-2 px-2.5 py-1 rounded bg-[#0d0d0d]">
+                  <div className="w-1.5 h-1.5 rounded-full bg-zinc-600" />
+                  <span className="text-[10px] text-[#666] font-mono">{task.urlShortId}</span>
+                  <span className="text-[10px] text-[#444] truncate">{task.outputName}</span>
+                </div>
+              ))}
+              {queueStatus.queuedTasks.length > 20 && (
+                <p className="text-[10px] text-[#444] text-center">+{queueStatus.queuedTasks.length - 20} more</p>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={() => setShowCancelConfirm(true)} disabled={cancelAllMutation.isLoading || (queueStatus?.active === 0 && queueStatus?.queued === 0)} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-amber-500/40 text-amber-300 hover:bg-amber-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-xs">
+            {cancelAllMutation.isLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <XCircle className="w-3.5 h-3.5" />}
             Cancel All
           </button>
-
-          <button
-            type="button"
-            onClick={() => setShowResetConfirm(true)}
-            disabled={resetFilesMutation.isLoading}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            {resetFilesMutation.isLoading ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <RotateCcw className="w-4 h-4" />
-            )}
-            Reset All Files
+          <button type="button" onClick={() => setShowResetConfirm(true)} disabled={resetFilesMutation.isLoading} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-xs">
+            {resetFilesMutation.isLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
+            Reset Files
+          </button>
+          <button type="button" onClick={() => setShowDeleteAllFoldersConfirm(true)} disabled={deleteAllFolders.isLoading} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-500/40 text-rose-300 hover:bg-rose-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-xs">
+            {deleteAllFolders.isLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash className="w-3.5 h-3.5" />}
+            Remove Folders
           </button>
         </div>
 
-        {/* Status Messages */}
-        {cancelAllMutation.isSuccess && (
-          <div className="text-sm text-emerald-400">
-            Cancelled {cancelAllMutation.data?.data?.cancelledDownloads} downloads and {cancelAllMutation.data?.data?.cancelledUploads} uploads.
-          </div>
-        )}
-        {cancelAllMutation.isError && (
-          <div className="text-sm text-red-400">
-            Failed to cancel: {cancelAllMutation.error?.message}
-          </div>
-        )}
-        {resetFilesMutation.isSuccess && (
-          <div className="text-sm text-emerald-400">
-            Reset {resetFilesMutation.data?.data?.deletedCount} files successfully.
-          </div>
-        )}
-        {resetFilesMutation.isError && (
-          <div className="text-sm text-red-400">
-            Failed to reset: {resetFilesMutation.error?.message}
-          </div>
-        )}
+        {cancelAllMutation.isSuccess && <p className="text-xs text-emerald-400">Cancelled {cancelAllMutation.data?.data?.cancelledDownloads} downloads, {cancelAllMutation.data?.data?.cancelledUploads} uploads.</p>}
+        {cancelAllMutation.isError && <p className="text-xs text-red-400">Failed: {cancelAllMutation.error?.message}</p>}
+        {resetFilesMutation.isSuccess && <p className="text-xs text-emerald-400">Reset {resetFilesMutation.data?.data?.deletedCount} files.</p>}
+        {resetFilesMutation.isError && <p className="text-xs text-red-400">Failed: {resetFilesMutation.error?.message}</p>}
+        {deleteAllFolders.isSuccess && <p className="text-xs text-emerald-400">Deleted {deleteAllFolders.data?.data?.removedFolders} folders, {deleteAllFolders.data?.data?.removedFiles} files.</p>}
+        {deleteAllFolders.isError && <p className="text-xs text-red-400">Failed: {deleteAllFolders.error?.message}</p>}
       </div>
 
-      <form onSubmit={handleGetDetails} className="card p-5 space-y-4">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      {/* Batch Progress (shown when batch is running/completed) */}
+      <BatchProgressCard
+        batchResult={batchResult}
+        batchQueueProgress={batchQueueProgress}
+        trackedBatchRun={trackedBatchRun}
+        batchSessionId={batchSessionId}
+        onCancelBatch={() => setShowCancelConfirm(true)}
+      />
+
+      {/* Shared Headers Section */}
+      <CollapsibleSection title="Headers & Authentication" icon={KeyRound} defaultOpen={!headersRaw}>
+        <div className="space-y-4 pt-3">
           <div>
-            <label className="flex items-center gap-2 text-sm text-[#aaa] mb-2">
-              <Search className="w-4 h-4 text-[#666]" />
-              URL Short ID
-            </label>
-            <input
-              type="text"
-              value={urlShortId}
-              onChange={(event) => setUrlShortId(event.target.value.replace(/[^0-9]/g, ''))}
-              placeholder="79497"
-              className="input"
-              required
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-sm text-[#aaa]">Headers Zenius (raw)</label>
+              <button
+                type="button"
+                onClick={() => setShowHeadersHelp(!showHeadersHelp)}
+                className="flex items-center gap-1 text-xs text-[#666] hover:text-[#aaa] transition-colors"
+              >
+                <HelpCircle className="w-3.5 h-3.5" />
+                {showHeadersHelp ? 'Hide Help' : 'How to get headers?'}
+              </button>
+            </div>
+            <textarea
+              value={headersRaw}
+              onChange={(e) => setHeadersRaw(e.target.value)}
+              rows={6}
+              className="input font-mono text-xs"
+              placeholder={`__anti-forgery-token\t"..."\n__Secure-next-auth.session-token\t"..."\nuser-agent\t"Mozilla/5.0 ..."`}
             />
+            <p className="text-xs text-[#666] mt-1.5">
+              Format: <code className="text-[#888]">key&#9;"value"</code>, <code className="text-[#888]">Key: value</code>, atau cookie string.
+            </p>
           </div>
 
-          <div>
-            <label className="flex items-center gap-2 text-sm text-[#aaa] mb-2">
-              <FolderOpen className="w-4 h-4 text-[#666]" />
-              Folder Path (optional)
-            </label>
-            <input
-              type="text"
-              value={folderId}
-              onChange={(event) => handleFolderInputChange(event.target.value)}
-              placeholder='kelas10/MTK wajib/Persamaan'
-              className="input"
-              list="zenius-folder-suggestions"
-            />
-            <datalist id="zenius-folder-suggestions">
-              {folderOptions.map((item) => (
-                <option key={item.id} value={item.path} />
-              ))}
-            </datalist>
-
-            <div className="mt-2 space-y-1.5 text-xs">
-              <p className="text-[#666]">
-                Preview: <span className="text-[#d0d0d0] font-mono">{resolvedFolderPathPreview}</span>
-              </p>
-              <p className={folderExists ? 'text-emerald-400' : 'text-amber-400'}>
-                {folderExists
-                  ? 'Folder sudah ada.'
-                  : 'Folder belum ada, akan dibuat otomatis saat download.'}
-              </p>
-              <p className="text-[#666]">Tidak perlu awalan `root/` karena default selalu di bawah root. Tanda kutip tetap didukung.</p>
-              {folderSuggestions.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 pt-1">
-                  {folderSuggestions.map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => handleFolderInputChange(item.path)}
-                      className="px-2 py-1 rounded bg-[#1c1c1c] hover:bg-[#262626] border border-[#2e2e2e] text-[#bfbfbf]"
-                    >
-                      {item.path}
-                    </button>
-                  ))}
+          {showHeadersHelp && (
+            <div className="bg-[#0d0d0d] rounded-lg p-4 space-y-3 border border-[#1f1f1f]">
+              <h4 className="text-sm font-medium text-white flex items-center gap-2">
+                <HelpCircle className="w-4 h-4 text-amber-400" />
+                How to get headers from Zenius
+              </h4>
+              <ol className="space-y-2 text-xs text-[#aaa] list-decimal list-inside">
+                <li>Open DevTools (<kbd className="px-1 py-0.5 bg-[#222] rounded text-[#888]">F12</kbd>) &rarr; <strong>Network</strong> tab</li>
+                <li>Login to <code className="text-[#8aa6d8]">zenius.net</code> and navigate to any video page</li>
+                <li>Find a request to <code className="text-[#8aa6d8]">zenius.net/api/...</code></li>
+                <li>Right-click the request &rarr; <strong>Copy</strong> &rarr; <strong>Copy as cURL</strong></li>
+                <li>Paste below, or extract headers manually into the textarea above</li>
+              </ol>
+              <div className="border-t border-[#222] pt-3 space-y-1.5">
+                <p className="text-xs font-medium text-[#ccc]">Required headers:</p>
+                <div className="grid grid-cols-1 gap-1">
+                  <code className="text-[10px] text-emerald-400 bg-emerald-500/5 px-2 py-1 rounded">__anti-forgery-token</code>
+                  <code className="text-[10px] text-emerald-400 bg-emerald-500/5 px-2 py-1 rounded">__Secure-next-auth.session-token</code>
+                  <code className="text-[10px] text-sky-400 bg-sky-500/5 px-2 py-1 rounded">user-agent</code>
+                  <code className="text-[10px] text-zinc-400 bg-zinc-500/5 px-2 py-1 rounded">sentry-trace (optional)</code>
+                  <code className="text-[10px] text-zinc-400 bg-zinc-500/5 px-2 py-1 rounded">baggage (optional)</code>
                 </div>
-              )}
-
-              <div className="pt-1">
-                <button
-                  type="button"
-                  onClick={handleDeleteFolder}
-                  disabled={!exactFolderMatch || deleteFolderMutation.isLoading}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  {deleteFolderMutation.isLoading ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <Trash2 className="w-3.5 h-3.5" />
-                  )}
-                  Hapus Folder
-                </button>
               </div>
-
-              {deleteFolderMutation.isSuccess && (
-                <p className="text-emerald-400">Folder berhasil dihapus.</p>
-              )}
-
-              {deleteFolderMutation.isError && (
-                <p className="text-red-400">
-                  {deleteFolderMutation.error?.response?.data?.error || deleteFolderMutation.error?.message || 'Gagal hapus folder'}
-                </p>
-              )}
-            </div>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label className="text-sm text-[#aaa] block mb-2">Filename Override (Optional)</label>
-            <input
-              type="text"
-              value={filename}
-              onChange={(event) => setFilename(event.target.value)}
-              className="input"
-              placeholder="fungsi-eksponen"
-            />
-            <p className="text-xs text-[#666] mt-1">Kosongkan untuk pakai nama dari response API.</p>
-          </div>
-
-          <div className="flex items-end">
-            <p className="text-xs text-[#666]">
-              File hasil download bersifat sementara dan akan dihapus setelah distribusi selesai.
-            </p>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label className="text-sm text-[#aaa] block mb-2">Referer Path / URL (Optional)</label>
-            <input
-              type="text"
-              value={refererPath}
-              onChange={(event) => setRefererPath(event.target.value)}
-              className="input"
-              placeholder="/ci/79497/fungsi-eksponen"
-            />
-          </div>
-
-          <div className="flex items-end">
-            <p className="text-xs text-[#666]">
-              Jika kosong, script akan pakai referer dari `path-url` response.
-            </p>
-          </div>
-        </div>
-
-        <div>
-          <label className="flex items-center gap-2 text-sm text-[#aaa] mb-2">
-            <KeyRound className="w-4 h-4 text-[#666]" />
-            Headers Zenius (raw)
-          </label>
-          <textarea
-            value={headersRaw}
-            onChange={(event) => setHeadersRaw(event.target.value)}
-            rows={8}
-            className="input font-mono text-xs"
-            placeholder={`__anti-forgery-token\t"..."\n__Secure-next-auth.session-token\t"..."\nuser-agent\t"Mozilla/5.0 ..."\nsentry-trace\t"..."\nbaggage\t"..."`}
-          />
-          <p className="text-xs text-[#666] mt-1">
-            Bisa paste format `key\t"value"`, `Key: value`, atau cookie string. Key non-header akan otomatis diparsing sebagai cookie.
-          </p>
-        </div>
-
-        <ProviderSelector
-          providers={providers}
-          selectedProviders={selectedProviders}
-          setSelectedProviders={setSelectedProviders}
-        />
-
-        <div className="flex flex-col sm:flex-row gap-3">
-          <button
-            type="submit"
-            disabled={!urlShortId || isBusy}
-            className="btn btn-primary flex items-center justify-center gap-2 sm:w-auto"
-          >
-            {detailsMutation.isLoading ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Getting Details...
-              </>
-            ) : (
-              <>
-                <Search className="w-4 h-4" />
-                Get Instance Details
-              </>
-            )}
-          </button>
-
-          <button
-            type="button"
-            onClick={handleDownload}
-            disabled={!urlShortId || isBusy}
-            className="btn btn-primary flex items-center justify-center gap-2 sm:w-auto"
-          >
-            {downloadMutation.isLoading ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Queueing Download...
-              </>
-            ) : (
-              <>
-                <Download className="w-4 h-4" />
-                Download & Distribusi
-              </>
-            )}
-          </button>
-        </div>
-      </form>
-
-      <form onSubmit={handleGetBatchChain} className="card p-5 space-y-4">
-        <div>
-          <h3 className="text-lg font-medium text-white">Batch Downloader (CGroup Chain)</h3>
-          <p className="text-xs text-[#777] mt-1">
-            Struktur ID, path, dan nama file mengikuti flow pada `test/get-cgroup-video-chain.js`.
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label className="text-sm text-[#aaa] block mb-2">Root CGroup ID</label>
-            <input
-              type="text"
-              value={batchRootCgId}
-              onChange={(event) => setBatchRootCgId(event.target.value.replace(/[^0-9]/g, ''))}
-              placeholder="34"
-              className="input"
-              required
-            />
-          </div>
-
-          <div>
-            <label className="text-sm text-[#aaa] block mb-2">Target CG Selector (Optional)</label>
-            <input
-              type="text"
-              value={batchTargetCgSelector}
-              onChange={(event) => setBatchTargetCgSelector(event.target.value)}
-              placeholder="/cg/83067 atau 83067"
-              className="input"
-            />
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label className="text-sm text-[#aaa] block mb-2">Parent Container Name</label>
-            <input
-              type="text"
-              value={batchParentContainerName}
-              onChange={(event) => setBatchParentContainerName(event.target.value)}
-              placeholder="Pengantar Keterampilan Matematika Dasar"
-              className="input"
-              required
-            />
-          </div>
-
-          <div>
-            <label className="text-sm text-[#aaa] block mb-2">Folder Prefix (Optional)</label>
-            <input
-              type="text"
-              value={batchFolderPrefix}
-              onChange={(event) => setBatchFolderPrefix(event.target.value)}
-              placeholder="kelas10"
-              className="input"
-            />
-            <p className="text-xs text-[#666] mt-1">
-              Jika diisi, path batch menjadi `prefix/{'{'}path dari chain{'}'}`.
-            </p>
-          </div>
-        </div>
-
-        <div className="flex flex-col sm:flex-row gap-3">
-          <button
-            type="submit"
-            disabled={!batchRootCgId || !batchParentContainerName || isBatchBusy}
-            className="btn btn-primary flex items-center justify-center gap-2 sm:w-auto"
-          >
-            {batchChainMutation.isLoading ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Building Chain...
-              </>
-            ) : (
-              <>
-                <Search className="w-4 h-4" />
-                Get Batch Chain
-              </>
-            )}
-          </button>
-
-          <button
-            type="button"
-            onClick={handleBatchDownload}
-            disabled={!batchRootCgId || !batchParentContainerName || isBatchBusy}
-            className="btn btn-primary flex items-center justify-center gap-2 sm:w-auto"
-          >
-            {batchDownloadMutation.isLoading ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Queueing Batch...
-              </>
-            ) : (
-              <>
-                <Download className="w-4 h-4" />
-                Download Batch
-              </>
-            )}
-          </button>
-        </div>
-
-        {batchBuildProgress && (
-          <div className="card p-3 border-sky-500/30 bg-sky-500/5">
-            <p className="text-xs text-sky-300">
-              Build chain bertahap: {batchBuildProgress.processed} / {batchBuildProgress.total ?? '?'} container selesai diproses.
-            </p>
-          </div>
-        )}
-
-        {batchQueueProgress && (
-          <div className="card p-3 border-emerald-500/30 bg-emerald-500/5">
-            <p className="text-xs text-emerald-300">
-              Queue batch bertahap: {batchQueueProgress.processed} / {batchQueueProgress.total ?? '?'} container sudah diproses.
-            </p>
-          </div>
-        )}
-
-        {batchChain && (
-          <div className="space-y-3">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
-              <div className="card p-3">
-                <p className="text-[#666] mb-1">Leaf CG ID</p>
-                <p className="text-white font-mono">{batchChain.leafCgId || '-'}</p>
-              </div>
-              <div className="card p-3">
-                <p className="text-[#666] mb-1">Total Container</p>
-                <p className="text-white">{batchChain.containerList?.totalContainers ?? 0}</p>
-              </div>
-              <div className="card p-3">
-                <p className="text-[#666] mb-1">Total Video Instance</p>
-                <p className="text-white">
-                  {(batchChain.containerDetails || []).reduce((acc, item) => acc + (item.videoInstances?.length || 0), 0)}
+              <div className="border-t border-[#222] pt-3">
+                <p className="text-xs text-[#888]">
+                  Headers disimpan otomatis di browser. Tidak perlu input ulang setiap kali.
                 </p>
               </div>
             </div>
+          )}
+        </div>
+      </CollapsibleSection>
 
-            {Array.isArray(batchChain.errors) && batchChain.errors.length > 0 && (
-              <div className="card p-3 border-amber-500/30 bg-amber-500/5">
-                <p className="text-xs text-amber-300">
-                  Batch chain selesai dengan {batchChain.errors.length} error upstream. Data yang berhasil tetap ditampilkan.
-                </p>
-              </div>
+      {/* Webhook Notifications */}
+      <CollapsibleSection title="Notifikasi Webhook" icon={webhookConfig?.enabled ? Bell : BellOff} defaultOpen={false} badge={webhookConfig?.enabled ? 'Aktif' : 'Mati'}>
+        <div className="space-y-4 pt-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => updateWebhookMutation.mutate({ enabled: !webhookConfig?.enabled })}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${webhookConfig?.enabled ? 'bg-emerald-500' : 'bg-[#333]'}`}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${webhookConfig?.enabled ? 'translate-x-6' : 'translate-x-1'}`} />
+              </button>
+              <span className="text-sm text-[#aaa]">
+                {webhookConfig?.enabled ? 'Notifikasi aktif' : 'Notifikasi mati'}
+              </span>
+            </div>
+          </div>
+
+          <div>
+            <label className="text-sm text-[#aaa] block mb-2">Webhook URL</label>
+            <input
+              type="text"
+              value={webhookConfig?.url || ''}
+              onChange={(e) => updateWebhookMutation.mutate({ url: e.target.value })}
+              placeholder="https://botwa-xxxx.herokuapp.com/send/text"
+              className="input font-mono text-xs"
+            />
+            <p className="text-xs text-[#555] mt-1">Endpoint POST yang menerima <code className="text-[#888]">{'{ to, text }'}</code></p>
+          </div>
+
+          <div>
+            <label className="text-sm text-[#aaa] block mb-2">Nomor WhatsApp</label>
+            <input
+              type="text"
+              value={webhookConfig?.to || ''}
+              onChange={(e) => updateWebhookMutation.mutate({ to: e.target.value })}
+              placeholder="6281234567890"
+              className="input font-mono text-xs"
+            />
+            <p className="text-xs text-[#555] mt-1">Format: kode negara + nomor (tanpa + atau spasi)</p>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => testWebhookMutation.mutate()}
+              disabled={!webhookConfig?.url || !webhookConfig?.to || testWebhookMutation.isLoading}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-blue-500/30 text-blue-400 hover:bg-blue-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-xs"
+            >
+              {testWebhookMutation.isLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+              Test Notifikasi
+            </button>
+            {testWebhookMutation.isSuccess && (
+              <span className="text-xs text-emerald-400 flex items-center gap-1">
+                <CheckCircle className="w-3.5 h-3.5" /> Terkirim
+              </span>
             )}
+            {testWebhookMutation.isError && (
+              <span className="text-xs text-red-400 flex items-center gap-1">
+                <AlertCircle className="w-3.5 h-3.5" /> Gagal
+              </span>
+            )}
+          </div>
+
+          <div className="p-3 rounded-lg bg-[#0d0d0d] border border-[#1f1f1f]">
+            <p className="text-xs text-[#666]">
+              Notifikasi akan dikirim otomatis setiap kali <strong className="text-[#aaa]">batch download selesai</strong> (berhasil atau gagal). Berisi: status batch, jumlah video, statistik, durasi, dan error (jika ada).
+            </p>
+          </div>
+        </div>
+      </CollapsibleSection>
+
+      {/* Tab Navigation */}
+      <div className="flex gap-1 p-1 bg-[#1a1a1a] rounded-lg border border-[#2a2a2a]">
+        <button
+          type="button"
+          onClick={() => setActiveTab('single')}
+          className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-md text-sm font-medium transition-all ${
+            activeTab === 'single' ? 'bg-[#2a2a2a] text-white shadow-sm' : 'text-[#888] hover:text-[#ccc]'
+          }`}
+        >
+          <Download className="w-4 h-4" />
+          Single Download
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('batch')}
+          className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-md text-sm font-medium transition-all ${
+            activeTab === 'batch' ? 'bg-[#2a2a2a] text-white shadow-sm' : 'text-[#888] hover:text-[#ccc]'
+          }`}
+        >
+          <Zap className="w-4 h-4" />
+          Batch Download
+        </button>
+      </div>
+
+      {/* Single Download Tab */}
+      {activeTab === 'single' && (
+        <form onSubmit={handleGetDetails} className="card p-5 space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="flex items-center gap-2 text-sm text-[#aaa] mb-2">
+                <Search className="w-4 h-4 text-[#666]" />
+                URL Short ID
+              </label>
+              <input
+                type="text"
+                value={urlShortId}
+                onChange={(e) => setUrlShortId(e.target.value.replace(/[^0-9]/g, ''))}
+                placeholder="79497"
+                className="input"
+                required
+              />
+            </div>
 
             <div>
-              <p className="text-sm text-[#aaa] mb-2">Preview Queue</p>
-              <div className="max-h-72 overflow-auto rounded-lg border border-[#222] bg-[#0d0d0d]">
-                <table className="w-full text-xs">
-                  <thead className="bg-[#141414] text-[#8a8a8a] sticky top-0">
-                    <tr>
-                      <th className="text-left px-3 py-2">ID</th>
-                      <th className="text-left px-3 py-2">Nama</th>
-                      <th className="text-left px-3 py-2">Filename</th>
-                      <th className="text-left px-3 py-2">Path</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(batchChain.containerDetails || []).flatMap((container) => (
-                      (container.videoInstances || []).map((item) => (
-                        <tr key={`${container.containerUrlShortId}-${item.urlShortId}`} className="border-t border-[#1e1e1e]">
-                          <td className="px-3 py-2 text-[#c8c8c8] font-mono">{item.urlShortId}</td>
-                          <td className="px-3 py-2 text-[#e2e2e2]">{item.metadata?.name || item.name || '-'}</td>
-                          <td className="px-3 py-2 text-[#e2e2e2] font-mono">{item.outputName ? `${item.outputName}.mp4` : '-'}</td>
-                          <td className="px-3 py-2 text-[#8aa6d8] font-mono">
-                            {(normalizedBatchFolderPrefix
-                              ? `${normalizedBatchFolderPrefix}/${item.path || ''}`
-                              : (item.path || '')
-                            ) || '-'}
-                          </td>
-                        </tr>
-                      ))
+              <label className="flex items-center gap-2 text-sm text-[#aaa] mb-2">
+                <FolderOpen className="w-4 h-4 text-[#666]" />
+                Folder Path <span className="text-[#555]">(optional)</span>
+              </label>
+              <input
+                type="text"
+                value={folderId}
+                onChange={(e) => handleFolderInputChange(e.target.value)}
+                placeholder="kelas10/MTK wajib/Persamaan"
+                className="input"
+                list="zenius-folder-suggestions"
+              />
+              <datalist id="zenius-folder-suggestions">
+                {folderOptions.map((item) => <option key={item.id} value={item.path} />)}
+              </datalist>
+
+              <div className="mt-2 space-y-1.5 text-xs">
+                <p className="text-[#666]">Preview: <span className="text-[#d0d0d0] font-mono">{resolvedFolderPathPreview}</span></p>
+                <p className={folderExists ? 'text-emerald-400' : 'text-amber-400'}>
+                  {folderExists ? 'Folder sudah ada.' : 'Folder belum ada, akan dibuat otomatis.'}
+                </p>
+                {folderSuggestions.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 pt-1">
+                    {folderSuggestions.map((item) => (
+                      <button key={item.id} type="button" onClick={() => handleFolderInputChange(item.path)} className="px-2 py-1 rounded bg-[#1c1c1c] hover:bg-[#262626] border border-[#2e2e2e] text-[#bfbfbf]">
+                        {item.path}
+                      </button>
                     ))}
-                  </tbody>
-                </table>
+                  </div>
+                )}
+                {exactFolderMatch && (
+                  <button type="button" onClick={handleDeleteFolder} disabled={deleteFolderMutation.isLoading} className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-40">
+                    {deleteFolderMutation.isLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                    Hapus Folder
+                  </button>
+                )}
+                {deleteFolderMutation.isSuccess && <p className="text-emerald-400">Folder berhasil dihapus.</p>}
+                {deleteFolderMutation.isError && <p className="text-red-400">{deleteFolderMutation.error?.response?.data?.error || deleteFolderMutation.error?.message}</p>}
               </div>
             </div>
           </div>
-        )}
-      </form>
 
-      {instanceValue && (
-        <div className="card p-5 space-y-4">
-          <div className="flex items-center gap-2">
-            <Shield className="w-4 h-4 text-[#7d7d7d]" />
-            <h3 className="text-lg font-medium text-white">Instance Details</h3>
-            <span className={`text-xs px-2 py-0.5 rounded ${details?.ok ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'}`}>
-              {details?.ok ? 'ok=true' : 'ok=false'}
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-            <div className="card p-3">
-              <p className="text-[#666] mb-1">Judul</p>
-              <p className="text-white">{instanceValue.name || '-'}</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="text-sm text-[#aaa] block mb-2">Filename Override <span className="text-[#555]">(optional)</span></label>
+              <input type="text" value={filename} onChange={(e) => setFilename(e.target.value)} className="input" placeholder="fungsi-eksponen" />
+              <p className="text-xs text-[#666] mt-1">Kosongkan untuk pakai nama dari response API.</p>
             </div>
-            <div className="card p-3">
-              <p className="text-[#666] mb-1">Durasi</p>
-              <p className="text-white">{formatDuration(Number(instanceValue['duration-seconds']))}</p>
-            </div>
-            <div className="card p-3">
-              <p className="text-[#666] mb-1">Parent</p>
-              <p className="text-white">{instanceValue.parent?.name || '-'}</p>
-            </div>
-            <div className="card p-3">
-              <p className="text-[#666] mb-1">Type / Hosting</p>
-              <p className="text-white">{instanceValue.type || '-'} / {instanceValue['hosting-type'] || '-'}</p>
+            <div>
+              <label className="text-sm text-[#aaa] block mb-2">Referer Path <span className="text-[#555]">(optional)</span></label>
+              <input type="text" value={refererPath} onChange={(e) => setRefererPath(e.target.value)} className="input" placeholder="/ci/79497/fungsi-eksponen" />
+              <p className="text-xs text-[#666] mt-1">Jika kosong, otomatis dari response.</p>
             </div>
           </div>
 
-          <div>
-            <p className="text-sm text-[#aaa] mb-2 flex items-center gap-2">
-              <LinkIcon className="w-4 h-4 text-[#666]" />
-              Video URL
-            </p>
-            <div className="p-3 rounded-lg bg-[#0d0d0d] border border-[#222]">
-              <p className="text-xs text-[#8aa6d8] break-all">{instanceValue['video-url'] || '-'}</p>
+          <ProviderSelector providers={providers} selectedProviders={selectedProviders} setSelectedProviders={setSelectedProviders} />
+
+          <div className="flex flex-col sm:flex-row gap-3">
+            <button type="submit" disabled={!urlShortId || isBusy} className="btn btn-primary flex items-center justify-center gap-2 sm:w-auto">
+              {detailsMutation.isLoading ? <><Loader2 className="w-4 h-4 animate-spin" /> Getting Details...</> : <><Search className="w-4 h-4" /> Get Details</>}
+            </button>
+            <button type="button" onClick={handleDownload} disabled={!urlShortId || isBusy} className="btn btn-primary flex items-center justify-center gap-2 sm:w-auto">
+              {downloadMutation.isLoading ? <><Loader2 className="w-4 h-4 animate-spin" /> Queueing...</> : <><Download className="w-4 h-4" /> Download & Distribusi</>}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {/* Batch Download Tab */}
+      {activeTab === 'batch' && (
+        <div className="space-y-4">
+          <div className="card p-5 space-y-4">
+            <div>
+              <h3 className="text-lg font-medium text-white flex items-center gap-2">
+                <Zap className="w-5 h-5 text-amber-400" />
+                Batch Downloader
+              </h3>
+              <p className="text-xs text-[#777] mt-1">
+                Download semua video dari CGroup chain. Build chain dulu (preview), lalu start batch download.
+              </p>
             </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="text-sm text-[#aaa] block mb-2">Root CGroup ID</label>
+                <input
+                  ref={batchRootCgRef}
+                  type="text"
+                  value={batchRootCgId}
+                  onChange={(e) => setBatchRootCgId(e.target.value.replace(/[^0-9]/g, ''))}
+                  placeholder="34"
+                  className="input"
+                  required
+                />
+                <p className="text-xs text-[#555] mt-1">Shortcut: <kbd className="px-1 py-0.5 bg-[#222] rounded text-[#888]">Ctrl+B</kbd> to focus</p>
+              </div>
+              <div>
+                <label className="text-sm text-[#aaa] block mb-2">Target CG Selector <span className="text-[#555]">(optional)</span></label>
+                <input type="text" value={batchTargetCgSelector} onChange={(e) => setBatchTargetCgSelector(e.target.value)} placeholder="/cg/83067 atau 83067" className="input" />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="text-sm text-[#aaa] block mb-2">Parent Folder Name <span className="text-[#555]">(optional)</span></label>
+                <input type="text" value={batchParentContainerName} onChange={(e) => setBatchParentContainerName(e.target.value)} placeholder="Otomatis dari nama CGroup" className="input" />
+                <p className="text-xs text-[#666] mt-1">Override parent folder dari chain mapping.</p>
+              </div>
+              <div>
+                <label className="text-sm text-[#aaa] block mb-2">Folder Prefix <span className="text-[#555]">(optional)</span></label>
+                <button
+                  type="button"
+                  onClick={() => setShowFolderPrefixPicker(true)}
+                  className="w-full flex items-center gap-3 px-4 py-2.5 bg-[#0d0d0d] border border-[#2a2a2a] rounded-lg text-left hover:border-[#3a3a3a] transition-colors"
+                >
+                  <FolderTree className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                  <span className={`text-sm flex-1 truncate ${normalizedBatchFolderPrefix ? 'text-white' : 'text-[#555]'}`}>
+                    {normalizedBatchFolderPrefix || 'Pilih folder...'}
+                  </span>
+                  {normalizedBatchFolderPrefix && (
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); setBatchFolderPrefix(''); }}
+                      className="p-0.5 hover:bg-[#333] rounded text-[#666] hover:text-white"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                  <ChevronRight className="w-4 h-4 text-[#555]" />
+                </button>
+                <p className="text-xs text-[#666] mt-1">
+                  Video disimpan di: <code className="text-[#8aa6d8]">root/{normalizedBatchFolderPrefix ? `${normalizedBatchFolderPrefix}/` : ''}{'{'}chain path{'}'}</code>
+                </p>
+              </div>
+            </div>
+
+            <ProviderSelector providers={providers} selectedProviders={selectedProviders} setSelectedProviders={setSelectedProviders} />
+
+            {/* Action Buttons */}
+            <div className="flex flex-col sm:flex-row gap-3">
+              <button
+                type="button"
+                onClick={handleGetBatchChain}
+                disabled={!batchRootCgId || isBatchBusy}
+                className="btn btn-primary flex items-center justify-center gap-2 sm:w-auto"
+              >
+                {batchChainMutation.isLoading ? (
+                  <><Loader2 className="w-4 h-4 animate-spin" /> Building Chain...</>
+                ) : batchChain ? (
+                  <><RefreshCw className="w-4 h-4" /> Rebuild Chain</>
+                ) : (
+                  <><Eye className="w-4 h-4" /> Preview Chain</>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={handleStartBatchDownload}
+                disabled={!batchRootCgId || !batchChain || isBatchBusy}
+                className={
+                  !batchChain
+                    ? 'btn flex items-center justify-center gap-2 sm:w-auto rounded-lg px-5 py-2.5 font-medium transition-colors bg-[#1a1a1a] text-[#555] border border-[#2a2a2a] cursor-not-allowed'
+                    : 'btn flex items-center justify-center gap-2 sm:w-auto rounded-lg px-5 py-2.5 font-medium transition-colors bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 border border-emerald-500/30'
+                }
+              >
+                {batchDownloadMutation.isLoading ? (
+                  <><Loader2 className="w-4 h-4 animate-spin" /> Starting Batch...</>
+                ) : (
+                  <><Zap className="w-4 h-4" /> Start Batch Download</>
+                )}
+              </button>
+            </div>
+
+            {!batchChain && !batchChainMutation.isLoading && (
+              <div className="flex items-start gap-2 p-3 rounded-lg bg-[#0d0d0d] border border-[#1f1f1f]">
+                <Eye className="w-4 h-4 text-[#555] mt-0.5 flex-shrink-0" />
+                <p className="text-xs text-[#666]">
+                  Klik <strong className="text-[#aaa]">Preview Chain</strong> terlebih dahulu untuk melihat daftar video yang akan di-download. Batch download hanya bisa dimulai setelah preview.
+                </p>
+              </div>
+            )}
+
+            {batchChain && !batchChainMutation.isLoading && (
+              <div className="flex items-start gap-2 p-3 rounded-lg bg-emerald-500/5 border border-emerald-500/20">
+                <CheckCircle className="w-4 h-4 text-emerald-400 mt-0.5 flex-shrink-0" />
+                <p className="text-xs text-emerald-300">
+                  Chain ready — <strong>{batchVideoCount} video</strong> ditemukan di <strong>{batchChain.containerDetails?.length || 0} container</strong>. Periksa preview di bawah, lalu klik <strong>Start Batch Download</strong>.
+                </p>
+              </div>
+            )}
+
+            {/* Build Progress */}
+            {batchBuildProgress && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-sky-300">Building chain...</span>
+                  <span className="text-[#888] font-mono">{batchBuildProgress.processed} / {batchBuildProgress.total ?? '?'}</span>
+                </div>
+                <div className="w-full bg-[#1a1a1a] rounded-full h-2 overflow-hidden">
+                  <div className="bg-gradient-to-r from-sky-500 to-sky-400 h-full rounded-full transition-all duration-300" style={{ width: `${batchBuildProgress.total ? Math.round((batchBuildProgress.processed / batchBuildProgress.total) * 100) : 0}%` }} />
+                </div>
+              </div>
+            )}
           </div>
 
-          <div>
-            <p className="text-sm text-[#aaa] mb-2">Raw Response</p>
-            <pre className="p-3 rounded-lg bg-[#0d0d0d] border border-[#222] text-xs text-[#9da6b3] overflow-x-auto">
-              {JSON.stringify(details?.body, null, 2)}
-            </pre>
-          </div>
+          {/* Chain Preview */}
+          {batchChain && (
+            <CollapsibleSection
+              title="Chain Preview"
+              icon={Eye}
+              badge={`${batchVideoCount} videos, ${batchChain.containerDetails?.length || 0} containers`}
+              defaultOpen={true}
+              rightElement={
+                <button
+                  type="button"
+                  onClick={handleStartBatchDownload}
+                  disabled={isBatchBusy}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 border border-emerald-500/30 transition-colors disabled:opacity-40"
+                >
+                  {batchDownloadMutation.isLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
+                  Start Batch
+                </button>
+              }
+            >
+              <div className="space-y-3 pt-3">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+                  <div className="bg-[#0d0d0d] p-3 rounded-lg">
+                    <p className="text-[#666] mb-1 text-xs">Leaf CG ID</p>
+                    <p className="text-white font-mono">{batchChain.leafCgId || '-'}</p>
+                  </div>
+                  <div className="bg-[#0d0d0d] p-3 rounded-lg">
+                    <p className="text-[#666] mb-1 text-xs">Containers</p>
+                    <p className="text-white">{batchChain.containerList?.totalContainers ?? 0}</p>
+                  </div>
+                  <div className="bg-[#0d0d0d] p-3 rounded-lg">
+                    <p className="text-[#666] mb-1 text-xs">Video Instances</p>
+                    <p className="text-white">{batchVideoCount}</p>
+                  </div>
+                </div>
+
+                {Array.isArray(batchChain.errors) && batchChain.errors.length > 0 && (
+                  <div className="p-3 rounded-lg bg-amber-500/5 border border-amber-500/20">
+                    <p className="text-xs text-amber-300">
+                      {batchChain.errors.length} error(s) during chain build. Data yang berhasil tetap ditampilkan.
+                    </p>
+                  </div>
+                )}
+
+                <div>
+                  <p className="text-xs text-[#888] mb-2">Video Queue</p>
+                  <div className="max-h-64 overflow-auto rounded-lg border border-[#222] bg-[#0d0d0d]">
+                    <table className="w-full text-xs">
+                      <thead className="bg-[#141414] text-[#8a8a8a] sticky top-0">
+                        <tr>
+                          <th className="text-left px-3 py-2">#</th>
+                          <th className="text-left px-3 py-2">ID</th>
+                          <th className="text-left px-3 py-2">Nama</th>
+                          <th className="text-left px-3 py-2">Path</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(batchChain.containerDetails || []).flatMap((container, ci) =>
+                          (container.videoInstances || []).map((item, vi) => {
+                            const idx = ci * 100 + vi;
+                            return (
+                              <tr key={`${container.containerUrlShortId}-${item.urlShortId}`} className="border-t border-[#1e1e1e] hover:bg-[#141414]">
+                                <td className="px-3 py-2 text-[#555]">{idx + 1}</td>
+                                <td className="px-3 py-2 text-[#c8c8c8] font-mono">{item.urlShortId}</td>
+                                <td className="px-3 py-2 text-[#e2e2e2] max-w-[200px] truncate">{item.metadata?.name || item.name || '-'}</td>
+                                <td className="px-3 py-2 text-[#8aa6d8] font-mono max-w-[180px] truncate">
+                                  {(normalizedBatchFolderPrefix ? `${normalizedBatchFolderPrefix}/${item.path || ''}` : item.path || '') || '-'}
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </CollapsibleSection>
+          )}
         </div>
       )}
 
-      {downloadMutation.isSuccess && (
+      {/* Instance Details */}
+      {instanceValue && (
+        <CollapsibleSection title="Instance Details" icon={Shield} defaultOpen badge={details?.ok ? 'ok' : 'error'}>
+          <div className="space-y-4 pt-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+              <div className="bg-[#0d0d0d] p-3 rounded-lg">
+                <p className="text-[#666] mb-1 text-xs">Judul</p>
+                <p className="text-white">{instanceValue.name || '-'}</p>
+              </div>
+              <div className="bg-[#0d0d0d] p-3 rounded-lg">
+                <p className="text-[#666] mb-1 text-xs">Durasi</p>
+                <p className="text-white">{formatDuration(Number(instanceValue['duration-seconds']))}</p>
+              </div>
+              <div className="bg-[#0d0d0d] p-3 rounded-lg">
+                <p className="text-[#666] mb-1 text-xs">Parent</p>
+                <p className="text-white">{instanceValue.parent?.name || '-'}</p>
+              </div>
+              <div className="bg-[#0d0d0d] p-3 rounded-lg">
+                <p className="text-[#666] mb-1 text-xs">Type / Hosting</p>
+                <p className="text-white">{instanceValue.type || '-'} / {instanceValue['hosting-type'] || '-'}</p>
+              </div>
+            </div>
+
+            <div>
+              <p className="text-xs text-[#aaa] mb-1.5 flex items-center gap-2"><LinkIcon className="w-3.5 h-3.5 text-[#666]" /> Video URL</p>
+              <div className="p-3 rounded-lg bg-[#0d0d0d] border border-[#222]">
+                <p className="text-xs text-[#8aa6d8] break-all">{instanceValue['video-url'] || '-'}</p>
+              </div>
+            </div>
+
+            <CollapsibleSection title="Raw Response" icon={ChevronRight} defaultOpen={false}>
+              <pre className="p-3 rounded-lg bg-[#0d0d0d] border border-[#222] text-xs text-[#9da6b3] overflow-x-auto max-h-60">
+                {JSON.stringify(details?.body, null, 2)}
+              </pre>
+            </CollapsibleSection>
+          </div>
+        </CollapsibleSection>
+      )}
+
+      {/* Download Success Toast-style Card */}
+      {downloadMutation.isSuccess && !batchResult && (
         <div className="card p-4 flex items-center gap-3 border-emerald-500/30">
           <CheckCircle className="w-5 h-5 text-emerald-400" />
           <div>
@@ -1010,65 +1518,40 @@ export default function ZeniusPage() {
         </div>
       )}
 
-      {batchResult && (
-        <div className="card p-4 flex items-center gap-3 border-emerald-500/30">
-          <CheckCircle className="w-5 h-5 text-emerald-400" />
-          <div>
-            <p className="text-sm text-emerald-400 font-medium">Batch queued</p>
-            <p className="text-xs text-[#888]">
-              {batchResult.queuedCount || 0} video di-queue, {batchResult.skippedCount || 0} dilewati.
-              Pantau progress di halaman Jobs/Status.
-            </p>
-          </div>
-        </div>
-      )}
-
+      {/* Error Card */}
       {(detailsMutation.isError || downloadMutation.isError || batchChainMutation.isError || batchDownloadMutation.isError) && (
         <div className="card p-4 flex items-center gap-3 border-red-500/30">
           <AlertCircle className="w-5 h-5 text-red-400" />
           <div>
             <p className="text-sm text-red-400 font-medium">Request failed</p>
             <p className="text-xs text-[#888] break-all">
-              {detailsMutation.error?.response?.data?.error
-                || downloadMutation.error?.response?.data?.error
-                || batchChainMutation.error?.response?.data?.error
-                || batchDownloadMutation.error?.response?.data?.error
-                || detailsMutation.error?.message
-                || downloadMutation.error?.message
-                || batchChainMutation.error?.message
-                || batchDownloadMutation.error?.message
-                || 'Unknown error'}
+              {detailsMutation.error?.response?.data?.error || downloadMutation.error?.response?.data?.error || batchChainMutation.error?.response?.data?.error || batchDownloadMutation.error?.response?.data?.error || detailsMutation.error?.message || downloadMutation.error?.message || batchChainMutation.error?.message || batchDownloadMutation.error?.message || 'Unknown error'}
             </p>
           </div>
         </div>
       )}
 
-      {/* Cancel All Confirmation Dialog */}
-      <ConfirmDialog
-        isOpen={showCancelConfirm}
-        onClose={() => setShowCancelConfirm(false)}
-        onConfirm={async () => {
-          await cancelAllMutation.mutateAsync();
-          setShowCancelConfirm(false);
-        }}
-        title="Cancel All Downloads"
-        message="This will cancel all active and queued Zenius downloads and uploads. Are you sure?"
-        confirmText="Cancel All"
-        variant="danger"
+      {/* Batch Confirm Dialog */}
+      <BatchConfirmDialog
+        isOpen={Boolean(showBatchConfirm)}
+        onClose={() => setShowBatchConfirm(null)}
+        onConfirm={handleConfirmBatchDownload}
+        summary={showBatchConfirm}
       />
 
-      {/* Reset Files Confirmation Dialog */}
-      <ConfirmDialog
-        isOpen={showResetConfirm}
-        onClose={() => setShowResetConfirm(false)}
-        onConfirm={async () => {
-          await resetFilesMutation.mutateAsync();
-          setShowResetConfirm(false);
-        }}
-        title="Reset All Zenius Files"
-        message="This will permanently delete all Zenius files from the database and cancel all related jobs. This action cannot be undone. Are you sure?"
-        confirmText="Reset All"
-        variant="danger"
+      {/* Cancel All Confirmation */}
+      <ConfirmDialog isOpen={showCancelConfirm} onClose={() => setShowCancelConfirm(false)} onConfirm={async () => { await cancelAllMutation.mutateAsync(); setShowCancelConfirm(false); }} title="Cancel All Downloads" message="This will cancel all active and queued Zenius downloads and uploads. Are you sure?" confirmText="Cancel All" variant="danger" />
+      <ConfirmDialog isOpen={showResetConfirm} onClose={() => setShowResetConfirm(false)} onConfirm={async () => { await resetFilesMutation.mutateAsync(); setShowResetConfirm(false); }} title="Reset All Zenius Files" message="This will permanently delete all Zenius files and cancel all related jobs. This action cannot be undone." confirmText="Reset All" variant="danger" />
+      <ConfirmDialog isOpen={showDeleteAllFoldersConfirm} onClose={() => setShowDeleteAllFoldersConfirm(false)} onConfirm={async () => { await deleteAllFolders.mutateAsync(); setShowDeleteAllFoldersConfirm(false); }} title="Remove All Folders" message="This will permanently delete ALL folders (except root), their files, and jobs. This action cannot be undone." confirmText="Delete All" variant="danger" />
+
+      <FolderPickerModal
+        isOpen={showFolderPrefixPicker}
+        onClose={() => setShowFolderPrefixPicker(false)}
+        onSelect={(path) => setBatchFolderPrefix(path)}
+        folderTree={folderTree}
+        currentValue={normalizedBatchFolderPrefix}
+        title="Pilih Folder Prefix"
+        description="Video akan disimpan di dalam folder ini. Pilih Root untuk tanpa prefix."
       />
     </div>
   );

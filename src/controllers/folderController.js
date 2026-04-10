@@ -58,6 +58,19 @@ const folderController = {
     } catch (error) {
       res.status(400).json({ success: false, error: error.message });
     }
+  },
+
+  async deleteAll(req, res) {
+    try {
+      const result = await db.deleteAllFolders();
+      res.json({
+        success: true,
+        message: `Deleted ${result.removedFolders} folders, ${result.removedFiles} files, and ${result.removedJobs} jobs`,
+        data: result
+      });
+    } catch (error) {
+      res.status(400).json({ success: false, error: error.message });
+    }
   }
 };
 

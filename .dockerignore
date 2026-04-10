@@ -1,0 +1,16 @@
+node_modules
+src/frontend/node_modules
+src/frontend/dist
+.git
+.env
+.env.*
+*.log
+uploads/
+data/
+downloads/
+.DS_Store
+Thumbs.db
+.idea
+.vscode
+*.swp
+*.swo

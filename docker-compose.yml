@@ -1,0 +1,43 @@
+services:
+  app:
+    build: .
+    ports:
+      - "${PORT:-3001}:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=${MYSQL_USER:-zenius}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-zeniuspass}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-zenius}
+      - UPLOAD_DIR=/app/uploads
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3001}
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.0
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-rootpass}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-zenius}
+      - MYSQL_USER=${MYSQL_USER:-zenius}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-zeniuspass}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "${MYSQL_EXTERNAL_PORT:-3306}:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  uploads:
+  mysql_data:

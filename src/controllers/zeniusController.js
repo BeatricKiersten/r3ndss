@@ -5,11 +5,12 @@ const pLimit = require('p-limit');
 
 const config = require('../config');
 const { db, videoProcessor, uploaderService } = require('../services/runtime');
+const webhookService = require('../services/webhookService');
 
 const ZENIUS_BASE_URL = 'https://www.zenius.net';
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0';
 const DEFAULT_BATCH_ROOT_CGROUP_ID = '34';
-const DEFAULT_BATCH_PARENT_CONTAINER_NAME = 'Pengantar Keterampilan Matematika Dasar';
+const DEFAULT_BATCH_PARENT_CONTAINER_NAME = '';
 const RETRYABLE_UPSTREAM_STATUS = new Set([429, 500, 502, 503, 504]);
 const UPSTREAM_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_TIMEOUT_MS || '12000', 10);
 const UPSTREAM_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_UPSTREAM_MAX_RETRIES || '3', 10);
@@ -25,13 +26,169 @@ const BATCH_SESSION_TTL_MS = Number.parseInt(process.env.ZENIUS_BATCH_SESSION_TT
 const BATCH_UPSTREAM_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_BATCH_UPSTREAM_TIMEOUT_MS || '7000', 10);
 const BATCH_UPSTREAM_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_BATCH_UPSTREAM_MAX_RETRIES || '1', 10);
 const BATCH_DEADLINE_GUARD_MS = Number.parseInt(process.env.ZENIUS_BATCH_DEADLINE_GUARD_MS || '1200', 10);
+const BACKGROUND_BATCH_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BACKGROUND_BATCH_CHUNK_SIZE || '6', 10);
+const BACKGROUND_BATCH_RUN_TTL_MS = Number.parseInt(process.env.ZENIUS_BACKGROUND_BATCH_RUN_TTL_MS || '21600000', 10);
+const BACKGROUND_BATCH_KEEPALIVE_INTERVAL_MS = Number.parseInt(process.env.ZENIUS_BACKGROUND_BATCH_KEEPALIVE_INTERVAL_MS || '20000', 10);
+const BACKGROUND_BATCH_KEEPALIVE_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_BACKGROUND_BATCH_KEEPALIVE_TIMEOUT_MS || '10000', 10);
 const batchChainSessions = new Map();
+const backgroundBatchRuns = new Map();
+let backgroundBatchKeepaliveTimer = null;
+let backgroundBatchKeepaliveUrl = String(process.env.ZENIUS_BATCH_KEEPALIVE_URL || '').trim();
 
-// Download concurrency control - max 10 videos at a time
-const MAX_CONCURRENT_DOWNLOADS = 10;
-const activeZeniusDownloads = new Map(); // fileId -> { urlShortId, startTime, abortController }
-const zeniusDownloadQueue = []; // Queue of pending downloads
-let isProcessingQueue = false;
+// Download concurrency control
+const DEFAULT_MAX_CONCURRENT_DOWNLOADS = Number.parseInt(process.env.ZENIUS_MAX_CONCURRENT_DOWNLOADS || '10', 10);
+
+class DownloadQueue {
+  constructor(maxConcurrent) {
+    this._maxConcurrent = Math.max(1, maxConcurrent || DEFAULT_MAX_CONCURRENT_DOWNLOADS);
+    this._active = new Map();
+    this._queue = [];
+    this._processing = false;
+    this._nextTaskId = 0;
+    this._drainResolvers = [];
+  }
+
+  get maxConcurrent() { return this._maxConcurrent; }
+  get activeCount() { return this._active.size; }
+  get queuedCount() { return this._queue.length; }
+  get isProcessing() { return this._processing; }
+  get activeTasks() { return Array.from(this._active.values()).map((t) => ({ id: t.id, urlShortId: t.urlShortId, outputName: t.outputName, startTime: t.startTime })); }
+  get queuedTasks() { return this._queue.map((t) => ({ urlShortId: t.urlShortId, outputName: t.outputName })); }
+
+  setMaxConcurrent(value) {
+    const n = Math.max(1, Math.min(50, Number(value) || DEFAULT_MAX_CONCURRENT_DOWNLOADS));
+    this._maxConcurrent = n;
+    this._scheduleNext();
+    return n;
+  }
+
+  _canStart() { return this._active.size < this._maxConcurrent; }
+
+  add(task) {
+    const id = ++this._nextTaskId;
+    return new Promise((resolve, reject) => {
+      const wrapped = { ...task, id, resolve, reject, cancelled: false, startTime: null };
+      if (this._canStart() && !this._processing) {
+        this._execute(wrapped);
+      } else {
+        this._queue.push(wrapped);
+        this._scheduleNext();
+      }
+    });
+  }
+
+  _scheduleNext() {
+    if (this._processing) return;
+    setImmediate(() => this._drain());
+  }
+
+  async _drain() {
+    if (this._processing) return;
+    this._processing = true;
+
+    while (this._queue.length > 0 && this._canStart()) {
+      const task = this._queue.shift();
+      if (!task || task.cancelled) continue;
+      this._execute(task);
+    }
+
+    this._processing = false;
+
+    if (this._active.size === 0 && this._queue.length === 0) {
+      const resolvers = this._drainResolvers;
+      this._drainResolvers = [];
+      resolvers.forEach((r) => r());
+    }
+  }
+
+  async _execute(task) {
+    task.startTime = Date.now();
+    this._active.set(task.id, task);
+
+    try {
+      const result = await this._runDownload(task);
+      task.resolve(result);
+    } catch (error) {
+      task.reject(error);
+    } finally {
+      this._active.delete(task.id);
+      this._scheduleNext();
+    }
+  }
+
+  async _runDownload(task) {
+    const { urlShortId, videoUrl, folderId, outputName, ffmpegHeaders, selectedProviders } = task;
+
+    console.log(`[DownloadQueue] Starting #${task.id} ${urlShortId} (active: ${this._active.size}/${this._maxConcurrent}, queued: ${this._queue.length})`);
+
+    let fileId = null;
+
+    try {
+      const result = await videoProcessor.processHls(videoUrl, {
+        folderId,
+        outputName,
+        outputDir: config.uploadDir,
+        headers: ffmpegHeaders,
+        skipIfExists: true
+      });
+
+      fileId = result.fileId;
+
+      if (result.skipped) {
+        let uploadQueueResult = null;
+        if (result.reason === 'File already exists') {
+          uploadQueueResult = await uploaderService.queueFileUpload(result.fileId, result.outputPath, folderId, selectedProviders);
+        }
+        console.log(`[DownloadQueue] #${task.id} ${urlShortId} skipped: ${result.reason}`);
+        return { success: true, id: task.id, fileId, urlShortId, skipped: true, reason: result.reason, uploadQueue: uploadQueueResult };
+      }
+
+      console.log(`[DownloadQueue] #${task.id} ${urlShortId} downloaded, fileId=${fileId}, queuing upload`);
+
+      await uploaderService.queueFileUpload(result.fileId, result.outputPath, folderId, selectedProviders);
+
+      return { success: true, id: task.id, fileId, urlShortId };
+    } catch (error) {
+      console.error(`[DownloadQueue] #${task.id} ${urlShortId} failed:`, error.message);
+      throw error;
+    }
+  }
+
+  cancelAll() {
+    const cancelled = [];
+
+    for (const task of this._queue) {
+      task.cancelled = true;
+      task.resolve({ cancelled: true, id: task.id, reason: 'User cancelled all' });
+      cancelled.push({ urlShortId: task.urlShortId, fromQueue: true });
+    }
+    this._queue.length = 0;
+
+    for (const [id, task] of this._active.entries()) {
+      cancelled.push({ id, urlShortId: task.urlShortId, fromActive: true });
+    }
+
+    return cancelled;
+  }
+
+  getStatus() {
+    return {
+      active: this._active.size,
+      max: this._maxConcurrent,
+      queued: this._queue.length,
+      isProcessing: this._processing,
+      activeTasks: this.activeTasks,
+      queuedTasks: this.queuedTasks
+    };
+  }
+
+  async drain() {
+    if (this._active.size === 0 && this._queue.length === 0) return;
+    return new Promise((resolve) => { this._drainResolvers.push(resolve); });
+  }
+}
+
+const downloadQueue = new DownloadQueue(DEFAULT_MAX_CONCURRENT_DOWNLOADS);
 
 const KNOWN_REQUEST_HEADERS = new Set([
   'accept',
@@ -117,6 +274,37 @@ function sanitizeOutputName(rawName, fallback = 'zenius-video') {
   return normalized || fallback;
 }
 
+function reserveUniqueOutputName(rawName, fallback, urlShortId, usedNames) {
+  const baseName = sanitizeOutputName(rawName, fallback);
+  if (!usedNames) {
+    return baseName;
+  }
+
+  const normalizedKey = baseName.toLowerCase();
+  if (!usedNames.has(normalizedKey)) {
+    usedNames.add(normalizedKey);
+    return baseName;
+  }
+
+  const withId = sanitizeOutputName(`${baseName}-${urlShortId}`, fallback);
+  const withIdKey = withId.toLowerCase();
+  if (!usedNames.has(withIdKey)) {
+    usedNames.add(withIdKey);
+    return withId;
+  }
+
+  let counter = 2;
+  while (true) {
+    const candidate = sanitizeOutputName(`${baseName}-${urlShortId}-${counter}`, fallback);
+    const candidateKey = candidate.toLowerCase();
+    if (!usedNames.has(candidateKey)) {
+      usedNames.add(candidateKey);
+      return candidate;
+    }
+    counter += 1;
+  }
+}
+
 function sanitizePathSegment(value, fallback = 'unknown') {
   const normalized = String(value || '')
     .trim()
@@ -126,10 +314,18 @@ function sanitizePathSegment(value, fallback = 'unknown') {
   return normalized || fallback;
 }
 
-function buildContainerPath(parentName, containerName) {
-  const parent = sanitizePathSegment(parentName, 'unknown-parent');
-  const container = sanitizePathSegment(containerName, 'unknown-container');
-  return `${parent}/${container}/`;
+function sanitizePathSegments(values) {
+  const list = Array.isArray(values) ? values : [values];
+  return list
+    .map((value) => sanitizePathSegment(value, ''))
+    .filter(Boolean);
+}
+
+function buildContainerPath(parentSegments, containerName) {
+  return [
+    ...sanitizePathSegments(parentSegments),
+    sanitizePathSegment(containerName, 'unknown-container')
+  ].join('/');
 }
 
 function parseBoolean(value) {
@@ -221,6 +417,7 @@ function createBatchChainSession({ rootCgId, targetCgSelector, parentContainerNa
     updatedAt: now,
     expiresAt: now + clampPositiveInt(BATCH_SESSION_TTL_MS, 900000),
     rootCgId,
+    rootCgName: null,
     targetCgSelector: String(targetCgSelector || '').trim() || null,
     targetCgId: normalizeTargetCgId(targetCgSelector),
     parentContainerName: sanitizePathSegment(parentContainerName, 'unknown-parent'),
@@ -233,6 +430,7 @@ function createBatchChainSession({ rootCgId, targetCgSelector, parentContainerNa
     leafCursor: 0,
     traversal: [],
     containerByShortId: new Map(),
+    cgPathById: new Map([[rootCgId, []]]),
     errors: []
   };
 }
@@ -250,6 +448,177 @@ function cleanupExpiredBatchChainSessions() {
       batchChainSessions.delete(sessionId);
     }
   }
+}
+
+function createBackgroundBatchRun({ rootCgId, targetCgSelector, baseFolderInput, selectedProviders, keepaliveUrl }) {
+  const now = Date.now();
+  return {
+    id: randomUUID(),
+    createdAt: now,
+    updatedAt: now,
+    expiresAt: now + clampPositiveInt(BACKGROUND_BATCH_RUN_TTL_MS, 21600000),
+    status: 'running',
+    error: null,
+    rootCgId,
+    targetCgSelector: String(targetCgSelector || '').trim() || null,
+    baseFolderInput: String(baseFolderInput || '').trim() || '',
+    selectedProviders: Array.isArray(selectedProviders) ? [...selectedProviders] : null,
+    keepaliveUrl: String(keepaliveUrl || '').trim() || null,
+    sessionId: null,
+    rootCgName: null,
+    parentContainerName: null,
+    totalContainers: 0,
+    processedContainers: 0,
+    queuedCount: 0,
+    skippedCount: 0,
+    queued: [],
+    skipped: [],
+    chainErrors: [],
+    hasMoreContainers: true,
+    nextContainerOffset: 0,
+    startedAt: new Date(now).toISOString(),
+    finishedAt: null
+  };
+}
+
+function touchBackgroundBatchRun(run) {
+  const now = Date.now();
+  run.updatedAt = now;
+  run.expiresAt = now + clampPositiveInt(BACKGROUND_BATCH_RUN_TTL_MS, 21600000);
+}
+
+function summarizeBackgroundBatchRun(run) {
+  return {
+    id: run.id,
+    status: run.status,
+    error: run.error || null,
+    rootCgId: run.rootCgId,
+    targetCgSelector: run.targetCgSelector,
+    baseFolderInput: run.baseFolderInput,
+    selectedProviders: run.selectedProviders,
+    sessionId: run.sessionId,
+    rootCgName: run.rootCgName,
+    parentContainerName: run.parentContainerName,
+    totalContainers: run.totalContainers,
+    processedContainers: run.processedContainers,
+    queuedCount: run.queuedCount,
+    skippedCount: run.skippedCount,
+    hasMoreContainers: run.hasMoreContainers,
+    nextContainerOffset: run.nextContainerOffset,
+    chainErrors: Array.isArray(run.chainErrors) ? run.chainErrors : [],
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt,
+    updatedAt: new Date(run.updatedAt).toISOString()
+  };
+}
+
+function cleanupExpiredBackgroundBatchRuns() {
+  const now = Date.now();
+  for (const [runId, run] of backgroundBatchRuns.entries()) {
+    if (!run || run.expiresAt <= now) {
+      backgroundBatchRuns.delete(runId);
+    }
+  }
+}
+
+function getBackgroundBatchRunsSummary() {
+  cleanupExpiredBackgroundBatchRuns();
+  return Array.from(backgroundBatchRuns.values())
+    .sort((left, right) => right.updatedAt - left.updatedAt)
+    .map((run) => summarizeBackgroundBatchRun(run));
+}
+
+function hasActiveBackgroundBatchRuns() {
+  for (const run of backgroundBatchRuns.values()) {
+    if (run?.status === 'running') {
+      return true;
+    }
+  }
+  return false;
+}
+
+function stopBackgroundBatchKeepalive() {
+  if (backgroundBatchKeepaliveTimer) {
+    clearInterval(backgroundBatchKeepaliveTimer);
+    backgroundBatchKeepaliveTimer = null;
+  }
+}
+
+async function sendBackgroundBatchKeepalive() {
+  if (!backgroundBatchKeepaliveUrl) {
+    return;
+  }
+
+  try {
+    await axios.get(backgroundBatchKeepaliveUrl, {
+      timeout: clampPositiveInt(BACKGROUND_BATCH_KEEPALIVE_TIMEOUT_MS, 10000),
+      validateStatus: () => true,
+      headers: {
+        'User-Agent': 'ZeniusBatchKeepalive/1.0'
+      }
+    });
+  } catch (error) {
+    console.warn(`[Zenius] Keepalive request failed: ${error.message}`);
+  }
+}
+
+function ensureBackgroundBatchKeepalive(keepaliveUrl = '') {
+  if (keepaliveUrl) {
+    backgroundBatchKeepaliveUrl = keepaliveUrl;
+  }
+
+  if (!backgroundBatchKeepaliveUrl || backgroundBatchKeepaliveTimer) {
+    return;
+  }
+
+  backgroundBatchKeepaliveTimer = setInterval(() => {
+    if (!hasActiveBackgroundBatchRuns()) {
+      stopBackgroundBatchKeepalive();
+      return;
+    }
+
+    sendBackgroundBatchKeepalive().catch(() => {});
+  }, clampPositiveInt(BACKGROUND_BATCH_KEEPALIVE_INTERVAL_MS, 20000));
+
+  sendBackgroundBatchKeepalive().catch(() => {});
+}
+
+function resolveBackgroundKeepaliveUrl(req) {
+  const explicit = String(process.env.ZENIUS_BATCH_KEEPALIVE_URL || '').trim();
+  if (explicit) {
+    return explicit;
+  }
+
+  const host = String(req.get('host') || '').trim();
+  if (!host) {
+    return '';
+  }
+
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const protocol = forwardedProto || req.protocol || 'https';
+  return `${protocol}://${host}/zenius`;
+}
+
+function markBackgroundBatchRunsCancelled(reason = 'Cancelled by user') {
+  let cancelledCount = 0;
+
+  for (const run of backgroundBatchRuns.values()) {
+    if (run?.status !== 'running') {
+      continue;
+    }
+
+    run.status = 'cancelled';
+    run.error = reason;
+    run.finishedAt = new Date().toISOString();
+    touchBackgroundBatchRun(run);
+    cancelledCount += 1;
+  }
+
+  if (!hasActiveBackgroundBatchRuns()) {
+    stopBackgroundBatchKeepalive();
+  }
+
+  return cancelledCount;
 }
 
 function addLeafCgId(session, cgId) {
@@ -271,6 +640,20 @@ function extractCgId(pathUrl) {
   return match ? match[1] : null;
 }
 
+function extractContainerShortIdFromPath(pathUrl) {
+  const match = String(pathUrl || '').match(/\/cgc\/(\d+)(?:\/|$)/);
+  return match ? match[1] : null;
+}
+
+function resolveContainerShortId(item) {
+  const byField = normalizeNumericShortId(item?.['url-short-id']);
+  if (byField) {
+    return byField;
+  }
+
+  return extractContainerShortIdFromPath(item?.['path-url']);
+}
+
 function normalizeTargetCgId(rawSelector) {
   const raw = String(rawSelector || '').trim();
   if (!raw) return null;
@@ -279,7 +662,7 @@ function normalizeTargetCgId(rawSelector) {
     return raw;
   }
 
-  return extractCgId(raw);
+  return extractCgId(raw) || extractContainerShortIdFromPath(raw);
 }
 
 function unique(values) {
@@ -297,6 +680,81 @@ function normalizeCgId(rawValue, fallback = null) {
   }
 
   return value;
+}
+
+function normalizeNumericShortId(rawValue) {
+  const value = String(rawValue || '').trim();
+  if (!/^\d+$/.test(value)) {
+    return null;
+  }
+  return value;
+}
+
+function addDiscoveredContainer(session, containerShortId, item = {}, sourceLeafCgId = null, parentPathSegments = []) {
+  const key = normalizeNumericShortId(containerShortId);
+  if (!key || session.containerByShortId.has(key)) {
+    return false;
+  }
+
+  session.containerByShortId.set(key, {
+    'url-short-id': key,
+    name: String(item?.name || item?.title || '').trim() || null,
+    type: String(item?.type || '').trim() || null,
+    'path-url': String(item?.['path-url'] || '').trim() || null,
+    sourceLeafCgId: sourceLeafCgId ? String(sourceLeafCgId).trim() : null,
+    parentPathSegments: sanitizePathSegments(parentPathSegments)
+  });
+
+  return true;
+}
+
+function rememberCgPath(session, cgId, pathSegments) {
+  const normalizedCgId = normalizeNumericShortId(cgId);
+  if (!normalizedCgId) {
+    return;
+  }
+
+  const nextPath = sanitizePathSegments(pathSegments);
+  const existingPath = sanitizePathSegments(session.cgPathById.get(normalizedCgId) || []);
+
+  if (existingPath.length > 0 && existingPath.length <= nextPath.length) {
+    return;
+  }
+
+  session.cgPathById.set(normalizedCgId, nextPath);
+}
+
+function resolveContainerParentSegments(session, container) {
+  const customParentSegments = session.parentContainerName && session.parentContainerName !== 'unknown-parent'
+    ? [session.parentContainerName]
+    : [];
+  const mappedSegments = sanitizePathSegments(
+    container?.parentPathSegments
+    || session.cgPathById.get(container?.sourceLeafCgId)
+    || []
+  );
+
+  if (mappedSegments.length > 0) {
+    return [...customParentSegments, ...mappedSegments];
+  }
+
+  if (customParentSegments.length > 0) {
+    return customParentSegments;
+  }
+
+  return [resolveBatchParentContainerName(session)];
+}
+
+function resolveBatchParentContainerName(session) {
+  if (session.parentContainerName && session.parentContainerName !== 'unknown-parent') {
+    return session.parentContainerName;
+  }
+
+  if (session.rootCgName) {
+    return sanitizePathSegment(session.rootCgName, 'unknown-parent');
+  }
+
+  return sanitizePathSegment(session.parentContainerName, 'unknown-parent');
 }
 
 function stripWrappingQuotes(value) {
@@ -606,7 +1064,7 @@ async function getJson(endpoint, {
       }
 
       const isRetryable = RETRYABLE_UPSTREAM_STATUS.has(response.status);
-      if (isRetryable && attempt < maxRetries) {
+      if (isRetryable && attempt < requestMaxRetries) {
         const delayMs = retryBaseDelay * (2 ** attempt) + Math.floor(Math.random() * 250);
         await sleep(delayMs);
         continue;
@@ -665,15 +1123,30 @@ async function getContainerListWithDetails(urlShortId, options) {
   };
 }
 
-async function getVideoInstanceDetails(urlShortId, options) {
+async function getContainerDetailsValue(urlShortId, options) {
   const endpoint = `${ZENIUS_BASE_URL}/api/container-details?url-short-id=${encodeURIComponent(urlShortId)}`;
   const payload = await getJson(endpoint, {
     ...options,
     urlShortId,
-    fallbackRefererPath: `/cg/${urlShortId}`
+    fallbackRefererPath: `/cgc/${urlShortId}`
   });
-  const instances = Array.isArray(payload?.value?.['content-instances'])
-    ? payload.value['content-instances']
+
+  return payload?.value || {};
+}
+
+function isContainerDetailsPayload(value, urlShortId) {
+  const relationPathUrl = String(value?.['relation-data']?.['path-url'] || '').trim();
+  const relationShortId = normalizeNumericShortId(value?.['relation-data']?.['url-short-id']);
+  const hasContainerPath = relationPathUrl.includes('/cgc/');
+  const matchesShortId = relationShortId === normalizeNumericShortId(urlShortId);
+
+  return hasContainerPath && matchesShortId;
+}
+
+async function getVideoInstanceDetails(urlShortId, options) {
+  const value = await getContainerDetailsValue(urlShortId, options);
+  const instances = Array.isArray(value?.['content-instances'])
+    ? value['content-instances']
     : [];
 
   return instances
@@ -683,7 +1156,7 @@ async function getVideoInstanceDetails(urlShortId, options) {
     })
     .map((item) => ({
       urlShortId: String(item?.['url-short-id'] || '').trim(),
-      name: String(item?.name || item?.['canonical-name'] || '').trim() || null,
+      name: String(item?.name || item?.title || item?.['canonical-name'] || '').trim() || null,
       duration: item?.duration || item?.['duration-seconds'] || item?.['video-duration'] || null,
       type: String(item?.type || '').trim()
     }))
@@ -718,6 +1191,35 @@ async function initializeBatchChainSessionDiscovery(session, options) {
   try {
     rootPayload = await getCgByShortId(session.rootCgId, options);
   } catch (error) {
+    try {
+      const containerValue = await getContainerDetailsValue(session.rootCgId, options);
+      if (isContainerDetailsPayload(containerValue, session.rootCgId)) {
+        addDiscoveredContainer(
+          session,
+          session.rootCgId,
+          {
+            'url-short-id': session.rootCgId,
+            name: containerValue.name,
+            type: containerValue.type,
+            'path-url': containerValue?.['relation-data']?.['path-url'] || `/cgc/${session.rootCgId}`
+          },
+          session.rootCgId,
+          []
+        );
+        session.traversal.push({
+          source: 'root',
+          next: session.rootCgId,
+          isParent: false,
+          isContainer: true
+        });
+        session.discoveryDone = true;
+        session.discoveryInitialized = true;
+        return;
+      }
+    } catch {
+      // Ignore container fallback errors and keep original cgroup error.
+    }
+
     pushBatchError(session.errors, {
       stage: 'cgroup-root',
       urlShortId: session.rootCgId,
@@ -734,62 +1236,82 @@ async function initializeBatchChainSessionDiscovery(session, options) {
     throw error;
   }
 
+  const rootValue = rootPayload?.value || {};
+  session.rootCgName = String(rootValue.name || '').trim() || session.rootCgName;
+
   const rootContainers = Array.isArray(rootPayload?.value?.['cgs-containers'])
     ? rootPayload.value['cgs-containers']
     : [];
 
-  const matchedRootContainers = rootContainers.filter((item) => {
-    const itemCgId = extractCgId(item?.['path-url']);
-    if (!itemCgId) return false;
-    if (!session.targetCgId) return true;
-    return itemCgId === session.targetCgId;
-  });
+  const shouldFilterByTarget = Boolean(session.targetCgId && session.targetCgId !== session.rootCgId);
+  let matchedTarget = false;
+  let queuedCgCount = 0;
+  let directContainerCount = 0;
 
-  if (matchedRootContainers.length === 0) {
-    const availableCgIds = unique(
+  for (const item of rootContainers) {
+    const itemCgId = extractCgId(item?.['path-url']);
+    const itemContainerId = resolveContainerShortId(item);
+    const itemIsParent = parseBoolean(item?.['is-parent']);
+    const matchesTarget = !shouldFilterByTarget
+      || session.targetCgId === itemCgId
+      || session.targetCgId === itemContainerId;
+
+    if (!matchesTarget) {
+      continue;
+    }
+
+    matchedTarget = true;
+
+    if (itemCgId) {
+      rememberCgPath(session, itemCgId, [item?.name || item?.title || itemCgId]);
+      session.traversal.push({
+        source: session.rootCgId,
+        next: itemCgId,
+        isParent: itemIsParent
+      });
+
+      if (!session.visitedCgIds.has(itemCgId)) {
+        session.queueCgIds.push(itemCgId);
+        queuedCgCount += 1;
+      }
+      continue;
+    }
+
+    if (itemIsParent === false && itemContainerId) {
+      const inserted = addDiscoveredContainer(session, itemContainerId, item, session.rootCgId, []);
+      if (inserted) {
+        directContainerCount += 1;
+      }
+
+      session.traversal.push({
+        source: session.rootCgId,
+        next: itemContainerId,
+        isParent: false,
+        isContainer: true
+      });
+    }
+  }
+
+  if (shouldFilterByTarget && !matchedTarget) {
+    const availableChildIds = unique(
       rootContainers
-        .map((item) => extractCgId(item?.['path-url']))
+        .flatMap((item) => [extractCgId(item?.['path-url']), resolveContainerShortId(item)])
         .filter(Boolean)
     );
 
-    if (session.targetCgId) {
-      pushBatchError(session.errors, {
-        stage: 'cgroup-root-match',
-        urlShortId: session.targetCgId,
-        message: `targetCgId=${session.targetCgId} not present under root ${session.rootCgId}, using target as direct leaf candidate`
-      });
-      addLeafCgId(session, session.targetCgId);
-      session.traversal.push({ source: session.rootCgId, next: session.targetCgId, isParent: null });
-      session.discoveryInitialized = true;
-      return;
-    }
-
-    throw new Error(
-      `No cgs-containers matching /cg/:ID for root id ${session.rootCgId}. `
-      + `targetCgId=${session.targetCgId || 'auto'} available=[${availableCgIds.join(', ')}]`
-    );
-  }
-
-  const startCgIds = unique(
-    matchedRootContainers
-      .map((item) => extractCgId(item?.['path-url']))
-      .filter(Boolean)
-  );
-
-  for (const item of matchedRootContainers) {
-    const next = extractCgId(item?.['path-url']);
-    if (!next) continue;
-    session.traversal.push({
-      source: session.rootCgId,
-      next,
-      isParent: parseBoolean(item?.['is-parent'])
+    pushBatchError(session.errors, {
+      stage: 'cgroup-root-match',
+      urlShortId: session.targetCgId,
+      message: `targetCgId=${session.targetCgId} not present under root ${session.rootCgId}, using target as direct leaf candidate. available=[${availableChildIds.join(', ')}]`
     });
+    addLeafCgId(session, session.targetCgId);
+    session.traversal.push({ source: session.rootCgId, next: session.targetCgId, isParent: null });
+    session.discoveryInitialized = true;
+    return;
   }
 
-  for (const startCgId of startCgIds) {
-    if (!session.visitedCgIds.has(startCgId)) {
-      session.queueCgIds.push(startCgId);
-    }
+  if (queuedCgCount === 0 && directContainerCount === 0) {
+    addLeafCgId(session, session.rootCgId);
   }
 
   session.discoveryInitialized = true;
@@ -843,29 +1365,52 @@ async function advanceBatchChainSessionDiscovery(session, options, deadlineAt) {
       const payload = result.value.payload;
       const value = payload?.value || {};
       const valueIsParent = parseBoolean(value['is-parent']);
-      const containers = Array.isArray(value['cgs-containers']) ? value['cgs-containers'] : [];
-      const nextItems = unique(
-        containers
-          .map((item) => {
-            const nextId = extractCgId(item?.['path-url']);
-            if (nextId) {
-              session.traversal.push({
-                source: value['url-short-id'] || currentCgId,
-                next: nextId,
-                isParent: parseBoolean(item?.['is-parent'])
-              });
-            }
-            return nextId;
-          })
-          .filter(Boolean)
-      );
-
-      if (nextItems.length === 0 || valueIsParent === false) {
-        addLeafCgId(session, currentCgId);
-        continue;
+      const currentPathSegments = sanitizePathSegments(session.cgPathById.get(currentCgId) || []);
+      if (!session.rootCgName) {
+        session.rootCgName = String(value.name || '').trim() || session.rootCgName;
       }
 
-      for (const nextId of nextItems) {
+      const containers = Array.isArray(value['cgs-containers']) ? value['cgs-containers'] : [];
+      const nextItems = [];
+      let directContainerCount = 0;
+
+      for (const item of containers) {
+        const nextId = extractCgId(item?.['path-url']);
+        const itemIsParent = parseBoolean(item?.['is-parent']);
+
+        if (nextId) {
+          rememberCgPath(session, nextId, [...currentPathSegments, item?.name || item?.title || nextId]);
+          session.traversal.push({
+            source: value['url-short-id'] || currentCgId,
+            next: nextId,
+            isParent: itemIsParent
+          });
+          nextItems.push(nextId);
+          continue;
+        }
+
+        const containerShortId = resolveContainerShortId(item);
+        if (itemIsParent === false && containerShortId) {
+          const inserted = addDiscoveredContainer(session, containerShortId, item, currentCgId, currentPathSegments);
+          if (inserted) {
+            directContainerCount += 1;
+          }
+
+          session.traversal.push({
+            source: value['url-short-id'] || currentCgId,
+            next: containerShortId,
+            isParent: false,
+            isContainer: true
+          });
+        }
+      }
+
+      const uniqueNextItems = unique(nextItems);
+      if ((uniqueNextItems.length === 0 && directContainerCount === 0) || (valueIsParent === false && directContainerCount === 0)) {
+        addLeafCgId(session, currentCgId);
+      }
+
+      for (const nextId of uniqueNextItems) {
         if (!session.visitedCgIds.has(nextId)) {
           session.queueCgIds.push(nextId);
         }
@@ -901,16 +1446,9 @@ async function advanceBatchChainSessionDiscovery(session, options, deadlineAt) {
         continue;
       }
 
+      const leafPathSegments = sanitizePathSegments(session.cgPathById.get(leafCgId) || []);
       for (const item of result.value.list.items) {
-        const key = String(item?.['url-short-id'] || '').trim();
-        if (!key || session.containerByShortId.has(key)) {
-          continue;
-        }
-
-        session.containerByShortId.set(key, {
-          ...item,
-          sourceLeafCgId: leafCgId
-        });
+        addDiscoveredContainer(session, item?.['url-short-id'], item, leafCgId, leafPathSegments);
       }
     }
 
@@ -920,9 +1458,10 @@ async function advanceBatchChainSessionDiscovery(session, options, deadlineAt) {
   session.discoveryDone = session.queueCgIds.length === 0 && session.leafCursor >= session.leafCgIds.length;
 }
 
-async function buildBatchContainerDetail({ container, pathParentName, options, session, deadlineAt }) {
+async function buildBatchContainerDetail({ container, options, session, deadlineAt }) {
   const containerName = container.name || container['url-short-id'];
-  const containerPath = buildContainerPath(pathParentName, containerName);
+  const containerPath = buildContainerPath(resolveContainerParentSegments(session, container), containerName);
+  const usedOutputNames = new Set();
 
   let videoDetails = [];
   try {
@@ -937,43 +1476,18 @@ async function buildBatchContainerDetail({ container, pathParentName, options, s
 
   const instancesWithMetadata = [];
   for (const video of videoDetails) {
-    if (shouldStopForDeadline(deadlineAt, 1500)) {
-      break;
-    }
+    const outputName = reserveUniqueOutputName(
+      video.name || `zenius-${video.urlShortId}`,
+      `zenius-${video.urlShortId}`,
+      video.urlShortId,
+      usedOutputNames
+    );
 
-    try {
-      const metadata = await fetchInstanceMetadata(video.urlShortId, options);
-      const outputName = sanitizeOutputName(
-        metadata.name || video.name || `zenius-${video.urlShortId}`,
-        `zenius-${video.urlShortId}`
-      );
-
-      instancesWithMetadata.push({
-        ...video,
-        path: containerPath,
-        outputName,
-        metadata
-      });
-    } catch (error) {
-      pushBatchError(session.errors, {
-        stage: 'instance-details',
-        urlShortId: video.urlShortId,
-        message: error.message
-      });
-
-      const outputName = sanitizeOutputName(
-        video.name || `zenius-${video.urlShortId}`,
-        `zenius-${video.urlShortId}`
-      );
-
-      instancesWithMetadata.push({
-        ...video,
-        path: containerPath,
-        outputName,
-        metadata: null,
-        metadataError: error.message
-      });
-    }
+    instancesWithMetadata.push({
+      ...video,
+      path: containerPath,
+      outputName
+    });
   }
 
   return {
@@ -1002,7 +1516,7 @@ async function buildBatchChain({
   cleanupExpiredBatchChainSessions();
 
   const normalizedRootCgId = normalizeCgId(rootCgId, DEFAULT_BATCH_ROOT_CGROUP_ID);
-  const normalizedParentContainerName = sanitizePathSegment(parentContainerName, 'unknown-parent');
+  const normalizedParentContainerName = sanitizePathSegment(stripWrappingQuotes(parentContainerName), 'unknown-parent');
   const normalizedTargetSelector = String(targetCgSelector || '').trim() || null;
 
   let session = null;
@@ -1047,7 +1561,7 @@ async function buildBatchChain({
   const totalContainers = mergedContainers.length;
   const normalizedOffset = Math.min(normalizeChunkOffset(containerOffset), totalContainers);
   const normalizedLimit = normalizeChunkLimit(containerLimit) || clampPositiveInt(DEFAULT_BATCH_CHAIN_CHUNK_SIZE, 8);
-  const pathParentName = session.parentContainerName;
+  const pathParentName = resolveBatchParentContainerName(session);
 
   const details = [];
   let cursor = normalizedOffset;
@@ -1059,7 +1573,6 @@ async function buildBatchChain({
     const container = mergedContainers[cursor];
     const detail = await buildBatchContainerDetail({
       container,
-      pathParentName,
       options,
       session,
       deadlineAt
@@ -1075,6 +1588,7 @@ async function buildBatchChain({
   return {
     sessionId: session.id,
     rootCgId: session.rootCgId,
+    rootCgName: session.rootCgName,
     targetCgSelector: session.targetCgSelector,
     targetCgId: session.targetCgId,
     parentContainerName: pathParentName,
@@ -1140,101 +1654,235 @@ async function getInstanceDetails({ urlShortId, refererPath, fallbackRefererPath
 // ==================== CONCURRENCY CONTROL ====================
 
 function getActiveDownloadCount() {
-  return activeZeniusDownloads.size;
+  return downloadQueue.activeCount;
 }
 
 function canStartNewDownload() {
-  return getActiveDownloadCount() < MAX_CONCURRENT_DOWNLOADS;
+  return downloadQueue.activeCount < downloadQueue.maxConcurrent;
 }
 
 function getQueueStatus() {
+  return downloadQueue.getStatus();
+}
+
+function getZeniusStatusSnapshot() {
+  const backgroundBatches = getBackgroundBatchRunsSummary();
   return {
-    active: getActiveDownloadCount(),
-    max: MAX_CONCURRENT_DOWNLOADS,
-    queued: zeniusDownloadQueue.length,
-    isProcessing: isProcessingQueue
+    ...getQueueStatus(),
+    activeBackgroundBatchCount: backgroundBatches.filter((run) => run.status === 'running').length,
+    backgroundBatches
   };
 }
 
-async function processDownloadQueue() {
-  if (isProcessingQueue) return;
-  isProcessingQueue = true;
-
-  while (zeniusDownloadQueue.length > 0 && canStartNewDownload()) {
-    const downloadTask = zeniusDownloadQueue.shift();
-    if (downloadTask && !downloadTask.cancelled) {
-      try {
-        await executeDownloadWithTracking(downloadTask);
-      } catch (error) {
-        console.error(`[Zenius] Queue download failed for ${downloadTask.urlShortId}:`, error.message);
-      }
-    }
-  }
-
-  isProcessingQueue = false;
-}
-
-async function executeDownloadWithTracking(task) {
-  const { urlShortId, videoUrl, folderId, outputName, ffmpegHeaders, selectedProviders, resolve, reject } = task;
-  
-  console.log(`[Zenius] Starting download ${urlShortId} (active: ${getActiveDownloadCount() + 1}/${MAX_CONCURRENT_DOWNLOADS})`);
-  
-  let fileId = null;
-  
-  try {
-    const result = await videoProcessor.processHls(videoUrl, {
-      folderId,
-      outputName,
-      outputDir: config.uploadDir,
-      headers: ffmpegHeaders
-    });
-    
-    fileId = result.fileId;
-    activeZeniusDownloads.set(fileId, {
-      urlShortId,
-      startTime: Date.now(),
-      outputName,
-      fileId
-    });
-    
-    console.log(`[Zenius] Download completed ${urlShortId}, fileId=${fileId}, queuing upload`);
-    
-    await uploaderService.queueFileUpload(
-      result.fileId,
-      result.outputPath,
-      folderId,
-      selectedProviders
-    );
-    
-    activeZeniusDownloads.delete(fileId);
-    resolve({ success: true, fileId, urlShortId });
-    
-  } catch (error) {
-    if (fileId) activeZeniusDownloads.delete(fileId);
-    console.error(`[Zenius] Download failed ${urlShortId}:`, error.message);
-    reject(error);
-  } finally {
-    // Process next in queue
-    setImmediate(() => processDownloadQueue());
-  }
-}
-
 function queueDownload(task) {
-  return new Promise((resolve, reject) => {
-    const taskWithPromise = { ...task, resolve, reject, cancelled: false };
-    
-    if (canStartNewDownload()) {
-      // Start immediately
-      executeDownloadWithTracking(taskWithPromise).catch(reject);
-    } else {
-      // Add to queue
-      zeniusDownloadQueue.push(taskWithPromise);
-      console.log(`[Zenius] Download queued for ${task.urlShortId}. Queue: ${zeniusDownloadQueue.length}, Active: ${getActiveDownloadCount()}`);
-      
-      // Try to process queue (in case slot opened up)
-      processDownloadQueue();
+  return downloadQueue.add(task);
+}
+
+async function queueBatchDownloadChunk({ chain, requestContext, refererPath, baseFolderInput, selectedProviders, cancelled = () => false }) {
+  const queued = [];
+  const skipped = [];
+
+  for (const container of chain.containerDetails || []) {
+    if (cancelled()) {
+      break;
     }
-  });
+
+    for (const instance of container.videoInstances || []) {
+      if (cancelled()) {
+        break;
+      }
+
+      let metadata = instance.metadata && typeof instance.metadata === 'object'
+        ? { ...instance.metadata }
+        : {};
+      const rawUrlShortId = instance.urlShortId || metadata.urlShortId;
+
+      if (!rawUrlShortId || !/^\d+$/.test(String(rawUrlShortId).trim())) {
+        skipped.push({
+          urlShortId: rawUrlShortId || null,
+          reason: 'Invalid or missing urlShortId',
+          path: instance.path || container.path || ''
+        });
+        continue;
+      }
+
+      const urlShortId = normalizeShortId(rawUrlShortId);
+      let metadataRetryError = '';
+      let videoUrl = String(metadata['video-url'] || '').trim();
+
+      if (!videoUrl) {
+        try {
+          metadata = await fetchInstanceMetadata(urlShortId, {
+            requestContext,
+            refererPath,
+            timeoutMs: clampPositiveInt(UPSTREAM_TIMEOUT_MS, 12000),
+            maxRetries: clampPositiveInt(UPSTREAM_MAX_RETRIES, 3)
+          });
+          videoUrl = String(metadata['video-url'] || '').trim();
+        } catch (error) {
+          metadataRetryError = error.message;
+        }
+      }
+
+      if (!videoUrl) {
+        skipped.push({
+          urlShortId,
+          reason: metadataRetryError || instance.metadataError || 'Missing video-url in instance-details',
+          path: instance.path || container.path || ''
+        });
+        continue;
+      }
+
+      const outputName = sanitizeOutputName(
+        instance.outputName || instance.name || metadata.name || `zenius-${urlShortId}`,
+        `zenius-${urlShortId}`
+      );
+
+      const chainPath = String(instance.path || container.path || '').trim();
+      const finalFolderInput = joinFolderPaths(baseFolderInput, chainPath) || 'root';
+      const folderId = await resolveFolderId(finalFolderInput);
+
+      const ffmpegHeaders = {
+        'User-Agent': requestContext.userAgent,
+        Referer: resolveReferer(
+          urlShortId,
+          refererPath,
+          metadata['path-url'] || container.containerPathUrl || ''
+        )
+      };
+
+      if (requestContext.cookieHeader) {
+        ffmpegHeaders.Cookie = requestContext.cookieHeader;
+      }
+
+      queueDownload({
+        urlShortId,
+        videoUrl,
+        folderId,
+        outputName,
+        ffmpegHeaders,
+        selectedProviders
+      }).then((result) => {
+        if (result.cancelled) {
+          console.log(`[Zenius] Batch download ${urlShortId} was cancelled`);
+        } else {
+          console.log(`[Zenius] Batch download ${urlShortId} completed successfully`);
+        }
+      }).catch((error) => {
+        console.error(`[Zenius] Batch download pipeline failed for ${urlShortId}:`, error.message);
+      });
+
+      queued.push({
+        urlShortId,
+        name: metadata.name || instance.name || null,
+        outputName: `${outputName}.mp4`,
+        path: chainPath,
+        folderInput: finalFolderInput,
+        folderId,
+        videoUrl
+      });
+    }
+  }
+
+  return { queued, skipped };
+}
+
+async function processBackgroundBatchRun(run, payload) {
+  try {
+    let currentSessionId = run.sessionId || null;
+    let nextOffset = 0;
+    let hasMore = true;
+    let iteration = 0;
+
+    while (hasMore) {
+      if (run.status !== 'running') {
+        break;
+      }
+
+      iteration += 1;
+      if (iteration > 120) {
+        throw new Error('Background batch iteration limit reached');
+      }
+
+      const chain = await buildBatchChain({
+        rootCgId: payload.rootCgId,
+        targetCgSelector: payload.targetCgSelector,
+        parentContainerName: payload.parentContainerName,
+        requestContext: payload.requestContext,
+        refererPath: payload.refererPath,
+        sessionId: currentSessionId,
+        containerOffset: nextOffset,
+        containerLimit: payload.containerLimit,
+        timeBudgetMs: payload.timeBudgetMs
+      });
+
+      currentSessionId = chain.sessionId || currentSessionId;
+      run.sessionId = currentSessionId;
+      run.rootCgName = chain.rootCgName || run.rootCgName;
+      run.parentContainerName = chain.parentContainerName || run.parentContainerName;
+      run.totalContainers = Number(chain.totalContainers || 0);
+      run.hasMoreContainers = Boolean(chain.hasMoreContainers);
+      run.nextContainerOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : 0;
+      run.chainErrors = Array.isArray(chain.errors) ? [...chain.errors] : [];
+
+      const chunkResult = await queueBatchDownloadChunk({
+        chain,
+        requestContext: payload.requestContext,
+        refererPath: payload.refererPath,
+        baseFolderInput: payload.baseFolderInput,
+        selectedProviders: payload.selectedProviders,
+        cancelled: () => run.status !== 'running'
+      });
+
+      run.queuedCount += chunkResult.queued.length;
+      run.skippedCount += chunkResult.skipped.length;
+      run.queued.push(...chunkResult.queued);
+      run.skipped.push(...chunkResult.skipped);
+      run.processedContainers = Number.isFinite(Number(chain.nextContainerOffset))
+        ? Number(chain.nextContainerOffset)
+        : Number(chain.totalContainers || run.processedContainers || 0);
+
+      touchBackgroundBatchRun(run);
+
+      hasMore = Boolean(chain.hasMoreContainers);
+      nextOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : 0;
+    }
+
+    if (run.status === 'running') {
+      run.status = 'completed';
+      run.finishedAt = new Date().toISOString();
+      touchBackgroundBatchRun(run);
+    }
+  } catch (error) {
+    run.status = 'failed';
+    run.error = error.message;
+    run.finishedAt = new Date().toISOString();
+    touchBackgroundBatchRun(run);
+    console.error(`[Zenius] Background batch run ${run.id} failed:`, error.message);
+  } finally {
+    if (run.status === 'completed' || run.status === 'failed') {
+      webhookService.sendBatchComplete(db, {
+        id: run.id,
+        rootCgId: run.rootCgId,
+        rootCgName: run.rootCgName,
+        targetCgSelector: run.targetCgSelector,
+        parentContainerName: run.parentContainerName,
+        sessionId: run.sessionId,
+        status: run.status,
+        totalContainers: run.totalContainers,
+        processedContainers: run.processedContainers,
+        queuedCount: run.queuedCount,
+        skippedCount: run.skippedCount,
+        error: run.error,
+        chainErrors: run.chainErrors,
+        startedAt: run.startedAt,
+        finishedAt: run.finishedAt
+      }).catch((e) => console.error('[Webhook] Notification error:', e.message));
+    }
+    if (!hasActiveBackgroundBatchRuns()) {
+      stopBackgroundBatchKeepalive();
+    }
+  }
 }
 
 // ==================== CANCEL & RESET FUNCTIONS ====================
@@ -1246,29 +1894,23 @@ async function cancelAllZeniusDownloads() {
     errors: []
   };
   
-  // 1. Cancel queued downloads
-  for (const task of zeniusDownloadQueue) {
-    task.cancelled = true;
-    task.resolve({ cancelled: true, reason: 'User cancelled all' });
-    cancelled.downloads.push({ urlShortId: task.urlShortId, fromQueue: true });
-  }
-  zeniusDownloadQueue.length = 0;
+  // 1. Cancel queued downloads via DownloadQueue
+  const queueCancelled = downloadQueue.cancelAll();
+  cancelled.downloads.push(...queueCancelled);
   
-  // 2. Cancel active FFmpeg processes
-  for (const [fileId, downloadInfo] of activeZeniusDownloads.entries()) {
+  // 2. Cancel active FFmpeg processes from downloadQueue
+  for (const taskInfo of downloadQueue.activeTasks) {
     try {
-      // Cancel FFmpeg job
-      const jobs = await db.getJobsByFile(fileId);
+      const jobs = await db.getJobsByFile(taskInfo.id);
       for (const job of jobs) {
         if (job.type === 'process') {
           await videoProcessor.cancelJob(job.id);
           await db.updateJob(job.id, { status: 'cancelled', error: 'Cancelled by user (cancel all)' });
         }
       }
-      cancelled.downloads.push({ fileId, urlShortId: downloadInfo.urlShortId, fromActive: true });
-      activeZeniusDownloads.delete(fileId);
+      cancelled.downloads.push({ id: taskInfo.id, urlShortId: taskInfo.urlShortId, fromActive: true });
     } catch (error) {
-      cancelled.errors.push({ fileId, error: error.message });
+      cancelled.errors.push({ id: taskInfo.id, error: error.message });
     }
   }
   
@@ -1342,8 +1984,9 @@ async function resetAllZeniusFiles() {
     
     // Clear sessions
     batchChainSessions.clear();
-    activeZeniusDownloads.clear();
-    zeniusDownloadQueue.length = 0;
+    backgroundBatchRuns.clear();
+    stopBackgroundBatchKeepalive();
+    downloadQueue.cancelAll();
     
   } catch (error) {
     result.errors.push({ phase: 'global', error: error.message });
@@ -1497,133 +2140,60 @@ const zeniusController = {
 
   async downloadBatch(req, res) {
     try {
+      cleanupExpiredBatchChainSessions();
+      cleanupExpiredBackgroundBatchRuns();
+
       const requestContext = buildRequestContext(req.body || {});
       const selectedProviders = await normalizeProviders(req.body?.providers);
       const baseFolderInput = stripWrappingQuotes(req.body?.folderId || '');
+      const containerLimit = normalizeChunkLimit(req.body?.containerLimit)
+        || clampPositiveInt(BACKGROUND_BATCH_CHUNK_SIZE, 6);
+      const timeBudgetMs = normalizeBatchRequestBudgetMs(req.body?.timeBudgetMs);
+      const keepaliveUrl = resolveBackgroundKeepaliveUrl(req);
 
-      const chain = await buildBatchChain({
+      const sessionId = normalizeSessionId(req.body?.sessionId);
+      if (!sessionId || !batchChainSessions.has(sessionId)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Preview chain required before batch download. Call /batch-chain first to build a preview session, then pass the sessionId here.'
+        });
+      }
+
+      const run = createBackgroundBatchRun({
+        rootCgId: normalizeCgId(req.body?.rootCgId, DEFAULT_BATCH_ROOT_CGROUP_ID),
+        targetCgSelector: req.body?.targetCgSelector,
+        baseFolderInput,
+        selectedProviders,
+        keepaliveUrl
+      });
+
+      run.sessionId = sessionId;
+
+      backgroundBatchRuns.set(run.id, run);
+      ensureBackgroundBatchKeepalive(keepaliveUrl);
+
+      void processBackgroundBatchRun(run, {
         rootCgId: req.body?.rootCgId,
         targetCgSelector: req.body?.targetCgSelector,
         parentContainerName: req.body?.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
         requestContext,
         refererPath: req.body?.refererPath,
-        sessionId: req.body?.sessionId,
-        containerOffset: req.body?.containerOffset,
-        containerLimit: req.body?.containerLimit,
-        timeBudgetMs: req.body?.timeBudgetMs
+        baseFolderInput,
+        selectedProviders,
+        containerLimit,
+        timeBudgetMs
       });
-
-      const queued = [];
-      const skipped = [];
-
-      for (const container of chain.containerDetails || []) {
-        for (const instance of container.videoInstances || []) {
-          const metadata = instance.metadata || {};
-          const rawUrlShortId = instance.urlShortId || metadata.urlShortId;
-
-          if (!rawUrlShortId || !/^\d+$/.test(String(rawUrlShortId).trim())) {
-            skipped.push({
-              urlShortId: rawUrlShortId || null,
-              reason: 'Invalid or missing urlShortId',
-              path: instance.path || container.path || ''
-            });
-            continue;
-          }
-
-          const urlShortId = normalizeShortId(rawUrlShortId);
-          const videoUrl = String(metadata['video-url'] || '').trim();
-
-          if (!videoUrl) {
-            skipped.push({
-              urlShortId,
-              reason: 'Missing video-url in instance-details',
-              path: instance.path || container.path || ''
-            });
-            continue;
-          }
-
-          const outputName = sanitizeOutputName(
-            instance.outputName || metadata.name || instance.name || `zenius-${urlShortId}`,
-            `zenius-${urlShortId}`
-          );
-
-          const chainPath = String(instance.path || container.path || '').trim();
-          const finalFolderInput = joinFolderPaths(baseFolderInput, chainPath) || 'root';
-          const folderId = await resolveFolderId(finalFolderInput);
-
-          const ffmpegHeaders = {
-            'User-Agent': requestContext.userAgent,
-            Referer: resolveReferer(
-              urlShortId,
-              req.body?.refererPath,
-              metadata['path-url'] || container.containerPathUrl || ''
-            )
-          };
-
-          if (requestContext.cookieHeader) {
-            ffmpegHeaders.Cookie = requestContext.cookieHeader;
-          }
-
-          // Queue download with concurrency control (don't await, fire and forget)
-          queueDownload({
-            urlShortId,
-            videoUrl,
-            folderId,
-            outputName,
-            ffmpegHeaders,
-            selectedProviders
-          }).then((result) => {
-            if (result.cancelled) {
-              console.log(`[Zenius] Batch download ${urlShortId} was cancelled`);
-            } else {
-              console.log(`[Zenius] Batch download ${urlShortId} completed successfully`);
-            }
-          }).catch((error) => {
-            console.error(`[Zenius] Batch download pipeline failed for ${urlShortId}:`, error.message);
-          });
-
-          queued.push({
-            urlShortId,
-            name: metadata.name || instance.name || null,
-            outputName: `${outputName}.mp4`,
-            path: chainPath,
-            folderInput: finalFolderInput,
-            folderId,
-            videoUrl
-          });
-        }
-      }
 
       res.status(202).json({
         success: true,
-        message: 'Zenius batch download queued with concurrency control',
+        message: 'Zenius batch download started in background',
         data: {
-          sessionId: chain.sessionId,
-          rootCgId: chain.rootCgId,
-          targetCgSelector: chain.targetCgSelector,
-          targetCgId: chain.targetCgId,
-          leafCgId: chain.leafCgId,
-          leafCgIds: chain.leafCgIds,
-          traversal: chain.traversal,
-          discoveredLeafCount: chain.discoveredLeafCount,
-          discoveryQueueRemaining: chain.discoveryQueueRemaining,
-          discoveryDone: chain.discoveryDone,
-          totalContainers: chain.totalContainers,
-          containerOffset: chain.containerOffset,
-          containerLimit: chain.containerLimit,
-          processedContainerCount: chain.processedContainerCount,
-          hasMoreContainers: chain.hasMoreContainers,
-          nextContainerOffset: chain.nextContainerOffset,
-          parentContainerName: chain.parentContainerName,
-          queuedCount: queued.length,
-          skippedCount: skipped.length,
-          queued,
-          skipped,
-          chainErrors: Array.isArray(chain.errors) ? chain.errors : [],
+          batchRunId: run.id,
+          status: summarizeBackgroundBatchRun(run),
           providers: selectedProviders,
           cleanupLocalFile: true,
           baseFolderInput,
-          queueStatus: getQueueStatus()
+          queueStatus: getZeniusStatusSnapshot()
         }
       });
     } catch (error) {
@@ -1635,6 +2205,7 @@ const zeniusController = {
     try {
       console.log('[Zenius] Cancelling all downloads and uploads...');
       const result = await cancelAllZeniusDownloads();
+      const cancelledBackgroundBatches = markBackgroundBatchRunsCancelled();
       
       res.json({
         success: true,
@@ -1642,6 +2213,7 @@ const zeniusController = {
         data: {
           cancelledDownloads: result.downloads.length,
           cancelledUploads: result.uploads.length,
+          cancelledBackgroundBatches,
           errors: result.errors,
           details: result
         }
@@ -1654,6 +2226,7 @@ const zeniusController = {
   async resetFiles(req, res) {
     try {
       console.log('[Zenius] Resetting all Zenius files...');
+      markBackgroundBatchRunsCancelled('Cancelled by reset all');
       const result = await resetAllZeniusFiles();
       
       res.json({
@@ -1674,8 +2247,58 @@ const zeniusController = {
   getQueueStatus(req, res) {
     res.json({
       success: true,
-      data: getQueueStatus()
+      data: getZeniusStatusSnapshot()
     });
+  },
+
+  setMaxConcurrent(req, res) {
+    try {
+      const value = req.body?.maxConcurrent;
+      if (typeof value !== 'number' || value < 1 || value > 50) {
+        return res.status(400).json({ success: false, error: 'maxConcurrent must be a number between 1 and 50' });
+      }
+      const actual = downloadQueue.setMaxConcurrent(value);
+      console.log(`[Zenius] Max concurrent downloads set to ${actual}`);
+      res.json({
+        success: true,
+        data: { maxConcurrent: actual, ...getZeniusStatusSnapshot() }
+      });
+    } catch (error) {
+      res.status(400).json({ success: false, error: error.message });
+    }
+  },
+
+  async getWebhookConfig(req, res) {
+    try {
+      await webhookService.loadConfig(db);
+      res.json({ success: true, data: webhookService.getConfig() });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  async updateWebhookConfig(req, res) {
+    try {
+      const updates = {
+        enabled: typeof req.body?.enabled === 'boolean' ? req.body.enabled : undefined,
+        url: typeof req.body?.url === 'string' ? req.body.url : undefined,
+        to: typeof req.body?.to === 'string' ? req.body.to : undefined
+      };
+      const config = await webhookService.updateConfig(db, updates);
+      console.log(`[Zenius] Webhook config updated: enabled=${config.enabled}, url=${config.url ? '***' : '(empty)'}, to=${config.to || '(empty)'}`);
+      res.json({ success: true, data: config });
+    } catch (error) {
+      res.status(400).json({ success: false, error: error.message });
+    }
+  },
+
+  async testWebhook(req, res) {
+    try {
+      const result = await webhookService.sendTest(db);
+      res.json({ success: true, data: result });
+    } catch (error) {
+      res.status(400).json({ success: false, error: error.message });
+    }
   }
 };
 

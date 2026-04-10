@@ -6,6 +6,7 @@ router.get('/tree', folderController.getTree);
 router.get('/:id?', folderController.getFolder);
 router.post('/', folderController.create);
 router.put('/:id/move', folderController.move);
+router.delete('/all', folderController.deleteAll);
 router.delete('/:id/purge', folderController.purge);
 router.delete('/:id', folderController.delete);
 

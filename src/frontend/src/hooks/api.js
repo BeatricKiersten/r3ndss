@@ -149,6 +149,24 @@ export const usePurgeFolder = () => {
   );
 };
 
+export const useDeleteAllFolders = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation(
+    async () => {
+      const response = await api.delete('/api/folders/all');
+      return response.data;
+    },
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('folders');
+        queryClient.invalidateQueries('files');
+        queryClient.invalidateQueries('dashboard');
+      }
+    }
+  );
+};
+
 // File hooks
 export const useFiles = (folderId, status) => {
   return useQuery(
@@ -346,7 +364,60 @@ export const useZeniusQueueStatus = () => {
       return response.data.data;
     },
     {
-      refetchInterval: 5000 // Refetch every 5 seconds
+      refetchInterval: 5000,
+      refetchIntervalInBackground: true
+    }
+  );
+};
+
+export const useSetMaxConcurrent = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation(
+    async (maxConcurrent) => {
+      const response = await api.put('/api/zenius/max-concurrent', { maxConcurrent });
+      return response.data.data;
+    },
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('zenius-queue-status');
+      }
+    }
+  );
+};
+
+export const useWebhookConfig = () => {
+  return useQuery(
+    ['zenius-webhook-config'],
+    async () => {
+      const response = await api.get('/api/zenius/webhook');
+      return response.data.data;
+    },
+    { staleTime: 30000 }
+  );
+};
+
+export const useUpdateWebhookConfig = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation(
+    async (updates) => {
+      const response = await api.put('/api/zenius/webhook', updates);
+      return response.data.data;
+    },
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('zenius-webhook-config');
+      }
+    }
+  );
+};
+
+export const useTestWebhook = () => {
+  return useMutation(
+    async () => {
+      const response = await api.post('/api/zenius/webhook/test');
+      return response.data.data;
     }
   );
 };
@@ -659,6 +730,41 @@ export const useDeleteJob = () => {
     async (jobId) => {
       const response = await api.delete(`/api/jobs/${jobId}`);
       return response.data.data;
+    },
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('jobs');
+        queryClient.invalidateQueries('dashboard');
+      }
+    }
+  );
+};
+
+export const useCancelAllJobs = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation(
+    async () => {
+      const response = await api.post('/api/jobs/cancel-all');
+      return response.data;
+    },
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('jobs');
+        queryClient.invalidateQueries('files');
+        queryClient.invalidateQueries('dashboard');
+      }
+    }
+  );
+};
+
+export const useClearJobLogs = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation(
+    async () => {
+      const response = await api.post('/api/jobs/clear-logs');
+      return response.data;
     },
     {
       onSuccess: () => {

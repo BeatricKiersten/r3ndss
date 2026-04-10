@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   useFiles,
   useForceDeleteFile,
@@ -6,6 +6,7 @@ import {
   useFolder,
   useCreateFolder,
   useMoveFile,
+  useMoveFolder,
   usePurgeFolder,
   useReuploadToProvider,
   useFileProvidersStatus
@@ -24,7 +25,7 @@ import {
   FolderPlus,
   ChevronRight,
   ChevronDown,
-  Home,
+  Home as HomeIcon,
   Plus,
   Upload,
   RefreshCw,
@@ -36,9 +37,13 @@ import {
   Package,
   Film,
   HardDrive,
-  Server
+  Server,
+  FolderInput,
+  ArrowRight,
+  GripVertical
 } from 'lucide-react';
 import { PROVIDERS, getProviderConfig, getStatusConfig } from '../config/providers';
+import { toast } from '../store/toastStore';
 
 const statusIconMap = {
   CheckCircle,
@@ -79,6 +84,177 @@ function parseRcloneFileId(fileId) {
     remoteName: raw.slice(0, separatorIndex),
     remotePath: raw.slice(separatorIndex + 1)
   };
+}
+
+function flattenFolderTreeForMove(folderTree, excludeFolderId) {
+  const result = [];
+
+  const walk = (node, parentPath = '', depth = 0) => {
+    (node?.folders || []).forEach((folder) => {
+      if (folder.id === excludeFolderId) return;
+      const currentPath = parentPath ? `${parentPath}/${folder.name}` : folder.name;
+      const hasSubfolders = (folder.children?.folders || []).length > 0;
+      const isDescendant = (() => {
+        const check = (n) => {
+          if (!n?.folders) return false;
+          return n.folders.some((f) => f.id === excludeFolderId || check(f.children));
+        };
+        return check(folder.children);
+      })();
+
+      if (!isDescendant) {
+        result.push({
+          id: folder.id,
+          name: folder.name,
+          path: currentPath,
+          depth,
+          hasSubfolders
+        });
+      }
+
+      walk(folder.children, currentPath, depth + 1);
+    });
+  };
+
+  walk(folderTree, '', 0);
+  return result;
+}
+
+function MoveFolderModal({ folder, folderTree, onClose, onMove }) {
+  const [selectedParentId, setSelectedParentId] = useState(null);
+  const [search, setSearch] = useState('');
+  const moveFolder = useMoveFolder();
+
+  const targetFolders = useMemo(() => {
+    if (!folderTree) return [];
+    const flat = flattenFolderTreeForMove(folderTree, folder?.id);
+    flat.unshift({ id: 'root', name: 'Root', path: '/', depth: -1, hasSubfolders: true });
+    return flat;
+  }, [folderTree, folder?.id]);
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return targetFolders;
+    const q = search.toLowerCase();
+    return targetFolders.filter((f) => f.name.toLowerCase().includes(q) || f.path.toLowerCase().includes(q));
+  }, [targetFolders, search]);
+
+  const handleMove = async () => {
+    if (!selectedParentId) return;
+    try {
+      await onMove({ folderId: folder.id, newParentId: selectedParentId });
+      toast.success('Folder Moved', `"${folder.name}" moved successfully`);
+      onClose();
+    } catch (error) {
+      toast.error('Move Failed', error?.response?.data?.error || error.message);
+    }
+  };
+
+  const selectedTarget = targetFolders.find((f) => f.id === selectedParentId);
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="card p-5 max-w-md w-full max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="text-lg font-medium text-white flex items-center gap-2">
+              <FolderInput className="w-5 h-5 text-blue-400" />
+              Move Folder
+            </h3>
+            <p className="text-xs text-[#888] mt-1">
+              Pindahkan <strong className="text-white">{folder?.name}</strong> ke folder lain
+            </p>
+          </div>
+          <button onClick={onClose} className="p-1.5 hover:bg-[#222] rounded">
+            <X className="w-5 h-5 text-[#666]" />
+          </button>
+        </div>
+
+        <div className="mb-3">
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-[#555]" />
+            <input
+              type="text"
+              placeholder="Cari folder..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full pl-9 pr-4 py-2.5 bg-[#0d0d0d] border border-[#2a2a2a] rounded-lg text-sm text-[#ccc] placeholder-[#555] focus:outline-none focus:border-[#444]"
+            />
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto border border-[#222] rounded-lg bg-[#0d0d0d] mb-4 min-h-[200px] max-h-[400px]">
+          {filtered.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-10">
+              <Folder className="w-8 h-8 text-[#333] mb-2" />
+              <p className="text-xs text-[#666]">Tidak ada folder ditemukan</p>
+            </div>
+          ) : (
+            <div className="py-1">
+              {filtered.map((f) => {
+                const isSelected = selectedParentId === f.id;
+                const isRoot = f.id === 'root';
+                return (
+                  <button
+                    key={f.id}
+                    onClick={() => setSelectedParentId(f.id)}
+                    className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+                      isSelected
+                        ? 'bg-blue-500/10 text-blue-300 border-l-2 border-blue-400'
+                        : 'text-[#aaa] hover:bg-[#141414] hover:text-white border-l-2 border-transparent'
+                    }`}
+                    style={{ paddingLeft: `${(f.depth + 1) * 16 + 12}px` }}
+                  >
+                    {isRoot ? (
+                      <HomeIcon className="w-4 h-4 flex-shrink-0 text-[#666]" />
+                    ) : (
+                      <Folder className={`w-4 h-4 flex-shrink-0 ${isSelected ? 'text-blue-400' : 'text-[#555]'}`} />
+                    )}
+                    <span className="truncate flex-1">{f.name}</span>
+                    {f.hasSubfolders && !isRoot && (
+                      <span className="text-[10px] text-[#555] flex-shrink-0">📁</span>
+                    )}
+                    {isSelected && (
+                      <CheckCircle className="w-4 h-4 text-blue-400 flex-shrink-0" />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {selectedTarget && (
+          <div className="mb-4 p-3 rounded-lg bg-[#1a1a1a] border border-[#2a2a2a]">
+            <p className="text-xs text-[#888]">
+              <strong className="text-white">{folder?.name}</strong>
+              <ArrowRight className="w-3 h-3 inline mx-1.5 text-[#555]" />
+              <strong className="text-white">{selectedTarget.name}</strong>
+            </p>
+          </div>
+        )}
+
+        <div className="flex gap-3 justify-end">
+          <button
+            onClick={onClose}
+            className="px-4 py-2.5 text-sm text-[#888] hover:text-white rounded-lg hover:bg-[#222] transition-colors"
+          >
+            Batal
+          </button>
+          <button
+            onClick={handleMove}
+            disabled={!selectedParentId || moveFolder.isLoading}
+            className="px-5 py-2.5 text-sm rounded-lg font-medium bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 border border-blue-500/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
+          >
+            {moveFolder.isLoading ? (
+              <><RefreshCw className="w-4 h-4 animate-spin" /> Moving...</>
+            ) : (
+              <><FolderInput className="w-4 h-4" /> Pindahkan</>
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // File Detail Modal Component
@@ -344,7 +520,9 @@ export default function FileListPage() {
   const forceDeleteFile = useForceDeleteFile();
   const createFolder = useCreateFolder();
   const moveFile = useMoveFile();
+  const moveFolder = useMoveFolder();
   const purgeFolder = usePurgeFolder();
+  const [moveFolderTarget, setMoveFolderTarget] = useState(null);
 
   const allFolders = useMemo(() => {
     const result = [{ id: 'root', name: 'Root', path: '/', depth: 0 }];
@@ -498,6 +676,13 @@ export default function FileListPage() {
     }
   };
 
+  const handleMoveFolder = async ({ folderId, newParentId }) => {
+    await moveFolder.mutateAsync({ folderId, newParentId });
+    if (currentFolderId === folderId) {
+      setCurrentFolderId(newParentId);
+    }
+  };
+
   const handlePurgeCurrentFolder = async () => {
     if (currentFolderId === 'root') {
       return;
@@ -526,6 +711,8 @@ export default function FileListPage() {
     }
   };
 
+  const [folderContextMenu, setFolderContextMenu] = useState(null);
+
   const FolderTree = ({ node, depth = 0 }) => {
     if (!node) return null;
     
@@ -540,40 +727,52 @@ export default function FileListPage() {
           
           return (
             <div key={folder.id}>
-              <button
-                onClick={() => {
-                  handleFolderChange(folder.id);
-                  if (!expandedFolders[folder.id]) {
-                    toggleFolderExpand(folder.id);
-                  }
-                }}
-                className={`w-full flex items-center gap-1.5 px-2 py-1.5 rounded text-left text-sm transition-colors ${
-                  isCurrent
-                    ? 'bg-[#333] text-white'
-                    : 'text-[#aaa] hover:bg-[#222] hover:text-white'
+              <div
+                className={`flex items-center group/folder ${
+                  isCurrent ? 'bg-[#333] text-white rounded' : 'text-[#aaa] hover:bg-[#222] hover:text-white rounded'
                 }`}
                 style={{ paddingLeft: `${depth * 12 + 8}px` }}
               >
-                {hasChildren ? (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
+                <button
+                  onClick={() => {
+                    handleFolderChange(folder.id);
+                    if (!expandedFolders[folder.id]) {
                       toggleFolderExpand(folder.id);
-                    }}
-                    className="p-0.5 hover:bg-[#444] rounded flex-shrink-0"
-                  >
-                    {isExpanded ? (
-                      <ChevronDown className="w-3 h-3" />
-                    ) : (
-                      <ChevronRight className="w-3 h-3" />
-                    )}
-                  </button>
-                ) : (
-                  <span className="w-4" />
-                )}
-                <Folder className={`w-4 h-4 flex-shrink-0 ${isCurrent ? 'text-blue-400' : 'text-[#666]'}`} />
-                <span className="truncate">{folder.name}</span>
-              </button>
+                    }
+                  }}
+                  className="flex-1 flex items-center gap-1.5 px-2 py-1.5 text-left text-sm transition-colors min-w-0"
+                >
+                  {hasChildren ? (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleFolderExpand(folder.id);
+                      }}
+                      className="p-0.5 hover:bg-[#444] rounded flex-shrink-0"
+                    >
+                      {isExpanded ? (
+                        <ChevronDown className="w-3 h-3" />
+                      ) : (
+                        <ChevronRight className="w-3 h-3" />
+                      )}
+                    </button>
+                  ) : (
+                    <span className="w-4" />
+                  )}
+                  <Folder className={`w-4 h-4 flex-shrink-0 ${isCurrent ? 'text-blue-400' : 'text-[#666]'}`} />
+                  <span className="truncate">{folder.name}</span>
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMoveFolderTarget(folder);
+                  }}
+                  className="p-1 mr-1 rounded text-[#555] hover:text-blue-400 hover:bg-blue-500/10 opacity-0 group-hover/folder:opacity-100 transition-all flex-shrink-0"
+                  title="Move folder"
+                >
+                  <FolderInput className="w-3 h-3" />
+                </button>
+              </div>
               {isExpanded && folder.children && (
                 <FolderTree node={folder.children} depth={depth + 1} />
               )}
@@ -611,7 +810,7 @@ export default function FileListPage() {
               >
                 {segment.id === 'root' ? (
                   <span className="flex items-center gap-1">
-                    <Home className="w-3.5 h-3.5" />
+                    <HomeIcon className="w-3.5 h-3.5" />
                     Root
                   </span>
                 ) : (
@@ -704,7 +903,7 @@ export default function FileListPage() {
                     : 'text-[#aaa] hover:bg-[#222] hover:text-white'
                 }`}
               >
-                <Home className={`w-4 h-4 flex-shrink-0 ${currentFolderId === 'root' ? 'text-blue-400' : 'text-[#666]'}`} />
+                <HomeIcon className={`w-4 h-4 flex-shrink-0 ${currentFolderId === 'root' ? 'text-blue-400' : 'text-[#666]'}`} />
                 <span>Root</span>
               </button>
               {folderTree && <FolderTree node={folderTree} />}
@@ -757,26 +956,38 @@ export default function FileListPage() {
                     const stats = folderStatsById.get(child.id) || { folderCount: 0, fileCount: 0 };
 
                     return (
-                      <button
+                      <div
                         key={child.id}
-                        onClick={() => handleFolderChange(child.id)}
-                        className="w-full group flex items-center gap-3 p-3 rounded-lg bg-[#1a1a1a] border border-[#222] hover:border-[#333] hover:bg-[#202020] transition-colors"
+                        className="group flex items-center gap-3 p-3 rounded-lg bg-[#1a1a1a] border border-[#222] hover:border-[#333] hover:bg-[#202020] transition-colors"
                       >
-                        <div className="w-9 h-9 rounded-lg bg-[#222] flex items-center justify-center flex-shrink-0">
-                          <Folder className="w-4 h-4 text-yellow-500/80" />
-                        </div>
+                        <button
+                          onClick={() => handleFolderChange(child.id)}
+                          className="flex items-center gap-3 flex-1 min-w-0 text-left"
+                        >
+                          <div className="w-9 h-9 rounded-lg bg-[#222] flex items-center justify-center flex-shrink-0">
+                            <Folder className="w-4 h-4 text-yellow-500/80" />
+                          </div>
 
-                        <div className="min-w-0 flex-1 text-left">
-                          <h3 className="text-sm font-medium text-[#ccc] truncate group-hover:text-white transition-colors">
-                            {child.name}
-                          </h3>
-                          <p className="text-xs text-[#666] group-hover:text-[#888] transition-colors">
-                            {stats.folderCount} folder | {stats.fileCount} file
-                          </p>
-                        </div>
+                          <div className="min-w-0 flex-1">
+                            <h3 className="text-sm font-medium text-[#ccc] truncate group-hover:text-white transition-colors">
+                              {child.name}
+                            </h3>
+                            <p className="text-xs text-[#666] group-hover:text-[#888] transition-colors">
+                              {stats.folderCount} folder | {stats.fileCount} file
+                            </p>
+                          </div>
 
-                        <ChevronRight className="w-4 h-4 text-[#555] group-hover:text-[#888] group-hover:translate-x-0.5 transition-all" />
-                      </button>
+                          <ChevronRight className="w-4 h-4 text-[#555] group-hover:text-[#888] group-hover:translate-x-0.5 transition-all" />
+                        </button>
+
+                        <button
+                          onClick={() => setMoveFolderTarget(child)}
+                          className="p-1.5 rounded text-[#555] hover:text-blue-400 hover:bg-blue-500/10 opacity-0 group-hover:opacity-100 transition-all"
+                          title="Pindahkan folder"
+                        >
+                          <FolderInput className="w-4 h-4" />
+                        </button>
+                      </div>
                     );
                   })}
                 </div>
@@ -996,6 +1207,15 @@ export default function FileListPage() {
 
       {selectedFile && (
         <FileDetailModal file={selectedFile} onClose={() => setSelectedFile(null)} />
+      )}
+
+      {moveFolderTarget && (
+        <MoveFolderModal
+          folder={moveFolderTarget}
+          folderTree={folderTree}
+          onClose={() => setMoveFolderTarget(null)}
+          onMove={handleMoveFolder}
+        />
       )}
     </div>
   );

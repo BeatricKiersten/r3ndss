@@ -5,6 +5,8 @@ const uploadController = require('../controllers/uploadController');
 
 router.get('/', jobController.list);
 router.post('/transfer', uploadController.transfer);
+router.post('/cancel-all', jobController.cancelAll);
+router.post('/clear-logs', jobController.clearLogs);
 router.post('/:id/cancel', jobController.cancel);
 router.delete('/:id', jobController.delete);
 

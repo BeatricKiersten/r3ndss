@@ -1030,6 +1030,81 @@ class DatabaseHandler {
     });
   }
 
+  async deleteAllFolders() {
+    await this._ready();
+
+    return this._withTransaction(async (connection) => {
+      // Get all non-root folders ordered by path length DESC (children first)
+      const [allFolderRows] = await connection.query(
+        "SELECT id, parent_id, path FROM folders WHERE id != 'root' ORDER BY CHAR_LENGTH(path) DESC FOR UPDATE"
+      );
+
+      if (allFolderRows.length === 0) {
+        return {
+          deleted: true,
+          removedFolders: 0,
+          removedFiles: 0,
+          removedJobs: 0,
+          removedProviders: 0
+        };
+      }
+
+      const folderIdsToDelete = allFolderRows.map((row) => row.id);
+      const folderPlaceholders = folderIdsToDelete.map(() => '?').join(',');
+
+      // Get all files in these folders
+      const [fileRows] = await connection.query(
+        `SELECT id FROM files WHERE folder_id IN (${folderPlaceholders})`,
+        folderIdsToDelete
+      );
+      const fileIds = fileRows.map((row) => row.id);
+
+      let removedFiles = 0;
+      let removedJobs = 0;
+      let removedProviders = 0;
+
+      if (fileIds.length > 0) {
+        const filePlaceholders = fileIds.map(() => '?').join(',');
+
+        // Delete provider entries
+        const [providerDelete] = await connection.query(
+          `DELETE FROM file_providers WHERE file_id IN (${filePlaceholders})`,
+          fileIds
+        );
+        removedProviders = providerDelete.affectedRows || 0;
+
+        // Delete jobs
+        const [jobDelete] = await connection.query(
+          `DELETE FROM jobs WHERE file_id IN (${filePlaceholders})`,
+          fileIds
+        );
+        removedJobs = jobDelete.affectedRows || 0;
+
+        // Delete files
+        const [fileDelete] = await connection.query(
+          `DELETE FROM files WHERE id IN (${filePlaceholders})`,
+          fileIds
+        );
+        removedFiles = fileDelete.affectedRows || 0;
+      }
+
+      // Delete all folders (except root)
+      const [folderDelete] = await connection.query(
+        `DELETE FROM folders WHERE id IN (${folderPlaceholders})`,
+        folderIdsToDelete
+      );
+
+      return {
+        deleted: true,
+        removedFolders: folderDelete.affectedRows || 0,
+        removedFiles,
+        removedJobs,
+        removedProviders,
+        folderIds: folderIdsToDelete
+      };
+    });
+  }
+
   // ==================== FILE OPERATIONS ====================
 
   async createFile(fileData) {
@@ -1074,6 +1149,23 @@ class DatabaseHandler {
     });
 
     return this.getFile(fileId);
+  }
+
+  async findFileByNameInFolder(folderId, fileName) {
+    await this._ready();
+
+    const [rows] = await this.pool.query(
+      'SELECT * FROM files WHERE folder_id = ? AND name = ? LIMIT 1',
+      [folderId, fileName]
+    );
+
+    if (!rows[0]) {
+      return null;
+    }
+
+    const fileId = rows[0].id;
+    const providerMap = await this._getProviderRowsByFileIds([fileId]);
+    return this._mapFileRow(rows[0], providerMap.get(fileId) || []);
   }
 
   async getFile(fileId) {
@@ -1543,6 +1635,20 @@ class DatabaseHandler {
     const job = await this.getJob(jobId);
     await this.pool.query('DELETE FROM jobs WHERE id = ?', [jobId]);
     return job;
+  }
+
+  async deleteCompletedJobs() {
+    await this._ready();
+
+    // Delete all non-active jobs (completed, failed, cancelled)
+    const [result] = await this.pool.query(
+      `DELETE FROM jobs WHERE status IN ('completed', 'failed', 'cancelled')`
+    );
+
+    return {
+      deleted: true,
+      deletedCount: result.affectedRows || 0
+    };
   }
 
   // ==================== PROVIDER CONFIG OPERATIONS ====================
@@ -2050,6 +2156,30 @@ class DatabaseHandler {
     }
 
     return checks;
+  }
+
+  async getWebhookConfig() {
+    try {
+      const [rows] = await this.pool.query('SELECT payload FROM provider_checks WHERE provider = ?', ['__webhook_config']);
+      if (rows.length > 0 && rows[0].payload) {
+        return JSON.parse(rows[0].payload);
+      }
+    } catch {}
+    return { enabled: false, url: '', to: '' };
+  }
+
+  async setWebhookConfig(config) {
+    const payload = JSON.stringify({
+      enabled: Boolean(config.enabled),
+      url: String(config.url || ''),
+      to: String(config.to || '')
+    });
+    const now = this._now();
+    await this.pool.query(
+      'INSERT INTO provider_checks (provider, payload, checked_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE payload = ?, checked_at = ?',
+      ['__webhook_config', payload, now, payload, now]
+    );
+    return config;
   }
 
   async close() {

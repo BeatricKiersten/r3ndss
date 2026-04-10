@@ -211,7 +211,10 @@ class UploaderService extends EventEmitter {
   async queueFileUpload(fileId, filePath, folderId = 'root', selectedProviders = null) {
     console.log(`[Uploader] Queueing file ${fileId} for upload`);
 
-    await this.db.updateFileProgress(fileId, 'upload', 0);
+    const file = await this.db.getFile(fileId);
+    const effectiveFolderId = file.folderId || folderId || 'root';
+    const effectiveFilePath = filePath || file.localPath || null;
+    const effectiveFileName = this._normalizeUploadFileName(file.name, effectiveFilePath || file.name || '');
 
     const providerCatalog = await this._refreshProviderRuntime();
     const enabledProviders = providerCatalog
@@ -241,17 +244,62 @@ class UploaderService extends EventEmitter {
       throw new Error('No providers are enabled. Enable at least one provider first.');
     }
 
-    const jobs = [];
+    const jobsByFile = await this.db.getJobsByFile(fileId);
+    const activeUploadProviders = new Set();
+    for (const job of jobsByFile) {
+      if (job.type !== 'upload' || !['pending', 'processing'].includes(job.status)) {
+        continue;
+      }
+
+      const rawProvider = String(job.metadata?.provider || '').trim();
+      if (!rawProvider) {
+        continue;
+      }
+
+      try {
+        const resolvedProvider = await this._resolveProviderId(rawProvider, { allowDisabled: true });
+        activeUploadProviders.add(resolvedProvider);
+      } catch {
+        activeUploadProviders.add(rawProvider);
+      }
+    }
+
+    const providersToQueue = [];
+    const skippedProviders = [];
+
     for (const provider of providers) {
+      const providerStatus = file.providers?.[provider] || null;
+
+      if (providerStatus?.status === 'completed') {
+        skippedProviders.push({ provider, reason: 'already-uploaded' });
+        continue;
+      }
+
+      if (activeUploadProviders.has(provider)) {
+        skippedProviders.push({ provider, reason: 'already-queued' });
+        continue;
+      }
+
+      providersToQueue.push(provider);
+    }
+
+    if (providersToQueue.length === 0) {
+      return { fileId, jobs: [], enabledProviders: [], skippedProviders };
+    }
+
+    await this.db.updateFileProgress(fileId, 'upload', 0);
+
+    const jobs = [];
+    for (const provider of providersToQueue) {
       const job = await this.db.createJob({
         type: 'upload',
         fileId,
         maxAttempts: UPLOAD_RETRY_ATTEMPTS,
         metadata: {
           provider,
-          filePath,
-          folderId,
-          fileName: path.basename(filePath),
+          filePath: effectiveFilePath,
+          folderId: effectiveFolderId,
+          fileName: effectiveFileName,
           removeWhenUnused: false
         }
       });
@@ -259,11 +307,16 @@ class UploaderService extends EventEmitter {
       jobs.push({ provider, jobId: job.id });
     }
 
-    this.emit('upload:queued', { fileId, jobs, enabledProviders: providers });
+    this.emit('upload:queued', { fileId, jobs, enabledProviders: providersToQueue });
 
     this._processQueue();
 
-    return { fileId, jobs, enabledProviders: providers };
+    return {
+      fileId,
+      jobs,
+      enabledProviders: providersToQueue,
+      skippedProviders
+    };
   }
 
   async _getPrimaryProvider() {

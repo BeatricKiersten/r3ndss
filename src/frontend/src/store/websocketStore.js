@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { useQueryClient } from 'react-query';
+import { toast } from './toastStore';
 
 const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
 
@@ -189,6 +190,51 @@ export const useWebSocketStore = create((set, get) => ({
           queryClient.invalidateQueries('providers-status');
           queryClient.invalidateQueries('provider-check-snapshots');
           queryClient.invalidateQueries('files');
+        }
+        break;
+
+      case 'zenius:batch:started':
+        if (queryClient) {
+          queryClient.invalidateQueries('zenius-queue-status');
+          queryClient.invalidateQueries('jobs');
+        }
+        toast.info('Batch Started', data?.message || 'Zenius batch download started');
+        break;
+
+      case 'zenius:batch:progress':
+        if (queryClient) {
+          queryClient.invalidateQueries('zenius-queue-status');
+        }
+        break;
+
+      case 'zenius:batch:completed':
+        if (queryClient) {
+          queryClient.invalidateQueries('zenius-queue-status');
+          queryClient.invalidateQueries('files');
+          queryClient.invalidateQueries('jobs');
+          queryClient.invalidateQueries('dashboard');
+        }
+        toast.success('Batch Completed', data?.message || 'All videos in batch processed');
+        break;
+
+      case 'zenius:batch:failed':
+        if (queryClient) {
+          queryClient.invalidateQueries('zenius-queue-status');
+        }
+        toast.error('Batch Failed', data?.error || data?.message || 'Batch download failed');
+        break;
+
+      case 'zenius:download:completed':
+        if (queryClient) {
+          queryClient.invalidateQueries('zenius-queue-status');
+          queryClient.invalidateQueries('files');
+        }
+        break;
+
+      case 'zenius:download:failed':
+        if (queryClient) {
+          queryClient.invalidateQueries('zenius-queue-status');
+          queryClient.invalidateQueries('jobs');
         }
         break;
 

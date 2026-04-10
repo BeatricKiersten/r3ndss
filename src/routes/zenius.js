@@ -11,5 +11,9 @@ router.post('/batch-download', zeniusController.downloadBatch);
 router.post('/cancel-all', zeniusController.cancelAll);
 router.post('/reset-files', zeniusController.resetFiles);
 router.get('/queue-status', zeniusController.getQueueStatus);
+router.put('/max-concurrent', zeniusController.setMaxConcurrent);
+router.get('/webhook', zeniusController.getWebhookConfig);
+router.put('/webhook', zeniusController.updateWebhookConfig);
+router.post('/webhook/test', zeniusController.testWebhook);
 
 module.exports = router;

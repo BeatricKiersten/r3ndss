@@ -36,6 +36,7 @@ class VideoProcessor {
 
   /**
    * Main entry point: Process HLS URL to MP4
+   * Checks for duplicate files before creating new ones
    */
   async processHls(hlsUrl, options = {}) {
     const {
@@ -44,7 +45,8 @@ class VideoProcessor {
       outputDir = null,
       decryptionKey = null,
       headers = {},
-      cookies = null
+      cookies = null,
+      skipIfExists = true
     } = options;
 
     const processId = uuidv4();
@@ -58,13 +60,47 @@ class VideoProcessor {
       // Generate output filename
       const timestamp = Date.now();
       const baseName = this._sanitizeFileBaseName(outputName) || `video_${timestamp}`;
-      const outputPath = path.join(resolvedOutputDir, `${baseName}.mp4`);
+      const outputFileName = `${baseName}.mp4`;
+      const outputPath = path.join(resolvedOutputDir, outputFileName);
       const tempPlaylistPath = path.join(resolvedOutputDir, `playlist_${processId}.m3u8`);
+
+      // Check for duplicate file in the same folder
+      if (skipIfExists) {
+        const existingFile = await this.db.findFileByNameInFolder(folderId, outputFileName);
+        if (existingFile) {
+          console.log(`[VideoProcessor] File "${outputFileName}" already exists in folder ${folderId}, skipping`);
+          
+          if (existingFile.status === 'completed') {
+            return {
+              success: true,
+              fileId: existingFile.id,
+              outputPath: existingFile.localPath,
+              size: existingFile.size,
+              duration: existingFile.duration,
+              skipped: true,
+              reason: 'File already exists'
+            };
+          }
+          
+          if (existingFile.status === 'processing') {
+            return {
+              success: true,
+              fileId: existingFile.id,
+              outputPath: existingFile.localPath,
+              skipped: true,
+              reason: 'File is already being processed',
+              status: existingFile.status
+            };
+          }
+          
+          console.log(`[VideoProcessor] Existing file failed before, will retry`);
+        }
+      }
 
       // Create file record
       const file = await this.db.createFile({
         folderId,
-        name: `${baseName}.mp4`,
+        name: outputFileName,
         originalUrl: hlsUrl,
         localPath: outputPath
       });
