@@ -1815,6 +1815,39 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
       }
 
       const urlShortId = normalizeShortId(rawUrlShortId);
+      const outputName = sanitizeOutputName(
+        instance.outputName || instance.name || `zenius-${urlShortId}`,
+        `zenius-${urlShortId}`
+      );
+      const chainPath = String(instance.path || container.path || '').trim();
+      const finalFolderInput = joinFolderPaths(baseFolderInput, chainPath) || 'root';
+      const folderId = await resolveFolderId(finalFolderInput);
+      const outputFileName = `${outputName}.mp4`;
+      const existingFile = await db.findFileByNameInFolder(folderId, outputFileName);
+
+      if (existingFile) {
+        const existingStatus = String(existingFile.status || '').trim().toLowerCase();
+        console.log(`[Zenius] Pre-detail duplicate check hit for ${urlShortId}: ${outputFileName} in folder ${folderId} (${existingStatus || 'unknown'})`);
+
+        let uploadQueueResult = null;
+        let skipReason = 'File already exists';
+        if (existingStatus === 'completed') {
+          uploadQueueResult = await uploaderService.queueFileUpload(existingFile.id, existingFile.localPath, folderId, selectedProviders);
+        } else if (existingStatus === 'processing') {
+          skipReason = 'File is already being processed';
+        }
+
+        skipped.push({
+          urlShortId,
+          reason: skipReason,
+          path: chainPath,
+          fileId: existingFile.id,
+          outputName: outputFileName,
+          uploadQueue: uploadQueueResult
+        });
+        continue;
+      }
+
       let metadataRetryError = '';
       let videoUrl = String(metadata['video-url'] || '').trim();
       let detailWebhookSent = false;
@@ -1874,15 +1907,6 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
         });
         continue;
       }
-
-      const outputName = sanitizeOutputName(
-        instance.outputName || instance.name || metadata.name || `zenius-${urlShortId}`,
-        `zenius-${urlShortId}`
-      );
-
-      const chainPath = String(instance.path || container.path || '').trim();
-      const finalFolderInput = joinFolderPaths(baseFolderInput, chainPath) || 'root';
-      const folderId = await resolveFolderId(finalFolderInput);
 
       const ffmpegHeaders = {
         'User-Agent': requestContext.userAgent,
