@@ -2584,6 +2584,41 @@ const zeniusController = {
     }
   },
 
+  getUploadConcurrency(req, res) {
+    res.json({
+      success: true,
+      data: uploaderService.getConcurrencyConfig()
+    });
+  },
+
+  setUploadConcurrency(req, res) {
+    try {
+      const result = {};
+      if (req.body?.maxConcurrentUploads !== undefined) {
+        const v = req.body.maxConcurrentUploads;
+        if (typeof v !== 'number' || v < 1 || v > 20) {
+          return res.status(400).json({ success: false, error: 'maxConcurrentUploads must be a number between 1 and 20' });
+        }
+        result.maxConcurrentUploads = uploaderService.setMaxConcurrentUploads(v);
+        console.log(`[Zenius] Max concurrent uploads set to ${result.maxConcurrentUploads}`);
+      }
+      if (req.body?.maxConcurrentProviders !== undefined) {
+        const v = req.body.maxConcurrentProviders;
+        if (typeof v !== 'number' || v < 1 || v > 20) {
+          return res.status(400).json({ success: false, error: 'maxConcurrentProviders must be a number between 1 and 20' });
+        }
+        result.maxConcurrentProviders = uploaderService.setMaxConcurrentProviders(v);
+        console.log(`[Zenius] Max concurrent providers set to ${result.maxConcurrentProviders}`);
+      }
+      res.json({
+        success: true,
+        data: { ...result, ...uploaderService.getConcurrencyConfig() }
+      });
+    } catch (error) {
+      res.status(400).json({ success: false, error: error.message });
+    }
+  },
+
   async getWebhookConfig(req, res) {
     try {
       await webhookService.loadConfig(db);

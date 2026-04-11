@@ -386,6 +386,33 @@ export const useSetMaxConcurrent = () => {
   );
 };
 
+export const useUploadConcurrency = () => {
+  return useQuery(
+    ['upload-concurrency'],
+    async () => {
+      const response = await api.get('/api/zenius/upload-concurrency');
+      return response.data.data;
+    },
+    { staleTime: 10000 }
+  );
+};
+
+export const useSetUploadConcurrency = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation(
+    async (updates) => {
+      const response = await api.put('/api/zenius/upload-concurrency', updates);
+      return response.data.data;
+    },
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('upload-concurrency');
+      }
+    }
+  );
+};
+
 export const useWebhookConfig = () => {
   return useQuery(
     ['zenius-webhook-config'],

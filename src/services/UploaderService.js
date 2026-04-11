@@ -49,6 +49,8 @@ class UploaderService extends EventEmitter {
     this.activeUploads = new Map(); // Track active upload streams
     this.processingJobIds = new Set();
     this.localCleanupTimers = new Map();
+    this._currentMaxConcurrentUploads = MAX_CONCURRENT_UPLOADS;
+    this._currentMaxConcurrentProviders = MAX_CONCURRENT_PROVIDERS;
     this.providerLimit = pLimit(MAX_CONCURRENT_PROVIDERS);
 
     this.staticAdapters = {
@@ -2026,8 +2028,35 @@ class UploaderService extends EventEmitter {
     return {
       isRunning: this.isRunning,
       activeUploads: this.activeUploads.size,
-      adapters: Object.keys(this.adapters)
+      adapters: Object.keys(this.adapters),
+      maxConcurrentUploads: this._currentMaxConcurrentUploads,
+      maxConcurrentProviders: this._currentMaxConcurrentProviders
     };
+  }
+
+  getConcurrencyConfig() {
+    return {
+      maxConcurrentUploads: this._currentMaxConcurrentUploads,
+      maxConcurrentProviders: this._currentMaxConcurrentProviders
+    };
+  }
+
+  setMaxConcurrentUploads(value) {
+    const n = Math.max(1, Math.min(20, Number(value) || MAX_CONCURRENT_UPLOADS));
+    this._currentMaxConcurrentUploads = n;
+    for (const provider of this.providerNames) {
+      this.uploadLimits[provider] = pLimit(n);
+    }
+    this._processQueue();
+    return n;
+  }
+
+  setMaxConcurrentProviders(value) {
+    const n = Math.max(1, Math.min(20, Number(value) || MAX_CONCURRENT_PROVIDERS));
+    this._currentMaxConcurrentProviders = n;
+    this.providerLimit = pLimit(n);
+    this._processQueue();
+    return n;
   }
 
   /**

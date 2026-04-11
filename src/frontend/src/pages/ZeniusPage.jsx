@@ -32,7 +32,8 @@ import {
   BellOff,
   Send,
   FolderTree,
-  Home
+  Home,
+  Upload
 } from 'lucide-react';
 import {
   useDeleteAllFolders,
@@ -42,6 +43,8 @@ import {
   useSetMaxConcurrent,
   useTestWebhook,
   useUpdateWebhookConfig,
+  useUploadConcurrency,
+  useSetUploadConcurrency,
   useWebhookConfig,
   useZeniusBatchChain,
   useZeniusBatchDownload,
@@ -118,6 +121,129 @@ function StatusBadge({ status }) {
     <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium ${c.bg} ${c.text}`}>
       {c.label}
     </span>
+  );
+}
+
+function UploadConcurrencyCard() {
+  const { data: uploadConcurrency } = useUploadConcurrency();
+  const setUploadConcurrency = useSetUploadConcurrency();
+  const [editingUploads, setEditingUploads] = useState(false);
+  const [editingProviders, setEditingProviders] = useState(false);
+  const [uploadsInput, setUploadsInput] = useState('');
+  const [providersInput, setProvidersInput] = useState('');
+
+  const currentUploads = uploadConcurrency?.maxConcurrentUploads || 2;
+  const currentProviders = uploadConcurrency?.maxConcurrentProviders || 4;
+
+  const submitUploads = () => {
+    const v = parseInt(uploadsInput, 10);
+    if (v >= 1 && v <= 20) {
+      setUploadConcurrency.mutate({ maxConcurrentUploads: v });
+    }
+    setEditingUploads(false);
+  };
+
+  const submitProviders = () => {
+    const v = parseInt(providersInput, 10);
+    if (v >= 1 && v <= 20) {
+      setUploadConcurrency.mutate({ maxConcurrentProviders: v });
+    }
+    setEditingProviders(false);
+  };
+
+  return (
+    <div className="card p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Upload className="w-4 h-4 text-[#666]" />
+          <span className="text-sm font-medium text-[#aaa]">Upload Concurrency</span>
+        </div>
+        {uploadConcurrency && (
+          <div className="flex items-center gap-3 text-sm">
+            <span className="text-[#666]">Upload: <span className="text-white">{currentUploads}</span></span>
+            <span className="text-[#666]">Provider: <span className="text-white">{currentProviders}</span></span>
+            <span className="text-[#666]">Aktif: <span className="text-white">{uploadConcurrency.activeUploads ?? '-'}</span></span>
+          </div>
+        )}
+      </div>
+
+      <div className="flex items-center gap-6">
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-[#666]">Max Upload/Provider:</span>
+          {editingUploads ? (
+            <div className="flex items-center gap-1.5">
+              <input
+                type="number"
+                min={1}
+                max={20}
+                value={uploadsInput}
+                onChange={(e) => setUploadsInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') submitUploads();
+                  if (e.key === 'Escape') setEditingUploads(false);
+                }}
+                className="w-14 px-2 py-1 bg-[#0d0d0d] border border-[#3a3a3a] rounded text-xs text-white text-center focus:outline-none focus:border-blue-500"
+                autoFocus
+              />
+              <button onClick={submitUploads} disabled={setUploadConcurrency.isLoading} className="px-2 py-1 rounded text-xs bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-40">
+                {setUploadConcurrency.isLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Set'}
+              </button>
+              <button onClick={() => setEditingUploads(false)} className="px-2 py-1 rounded text-xs text-[#666] hover:text-white">
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => { setUploadsInput(String(currentUploads)); setEditingUploads(true); }}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#0d0d0d] border border-[#2a2a2a] text-xs text-white hover:border-[#3a3a3a] transition-colors"
+            >
+              <Upload className="w-3 h-3 text-blue-400" />
+              {currentUploads}
+              <span className="text-[#555]">threads</span>
+            </button>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-[#666]">Max Provider Paralel:</span>
+          {editingProviders ? (
+            <div className="flex items-center gap-1.5">
+              <input
+                type="number"
+                min={1}
+                max={20}
+                value={providersInput}
+                onChange={(e) => setProvidersInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') submitProviders();
+                  if (e.key === 'Escape') setEditingProviders(false);
+                }}
+                className="w-14 px-2 py-1 bg-[#0d0d0d] border border-[#3a3a3a] rounded text-xs text-white text-center focus:outline-none focus:border-blue-500"
+                autoFocus
+              />
+              <button onClick={submitProviders} disabled={setUploadConcurrency.isLoading} className="px-2 py-1 rounded text-xs bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-40">
+                {setUploadConcurrency.isLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Set'}
+              </button>
+              <button onClick={() => setEditingProviders(false)} className="px-2 py-1 rounded text-xs text-[#666] hover:text-white">
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => { setProvidersInput(String(currentProviders)); setEditingProviders(true); }}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#0d0d0d] border border-[#2a2a2a] text-xs text-white hover:border-[#3a3a3a] transition-colors"
+            >
+              <Cloud className="w-3 h-3 text-emerald-400" />
+              {currentProviders}
+              <span className="text-[#555]">providers</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {setUploadConcurrency.isSuccess && <p className="text-xs text-emerald-400">Upload concurrency updated.</p>}
+      {setUploadConcurrency.isError && <p className="text-xs text-red-400">Failed: {setUploadConcurrency.error?.message}</p>}
+    </div>
   );
 }
 
@@ -1009,6 +1135,9 @@ export default function ZeniusPage() {
         {deleteAllFolders.isSuccess && <p className="text-xs text-emerald-400">Deleted {deleteAllFolders.data?.data?.removedFolders} folders, {deleteAllFolders.data?.data?.removedFiles} files.</p>}
         {deleteAllFolders.isError && <p className="text-xs text-red-400">Failed: {deleteAllFolders.error?.message}</p>}
       </div>
+
+      {/* Upload Concurrency Settings */}
+      <UploadConcurrencyCard />
 
       {/* Batch Progress (shown when batch is running/completed) */}
       <BatchProgressCard

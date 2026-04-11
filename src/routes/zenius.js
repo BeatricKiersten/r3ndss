@@ -14,6 +14,8 @@ router.post('/cancel-all', zeniusController.cancelAll);
 router.post('/reset-files', zeniusController.resetFiles);
 router.get('/queue-status', zeniusController.getQueueStatus);
 router.put('/max-concurrent', zeniusController.setMaxConcurrent);
+router.get('/upload-concurrency', zeniusController.getUploadConcurrency);
+router.put('/upload-concurrency', zeniusController.setUploadConcurrency);
 router.get('/webhook', zeniusController.getWebhookConfig);
 router.put('/webhook', zeniusController.updateWebhookConfig);
 router.post('/webhook/test', zeniusController.testWebhook);
