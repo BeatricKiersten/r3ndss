@@ -71,6 +71,33 @@ class WebhookService {
     }
   }
 
+  async sendBatchItemError(db, itemData) {
+    await this._ensureConfig(db);
+
+    if (!this._config.enabled || !this._config.url) {
+      console.log('[Webhook] Skipped item error notification: disabled or no URL configured');
+      return null;
+    }
+
+    const text = this._formatBatchItemErrorMessage(itemData);
+
+    try {
+      const response = await axios.post(this._config.url, {
+        to: this._config.to,
+        text
+      }, {
+        timeout: 15000,
+        validateStatus: () => true
+      });
+
+      console.log(`[Webhook] Batch item error notification sent: ${response.status}`);
+      return { success: true, status: response.status };
+    } catch (error) {
+      console.error('[Webhook] Batch item error notification failed:', error.message);
+      return { success: false, error: error.message };
+    }
+  }
+
   async sendTest(db) {
     await this._ensureConfig(db);
 
@@ -98,8 +125,12 @@ class WebhookService {
       status,
       totalContainers,
       processedContainers,
+      scannedContainerCount,
+      discoveredVideoCount,
       queuedCount,
       skippedCount,
+      downloadCompletedCount,
+      downloadFailedCount,
       error,
       chainErrors,
       sessionId,
@@ -108,8 +139,11 @@ class WebhookService {
     } = data;
 
     const duration = this._formatDuration(startedAt, finishedAt);
-    const failedCount = Math.max(0, processedContainers - queuedCount - skippedCount);
-    const successRate = processedContainers > 0 ? ((queuedCount / processedContainers) * 100).toFixed(1) : '0.0';
+    const containerCount = Number(scannedContainerCount || processedContainers || 0);
+    const totalVideoCount = Number(discoveredVideoCount || queuedCount || 0) + Number(skippedCount || 0);
+    const failedCount = Number(downloadFailedCount || 0);
+    const completedCount = Number(downloadCompletedCount || 0);
+    const queueRate = totalVideoCount > 0 ? ((Number(queuedCount || 0) / totalVideoCount) * 100).toFixed(1) : '0.0';
     const statusIcon = status === 'completed' ? '✅' : status === 'failed' ? '❌' : '⚠️';
 
     const lines = [];
@@ -126,11 +160,13 @@ class WebhookService {
     lines.push('');
 
     lines.push('📊 *Statistik:*');
-    lines.push(`• Containers: ${processedContainers}/${totalContainers}`);
+    lines.push(`• Containers Scanned: ${containerCount}/${totalContainers}`);
+    lines.push(`• Videos Found: ${totalVideoCount}`);
     lines.push(`• Video Queued: ${queuedCount}`);
     lines.push(`• Video Skipped: ${skippedCount}`);
+    lines.push(`• Download Completed: ${completedCount}`);
     if (failedCount > 0) lines.push(`• Video Failed: ${failedCount}`);
-    lines.push(`• Success Rate: ${successRate}%`);
+    lines.push(`• Queue Rate: ${queueRate}%`);
     lines.push('');
 
     lines.push('⏱️ *Waktu:*');
@@ -153,6 +189,34 @@ class WebhookService {
         lines.push(`  ... +${chainErrors.length - 5} lainnya`);
       }
     }
+
+    return lines.join('\n');
+  }
+
+  _formatBatchItemErrorMessage(data) {
+    const {
+      batchRunId,
+      rootCgId,
+      rootCgName,
+      containerUrlShortId,
+      containerName,
+      instanceUrlShortId,
+      instanceName,
+      path,
+      stage,
+      error
+    } = data;
+
+    const lines = [];
+
+    lines.push('⚠️ *BATCH ITEM ERROR*');
+    if (batchRunId) lines.push(`• Batch ID: \`${String(batchRunId).slice(0, 12)}...\``);
+    lines.push(`• Root CG: ${rootCgName || rootCgId || '-'}`);
+    if (containerName || containerUrlShortId) lines.push(`• Container: ${containerName || '-'} (${containerUrlShortId || '-'})`);
+    if (instanceName || instanceUrlShortId) lines.push(`• Instance: ${instanceName || '-'} (${instanceUrlShortId || '-'})`);
+    if (path) lines.push(`• Path: ${String(path).slice(0, 180)}`);
+    if (stage) lines.push(`• Stage: ${stage}`);
+    lines.push(`❌ *Error:* ${String(error || 'Unknown error').slice(0, 500)}`);
 
     return lines.join('\n');
   }

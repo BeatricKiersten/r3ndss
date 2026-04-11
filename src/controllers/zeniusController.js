@@ -491,6 +491,7 @@ function createBatchChainSession({ rootCgId, targetCgSelector, parentContainerNa
     leafCursor: 0,
     traversal: [],
     containerByShortId: new Map(),
+    containerVideoInstancesByShortId: new Map(),
     cgPathById: new Map([[rootCgId, []]]),
     errors: []
   };
@@ -540,7 +541,9 @@ function createBackgroundBatchRun({ rootCgId, targetCgSelector, baseFolderInput,
     rootCgName: null,
     parentContainerName: null,
     totalContainers: 0,
+    scannedContainerCount: 0,
     processedContainers: 0,
+    discoveredVideoCount: 0,
     queuedCount: 0,
     skippedCount: 0,
     downloadCompletedCount: 0,
@@ -562,6 +565,10 @@ function touchBackgroundBatchRun(run) {
 }
 
 function summarizeBackgroundBatchRun(run) {
+  const scannedContainerCount = Number(run.scannedContainerCount || run.processedContainers || 0);
+  const totalContainers = Number(run.totalContainers || 0);
+  const discoveredVideoCount = Number(run.discoveredVideoCount || (run.queuedCount || 0) + (run.skippedCount || 0));
+
   return {
     id: run.id,
     status: run.status,
@@ -573,14 +580,29 @@ function summarizeBackgroundBatchRun(run) {
     sessionId: run.sessionId,
     rootCgName: run.rootCgName,
     parentContainerName: run.parentContainerName,
-    totalContainers: run.totalContainers,
-    processedContainers: run.processedContainers,
+    totalContainers,
+    scannedContainerCount,
+    processedContainers: scannedContainerCount,
+    discoveredVideoCount,
     queuedCount: run.queuedCount,
     skippedCount: run.skippedCount,
     downloadCompletedCount: run.downloadCompletedCount || 0,
     downloadFailedCount: run.downloadFailedCount || 0,
     hasMoreContainers: run.hasMoreContainers,
     nextContainerOffset: run.nextContainerOffset,
+    containerProgress: {
+      processed: scannedContainerCount,
+      total: totalContainers,
+      percent: totalContainers > 0 ? Math.round((scannedContainerCount / totalContainers) * 100) : 0
+    },
+    videoProgress: {
+      discovered: discoveredVideoCount,
+      queued: Number(run.queuedCount || 0),
+      skipped: Number(run.skippedCount || 0),
+      completed: Number(run.downloadCompletedCount || 0),
+      failed: Number(run.downloadFailedCount || 0),
+      pending: Math.max(0, Number(run.queuedCount || 0) - Number(run.downloadCompletedCount || 0) - Number(run.downloadFailedCount || 0))
+    },
     chainErrors: Array.isArray(run.chainErrors) ? run.chainErrors : [],
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
@@ -1538,16 +1560,24 @@ async function buildBatchContainerDetail({ container, options, session, deadline
   const containerName = container.name || container['url-short-id'];
   const containerPath = buildContainerPath(resolveContainerParentSegments(session, container), containerName);
   const usedOutputNames = new Set();
+  const containerShortId = container['url-short-id'];
 
   let videoDetails = [];
-  try {
-    videoDetails = await getVideoInstanceDetails(container['url-short-id'], options);
-  } catch (error) {
-    pushBatchError(session.errors, {
-      stage: 'container-details',
-      urlShortId: container['url-short-id'],
-      message: error.message
-    });
+  if (session.containerVideoInstancesByShortId.has(containerShortId)) {
+    videoDetails = session.containerVideoInstancesByShortId.get(containerShortId) || [];
+    console.log(`[Zenius] Reusing preview cache for container ${containerShortId} (${videoDetails.length} instances)`);
+  } else {
+    try {
+      console.log(`[Zenius] Fetching container details for ${containerShortId}`);
+      videoDetails = await getVideoInstanceDetails(containerShortId, options);
+      session.containerVideoInstancesByShortId.set(containerShortId, videoDetails);
+    } catch (error) {
+      pushBatchError(session.errors, {
+        stage: 'container-details',
+        urlShortId: containerShortId,
+        message: error.message
+      });
+    }
   }
 
   const instancesWithMetadata = [];
@@ -1757,6 +1787,7 @@ function queueDownload(task) {
 async function queueBatchDownloadChunk({ chain, requestContext, refererPath, baseFolderInput, selectedProviders, runId = null, cancelled = () => false }) {
   const queued = [];
   const skipped = [];
+  let totalInstances = 0;
 
   for (const container of chain.containerDetails || []) {
     if (cancelled()) {
@@ -1764,6 +1795,7 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
     }
 
     for (const instance of container.videoInstances || []) {
+      totalInstances += 1;
       if (cancelled()) {
         break;
       }
@@ -1785,6 +1817,7 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
       const urlShortId = normalizeShortId(rawUrlShortId);
       let metadataRetryError = '';
       let videoUrl = String(metadata['video-url'] || '').trim();
+      let detailWebhookSent = false;
 
       if (!videoUrl) {
         try {
@@ -1797,13 +1830,46 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
           videoUrl = String(metadata['video-url'] || '').trim();
         } catch (error) {
           metadataRetryError = error.message;
+          detailWebhookSent = true;
+          await webhookService.sendBatchItemError(db, {
+            batchRunId: runId,
+            rootCgId: chain.rootCgId,
+            rootCgName: chain.rootCgName,
+            containerUrlShortId: container.containerUrlShortId,
+            containerName: container.containerName,
+            instanceUrlShortId: urlShortId,
+            instanceName: instance.name || metadata.name || null,
+            path: instance.path || container.path || '',
+            stage: 'instance-details',
+            error: error.message
+          }).catch((webhookError) => {
+            console.error('[Webhook] Batch item error notification failed:', webhookError.message);
+          });
         }
       }
 
       if (!videoUrl) {
+        const detailErrorMessage = metadataRetryError || instance.metadataError || 'Missing video-url in instance-details';
+        if (!detailWebhookSent) {
+          await webhookService.sendBatchItemError(db, {
+            batchRunId: runId,
+            rootCgId: chain.rootCgId,
+            rootCgName: chain.rootCgName,
+            containerUrlShortId: container.containerUrlShortId,
+            containerName: container.containerName,
+            instanceUrlShortId: urlShortId,
+            instanceName: instance.name || metadata.name || null,
+            path: instance.path || container.path || '',
+            stage: 'instance-details',
+            error: detailErrorMessage
+          }).catch((webhookError) => {
+            console.error('[Webhook] Batch item error notification failed:', webhookError.message);
+          });
+        }
+
         skipped.push({
           urlShortId,
-          reason: metadataRetryError || instance.metadataError || 'Missing video-url in instance-details',
+          reason: detailErrorMessage,
           path: instance.path || container.path || ''
         });
         continue;
@@ -1870,7 +1936,7 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
     }
   }
 
-  return { queued, skipped };
+  return { queued, skipped, totalInstances };
 }
 
 async function processBackgroundBatchRun(run, payload) {
@@ -1947,10 +2013,14 @@ async function processBackgroundBatchRun(run, payload) {
         cancelled: () => run.status !== 'running'
       });
 
+      run.discoveredVideoCount += Number(chunkResult.totalInstances || 0);
       run.queuedCount += chunkResult.queued.length;
       run.skippedCount += chunkResult.skipped.length;
       run.queued.push(...chunkResult.queued);
       run.skipped.push(...chunkResult.skipped);
+      run.scannedContainerCount = Number.isFinite(Number(chain.nextContainerOffset))
+        ? Number(chain.nextContainerOffset)
+        : Number(chain.totalContainers || run.scannedContainerCount || 0);
       run.processedContainers = Number.isFinite(Number(chain.nextContainerOffset))
         ? Number(chain.nextContainerOffset)
         : Number(chain.totalContainers || run.processedContainers || 0);
@@ -1984,9 +2054,26 @@ async function processBackgroundBatchRun(run, payload) {
         rootCgId: run.rootCgId,
         rootCgName: run.rootCgName,
         totalContainers: run.totalContainers,
+        scannedContainerCount: run.scannedContainerCount,
         processedContainers: run.processedContainers,
+        discoveredVideoCount: run.discoveredVideoCount,
         queuedCount: run.queuedCount,
         skippedCount: run.skippedCount,
+        downloadCompletedCount: run.downloadCompletedCount || 0,
+        downloadFailedCount: run.downloadFailedCount || 0,
+        containerProgress: {
+          processed: run.scannedContainerCount,
+          total: run.totalContainers,
+          percent: run.totalContainers > 0 ? Math.round((run.scannedContainerCount / run.totalContainers) * 100) : 0
+        },
+        videoProgress: {
+          discovered: run.discoveredVideoCount,
+          queued: run.queuedCount,
+          skipped: run.skippedCount,
+          completed: run.downloadCompletedCount || 0,
+          failed: run.downloadFailedCount || 0,
+          pending: Math.max(0, run.queuedCount - (run.downloadCompletedCount || 0) - (run.downloadFailedCount || 0))
+        },
         hasMore: run.hasMoreContainers,
         sessionId: currentSessionId
       });
@@ -2038,6 +2125,10 @@ async function processBackgroundBatchRun(run, payload) {
         processedContainers: run.processedContainers,
         queuedCount: run.queuedCount,
         skippedCount: run.skippedCount,
+        scannedContainerCount: run.scannedContainerCount,
+        discoveredVideoCount: run.discoveredVideoCount,
+        downloadCompletedCount: run.downloadCompletedCount || 0,
+        downloadFailedCount: run.downloadFailedCount || 0,
         error: run.error,
         chainErrors: run.chainErrors,
         startedAt: run.startedAt,

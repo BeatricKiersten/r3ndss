@@ -442,9 +442,12 @@ function BatchProgressCard({ batchResult, batchQueueProgress, trackedBatchRun, b
   const status = trackedBatchRun?.status || batchResult?.status || 'running';
   const queued = batchResult?.queuedCount || trackedBatchRun?.queuedCount || 0;
   const skipped = batchResult?.skippedCount || trackedBatchRun?.skippedCount || 0;
-  const failed = trackedBatchRun?.failedCount || 0;
-  const processed = batchQueueProgress?.processed || trackedBatchRun?.processedContainers || 0;
-  const total = batchQueueProgress?.total ?? trackedBatchRun?.totalContainers ?? null;
+  const failed = trackedBatchRun?.downloadFailedCount || batchResult?.downloadFailedCount || 0;
+  const completed = trackedBatchRun?.downloadCompletedCount || batchResult?.downloadCompletedCount || 0;
+  const discovered = trackedBatchRun?.discoveredVideoCount || batchResult?.discoveredVideoCount || queued + skipped;
+  const pending = Math.max(0, queued - completed - failed);
+  const processed = batchQueueProgress?.containersProcessed || trackedBatchRun?.scannedContainerCount || trackedBatchRun?.processedContainers || 0;
+  const total = batchQueueProgress?.containersTotal ?? trackedBatchRun?.totalContainers ?? null;
   const pct = total ? Math.round((processed / total) * 100) : 0;
   const isRunning = status === 'running';
 
@@ -496,6 +499,13 @@ function BatchProgressCard({ batchResult, batchQueueProgress, trackedBatchRun, b
               style={{ width: `${pct}%` }}
             />
           </div>
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-[#777]">
+            <span>Videos found: <span className="text-white">{discovered}</span></span>
+            <span>Queued: <span className="text-blue-400">{queued}</span></span>
+            <span>Pending: <span className="text-amber-400">{pending}</span></span>
+            <span>Completed: <span className="text-emerald-400">{completed}</span></span>
+            <span>Failed: <span className="text-red-400">{failed}</span></span>
+          </div>
         </div>
       )}
 
@@ -509,12 +519,12 @@ function BatchProgressCard({ batchResult, batchQueueProgress, trackedBatchRun, b
           <p className="text-[10px] text-[#666] uppercase tracking-wider">Skipped</p>
         </div>
         <div className="bg-[#0d0d0d] rounded-lg p-3 text-center">
-          <p className="text-lg font-bold text-red-400">{failed}</p>
-          <p className="text-[10px] text-[#666] uppercase tracking-wider">Failed</p>
+          <p className="text-lg font-bold text-red-400">{pending}</p>
+          <p className="text-[10px] text-[#666] uppercase tracking-wider">Pending</p>
         </div>
         <div className="bg-[#0d0d0d] rounded-lg p-3 text-center">
-          <p className="text-lg font-bold text-emerald-400">{queued - failed}</p>
-          <p className="text-[10px] text-[#666] uppercase tracking-wider">Success</p>
+          <p className="text-lg font-bold text-emerald-400">{completed}</p>
+          <p className="text-[10px] text-[#666] uppercase tracking-wider">Completed</p>
         </div>
       </div>
 
@@ -606,15 +616,18 @@ export default function ZeniusPage() {
     if (!trackedBatchRun) return;
     setBatchSessionId((prev) => trackedBatchRun.sessionId || prev || null);
     setBatchQueueProgress({
-      processed: Number(trackedBatchRun.processedContainers || 0),
-      total: Number.isFinite(Number(trackedBatchRun.totalContainers)) ? Number(trackedBatchRun.totalContainers) : null
+      containersProcessed: Number(trackedBatchRun.scannedContainerCount || trackedBatchRun.processedContainers || 0),
+      containersTotal: Number.isFinite(Number(trackedBatchRun.totalContainers)) ? Number(trackedBatchRun.totalContainers) : null
     });
     setBatchResult((prev) => ({
       ...(prev || {}),
       ...trackedBatchRun,
       batchRunId: trackedBatchRun.id,
       queuedCount: Number(trackedBatchRun.queuedCount || 0),
-      skippedCount: Number(trackedBatchRun.skippedCount || 0)
+      skippedCount: Number(trackedBatchRun.skippedCount || 0),
+      downloadCompletedCount: Number(trackedBatchRun.downloadCompletedCount || 0),
+      downloadFailedCount: Number(trackedBatchRun.downloadFailedCount || 0),
+      discoveredVideoCount: Number(trackedBatchRun.discoveredVideoCount || 0)
     }));
   }, [trackedBatchRun]);
 
