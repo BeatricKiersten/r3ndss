@@ -9,7 +9,9 @@ import {
   useMoveFolder,
   usePurgeFolder,
   useReuploadToProvider,
-  useFileProvidersStatus
+  useFileProvidersStatus,
+  useFailedFiles,
+  useDeleteAllFailedFiles
 } from '../hooks/api';
 import { usePlayerStore } from '../store/websocketStore';
 import { useNavigate } from 'react-router-dom';
@@ -40,7 +42,9 @@ import {
   Server,
   FolderInput,
   ArrowRight,
-  GripVertical
+  GripVertical,
+  AlertTriangle,
+  ListX
 } from 'lucide-react';
 import { PROVIDERS, getProviderConfig, getStatusConfig } from '../config/providers';
 import { toast } from '../store/toastStore';
@@ -492,6 +496,79 @@ function FileDetailModal({ file, onClose }) {
   );
 }
 
+function RemoveFailedModal({ files, isLoading, isDeleting, onConfirm, onClose }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" onClick={onClose}>
+      <div className="w-full max-w-lg bg-[#1a1a1a] rounded-xl border border-[#333] shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center gap-3 p-4 border-b border-[#222]">
+          <div className="w-9 h-9 rounded-lg bg-red-500/10 flex items-center justify-center">
+            <AlertTriangle className="w-5 h-5 text-red-400" />
+          </div>
+          <div>
+            <h3 className="text-sm font-medium text-white">Remove All Failed Files</h3>
+            <p className="text-xs text-[#888]">{files.length} file akan dihapus secara permanen</p>
+          </div>
+          <button onClick={onClose} className="ml-auto p-1 text-[#666] hover:text-white">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="max-h-80 overflow-y-auto p-4 space-y-2">
+          {isLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <RefreshCw className="w-5 h-5 text-[#666] animate-spin" />
+            </div>
+          ) : (
+            files.map((file) => (
+              <div key={file.id} className="flex items-center gap-3 p-2.5 rounded-lg bg-[#0d0d0d] border border-[#222]">
+                <div className="w-7 h-7 rounded bg-red-500/10 flex items-center justify-center flex-shrink-0">
+                  <AlertCircle className="w-3.5 h-3.5 text-red-400" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm text-[#ccc] truncate">{file.name}</p>
+                  <div className="flex items-center gap-2 text-xs text-[#666]">
+                    <span>{formatSize(file.size)}</span>
+                    <span className="text-[#333]">|</span>
+                    <span>{formatDate(file.createdAt)}</span>
+                  </div>
+                </div>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-400/10 text-red-400">failed</span>
+              </div>
+            ))
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 p-4 border-t border-[#222]">
+          <button
+            onClick={onClose}
+            disabled={isDeleting}
+            className="px-4 py-2 text-xs rounded-lg bg-[#222] text-[#aaa] hover:bg-[#333] hover:text-white transition-colors disabled:opacity-50"
+          >
+            Batal
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={isDeleting || files.length === 0}
+            className="px-4 py-2 text-xs rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/30 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+          >
+            {isDeleting ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                Menghapus...
+              </>
+            ) : (
+              <>
+                <Trash2 className="w-3.5 h-3.5" />
+                Hapus {files.length} File
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function FileListPage() {
   const navigate = useNavigate();
   const setCurrentFile = usePlayerStore((state) => state.setCurrentFile);
@@ -505,6 +582,7 @@ export default function FileListPage() {
   const [sortBy, setSortBy] = useState('date');
   const [sortOrder, setSortOrder] = useState('desc');
   const [fileMenuOpen, setFileMenuOpen] = useState(null);
+  const [showRemoveFailedModal, setShowRemoveFailedModal] = useState(false);
 
   const {
     data: files,
@@ -522,6 +600,8 @@ export default function FileListPage() {
   const moveFile = useMoveFile();
   const moveFolder = useMoveFolder();
   const purgeFolder = usePurgeFolder();
+  const failedFilesQuery = useFailedFiles();
+  const deleteAllFailed = useDeleteAllFailedFiles();
   const [moveFolderTarget, setMoveFolderTarget] = useState(null);
 
   const allFolders = useMemo(() => {
@@ -652,6 +732,27 @@ export default function FileListPage() {
       await forceDeleteFile.mutateAsync(fileId);
     } catch (error) {
       alert('Delete failed: ' + error.message);
+    }
+  };
+
+  const handleOpenRemoveFailedModal = async () => {
+    const result = await failedFilesQuery.refetch();
+    if (!result.data || result.data.length === 0) {
+      toast.info('Tidak ada file dengan status failed');
+      return;
+    }
+    setShowRemoveFailedModal(true);
+  };
+
+  const handleConfirmRemoveFailed = async () => {
+    try {
+      const result = await deleteAllFailed.mutateAsync();
+      const deleted = result.results?.filter((r) => r.deleted).length || 0;
+      const failed = result.results?.filter((r) => !r.deleted).length || 0;
+      toast.success(`${deleted} file failed berhasil dihapus${failed > 0 ? `, ${failed} gagal dihapus` : ''}`);
+      setShowRemoveFailedModal(false);
+    } catch (error) {
+      toast.error('Gagal menghapus file failed: ' + error.message);
     }
   };
 
@@ -1025,6 +1126,19 @@ export default function FileListPage() {
                       </button>
                     ))}
                   </div>
+                  <button
+                    onClick={handleOpenRemoveFailedModal}
+                    disabled={failedFilesQuery.isFetching}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 transition-colors disabled:opacity-50"
+                    title="Hapus semua file yang gagal"
+                  >
+                    {failedFilesQuery.isFetching ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <ListX className="w-3.5 h-3.5" />
+                    )}
+                    Remove Failed
+                  </button>
                 </div>
               </div>
             ) : null}
@@ -1215,6 +1329,16 @@ export default function FileListPage() {
           folderTree={folderTree}
           onClose={() => setMoveFolderTarget(null)}
           onMove={handleMoveFolder}
+        />
+      )}
+
+      {showRemoveFailedModal && (
+        <RemoveFailedModal
+          files={failedFilesQuery.data || []}
+          isLoading={failedFilesQuery.isFetching}
+          isDeleting={deleteAllFailed.isLoading}
+          onConfirm={handleConfirmRemoveFailed}
+          onClose={() => setShowRemoveFailedModal(false)}
         />
       )}
     </div>

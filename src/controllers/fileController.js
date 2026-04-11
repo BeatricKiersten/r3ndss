@@ -95,6 +95,27 @@ const fileController = {
     } catch (error) {
       res.status(400).json({ success: false, error: error.message });
     }
+  },
+
+  async deleteAllFailed(req, res) {
+    try {
+      const failedFiles = await db.listFiles(null, 'failed');
+      const results = [];
+
+      for (const file of failedFiles) {
+        try {
+          await uploaderService.deleteFileResources(file.id);
+          await db.purgeFileAndJobs(file.id);
+          results.push({ fileId: file.id, name: file.name, deleted: true });
+        } catch (error) {
+          results.push({ fileId: file.id, name: file.name, deleted: false, error: error.message });
+        }
+      }
+
+      res.json({ success: true, data: { total: failedFiles.length, results } });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
   }
 };
 

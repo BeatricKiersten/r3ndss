@@ -488,6 +488,37 @@ export const useMoveFile = () => {
   );
 };
 
+export const useFailedFiles = () => {
+  return useQuery(
+    ['files', null, 'failed'],
+    async () => {
+      const response = await api.get('/api/files', { params: { status: 'failed' } });
+      return response.data.data;
+    },
+    {
+      refetchInterval: false,
+      enabled: false
+    }
+  );
+};
+
+export const useDeleteAllFailedFiles = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation(
+    async () => {
+      const response = await api.post('/api/files/bulk/delete-failed');
+      return response.data.data;
+    },
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('files');
+        queryClient.invalidateQueries('dashboard');
+      }
+    }
+  );
+};
+
 // Dashboard hooks
 export const useDashboard = () => {
   return useQuery(

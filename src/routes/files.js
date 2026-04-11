@@ -3,6 +3,7 @@ const router = express.Router();
 const fileController = require('../controllers/fileController');
 
 router.get('/', fileController.list);
+router.post('/bulk/delete-failed', fileController.deleteAllFailed);
 router.get('/:id', fileController.get);
 router.get('/:id/status', fileController.getStatus);
 router.get('/:id/providers/status', fileController.getProvidersStatus);
