@@ -231,19 +231,19 @@ async function startServer() {
       console.log(`========================================`);
     });
 
-    // Validate database connectivity with timeout
-    const DB_TIMEOUT_MS = 30000; // 30 seconds max for DB connection
+    // Validate database initialization with timeout
+    const DB_TIMEOUT_MS = 30000; // 30 seconds max for DB startup work
     const dbCheckPromise = db.getProviderConfigs();
     const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Database connection timeout (30s)')), DB_TIMEOUT_MS)
+      setTimeout(() => reject(new Error('Database initialization timeout (30s)')), DB_TIMEOUT_MS)
     );
     
     try {
       await Promise.race([dbCheckPromise, timeoutPromise]);
-      console.log('[Server] Database connected successfully');
+      console.log('[Server] Database initialized successfully');
     } catch (dbError) {
-      console.error('[Server] Database connection failed:', dbError.message);
-      console.error('[Server] Please check MYSQL_URL environment variable');
+      console.error('[Server] Database initialization failed:', dbError.message);
+      console.error('[Server] Check MYSQL_URL, network/TLS access, or slow startup migrations/backfill');
       // Don't crash - let the server run but APIs will fail
     }
 

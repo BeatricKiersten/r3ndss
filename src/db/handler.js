@@ -23,6 +23,7 @@ const {
 } = require('../services/providerRegistry');
 
 const STATIC_PROVIDER_IDS = getStaticProviderIds();
+const FILE_PROVIDER_EMPTY_HISTORY = stringifyJson([]);
 
 function toInt(value, fallback = 0) {
   const parsed = Number(value);
@@ -489,14 +490,28 @@ class DatabaseHandler {
       [now]
     );
 
-    const [files] = await this.pool.query('SELECT id FROM files');
-    for (const row of files) {
-      await this._ensureFileProvidersForFile(this.pool, row.id);
-    }
+    await this._seedMissingFileProviders(now);
 
     await this._runMigrations();
 
     await this._migrateLegacyRcloneProviderRows();
+  }
+
+  async _seedMissingFileProviders(updatedAt = this._now()) {
+    for (const provider of STATIC_PROVIDER_IDS) {
+      await this.pool.query(
+        `INSERT INTO file_providers
+          (file_id, provider, status, url, remote_file_id, embed_url, error, url_history, updated_at)
+         SELECT f.id, ?, 'pending', NULL, NULL, NULL, NULL, ?, ?
+         FROM files f
+         WHERE NOT EXISTS (
+           SELECT 1
+           FROM file_providers fp
+           WHERE fp.file_id = f.id AND fp.provider = ?
+         )`,
+        [provider, FILE_PROVIDER_EMPTY_HISTORY, updatedAt, provider]
+      );
+    }
   }
 
   async _runMigrations() {
