@@ -19,6 +19,7 @@ const RETRY_DELAY = config.ffmpeg.retryDelay;
 
 // FFmpeg error codes and their meanings
 const FFMPEG_ERRORS = {
+  'No space left on device': 'Not enough disk space on the server',
   'Connection refused': 'Source server refused connection',
   '404 Not Found': 'HLS playlist or segment not found',
   '403 Forbidden': 'Access denied to HLS stream',
@@ -26,6 +27,11 @@ const FFMPEG_ERRORS = {
   'Protocol not found': 'Protocol not supported',
   'Encryption': 'Failed to decrypt stream'
 };
+
+const FFMPEG_IGNORED_WARNING_PATTERNS = [
+  /Will reconnect at .*error=End of file\.?/i,
+  /error=End of file\.?/i
+];
 
 class VideoProcessor {
   constructor(dbHandler, eventEmitter) {
@@ -480,14 +486,22 @@ class VideoProcessor {
         return `FFmpeg Error (${code}): ${value}`;
       }
     }
-    
-    // Try to extract the last error line
-    const lines = stderr.split('\n').filter(l => l.trim());
-    const lastError = lines.find(l => 
-      l.includes('Error') || l.includes('error')
-    );
-    
-    return lastError || `FFmpeg process exited with code ${code}`;
+
+    const lines = stderr.split('\n').map((line) => line.trim()).filter(Boolean);
+    const meaningfulError = [...lines].reverse().find((line) => {
+      const normalized = String(line || '').trim();
+      if (!normalized) return false;
+      if (!/(Error|error|Invalid|Failed|failed|forbidden|not found|timed out)/.test(normalized)) {
+        return false;
+      }
+      return !FFMPEG_IGNORED_WARNING_PATTERNS.some((pattern) => pattern.test(normalized));
+    });
+
+    if (meaningfulError) {
+      return meaningfulError;
+    }
+
+    return `FFmpeg process exited with code ${code}`;
   }
 
   _startJobHeartbeat(jobId) {

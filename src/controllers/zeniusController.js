@@ -594,7 +594,7 @@ function pushBatchItemError(runId, itemError) {
 function summarizeBackgroundBatchRun(run) {
   const scannedContainerCount = Number(run.scannedContainerCount || run.processedContainers || 0);
   const totalContainers = Number(run.totalContainers || 0);
-  const discoveredVideoCount = Number(run.discoveredVideoCount || (run.queuedCount || 0) + (run.skippedCount || 0));
+  const discoveredVideoCount = Number(run.discoveredVideoCount || 0);
 
   return {
     id: run.id,
@@ -1856,23 +1856,27 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
         const existingStatus = String(existingFile.status || '').trim().toLowerCase();
         console.log(`[Zenius] Pre-detail duplicate check hit for ${urlShortId}: ${outputFileName} in folder ${folderId} (${existingStatus || 'unknown'})`);
 
-        let uploadQueueResult = null;
-        let skipReason = 'File already exists';
-        if (existingStatus === 'completed') {
-          uploadQueueResult = await uploaderService.queueFileUpload(existingFile.id, existingFile.localPath, folderId, selectedProviders);
-        } else if (existingStatus === 'processing') {
-          skipReason = 'File is already being processed';
-        }
+        if (existingStatus === 'failed') {
+          console.log(`[Zenius] Retrying failed batch item ${urlShortId}: ${outputFileName} in folder ${folderId}`);
+        } else {
+          let uploadQueueResult = null;
+          let skipReason = 'File already exists';
+          if (existingStatus === 'completed') {
+            uploadQueueResult = await uploaderService.queueFileUpload(existingFile.id, existingFile.localPath, folderId, selectedProviders);
+          } else if (existingStatus === 'processing') {
+            skipReason = 'File is already being processed';
+          }
 
-        skipped.push({
-          urlShortId,
-          reason: skipReason,
-          path: chainPath,
-          fileId: existingFile.id,
-          outputName: outputFileName,
-          uploadQueue: uploadQueueResult
-        });
-        continue;
+          skipped.push({
+            urlShortId,
+            reason: skipReason,
+            path: chainPath,
+            fileId: existingFile.id,
+            outputName: outputFileName,
+            uploadQueue: uploadQueueResult
+          });
+          continue;
+        }
       }
 
       let metadataRetryError = '';
@@ -2063,12 +2067,16 @@ async function processBackgroundBatchRun(run, payload) {
       run.skippedCount += chunkResult.skipped.length;
       run.queued.push(...chunkResult.queued);
       run.skipped.push(...chunkResult.skipped);
-      run.scannedContainerCount = Number.isFinite(Number(chain.nextContainerOffset))
-        ? Number(chain.nextContainerOffset)
-        : Number(chain.totalContainers || run.scannedContainerCount || 0);
-      run.processedContainers = Number.isFinite(Number(chain.nextContainerOffset))
-        ? Number(chain.nextContainerOffset)
-        : Number(chain.totalContainers || run.processedContainers || 0);
+      run.scannedContainerCount = chain.nextContainerOffset === null
+        ? Number(chain.totalContainers || run.scannedContainerCount || 0)
+        : Number.isFinite(Number(chain.nextContainerOffset))
+          ? Number(chain.nextContainerOffset)
+          : Number(chain.totalContainers || run.scannedContainerCount || 0);
+      run.processedContainers = chain.nextContainerOffset === null
+        ? Number(chain.totalContainers || run.processedContainers || 0)
+        : Number.isFinite(Number(chain.nextContainerOffset))
+          ? Number(chain.nextContainerOffset)
+          : Number(chain.totalContainers || run.processedContainers || 0);
 
       touchBackgroundBatchRun(run);
 
