@@ -71,33 +71,6 @@ class WebhookService {
     }
   }
 
-  async sendBatchItemError(db, itemData) {
-    await this._ensureConfig(db);
-
-    if (!this._config.enabled || !this._config.url) {
-      console.log('[Webhook] Skipped item error notification: disabled or no URL configured');
-      return null;
-    }
-
-    const text = this._formatBatchItemErrorMessage(itemData);
-
-    try {
-      const response = await axios.post(this._config.url, {
-        to: this._config.to,
-        text
-      }, {
-        timeout: 15000,
-        validateStatus: () => true
-      });
-
-      console.log(`[Webhook] Batch item error notification sent: ${response.status}`);
-      return { success: true, status: response.status };
-    } catch (error) {
-      console.error('[Webhook] Batch item error notification failed:', error.message);
-      return { success: false, error: error.message };
-    }
-  }
-
   async sendTest(db) {
     await this._ensureConfig(db);
 
@@ -131,6 +104,7 @@ class WebhookService {
       skippedCount,
       downloadCompletedCount,
       downloadFailedCount,
+      itemErrors,
       error,
       chainErrors,
       sessionId,
@@ -190,33 +164,20 @@ class WebhookService {
       }
     }
 
-    return lines.join('\n');
-  }
-
-  _formatBatchItemErrorMessage(data) {
-    const {
-      batchRunId,
-      rootCgId,
-      rootCgName,
-      containerUrlShortId,
-      containerName,
-      instanceUrlShortId,
-      instanceName,
-      path,
-      stage,
-      error
-    } = data;
-
-    const lines = [];
-
-    lines.push('⚠️ *BATCH ITEM ERROR*');
-    if (batchRunId) lines.push(`• Batch ID: \`${String(batchRunId).slice(0, 12)}...\``);
-    lines.push(`• Root CG: ${rootCgName || rootCgId || '-'}`);
-    if (containerName || containerUrlShortId) lines.push(`• Container: ${containerName || '-'} (${containerUrlShortId || '-'})`);
-    if (instanceName || instanceUrlShortId) lines.push(`• Instance: ${instanceName || '-'} (${instanceUrlShortId || '-'})`);
-    if (path) lines.push(`• Path: ${String(path).slice(0, 180)}`);
-    if (stage) lines.push(`• Stage: ${stage}`);
-    lines.push(`❌ *Error:* ${String(error || 'Unknown error').slice(0, 500)}`);
+    if (Array.isArray(itemErrors) && itemErrors.length > 0) {
+      lines.push('');
+      lines.push(`⚠️ *Item Errors:* ${itemErrors.length}`);
+      itemErrors.slice(0, 5).forEach((item, i) => {
+        const containerLabel = item.containerName || item.containerUrlShortId || '-';
+        const instanceLabel = item.instanceName || item.instanceUrlShortId || '-';
+        const stageLabel = item.stage || '-';
+        const errorLabel = String(item.error || 'Unknown error').slice(0, 140);
+        lines.push(`  ${i + 1}. [${stageLabel}] ${containerLabel} > ${instanceLabel}: ${errorLabel}`);
+      });
+      if (itemErrors.length > 5) {
+        lines.push(`  ... +${itemErrors.length - 5} lainnya`);
+      }
+    }
 
     return lines.join('\n');
   }

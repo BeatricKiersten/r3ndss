@@ -550,6 +550,7 @@ function createBackgroundBatchRun({ rootCgId, targetCgSelector, baseFolderInput,
     downloadFailedCount: 0,
     queued: [],
     skipped: [],
+    itemErrors: [],
     chainErrors: [],
     hasMoreContainers: true,
     nextContainerOffset: 0,
@@ -562,6 +563,32 @@ function touchBackgroundBatchRun(run) {
   const now = Date.now();
   run.updatedAt = now;
   run.expiresAt = now + clampPositiveInt(BACKGROUND_BATCH_RUN_TTL_MS, 21600000);
+}
+
+function pushBatchItemError(runId, itemError) {
+  if (!runId || !backgroundBatchRuns.has(runId)) {
+    return;
+  }
+
+  const run = backgroundBatchRuns.get(runId);
+  if (!Array.isArray(run.itemErrors)) {
+    run.itemErrors = [];
+  }
+
+  run.itemErrors.push({
+    batchRunId: runId,
+    rootCgId: itemError.rootCgId || run.rootCgId,
+    rootCgName: itemError.rootCgName || run.rootCgName,
+    containerUrlShortId: itemError.containerUrlShortId || null,
+    containerName: itemError.containerName || null,
+    instanceUrlShortId: itemError.instanceUrlShortId || null,
+    instanceName: itemError.instanceName || null,
+    path: itemError.path || '',
+    stage: itemError.stage || null,
+    error: itemError.error || 'Unknown error'
+  });
+
+  touchBackgroundBatchRun(run);
 }
 
 function summarizeBackgroundBatchRun(run) {
@@ -1253,7 +1280,7 @@ async function getVideoInstanceDetails(urlShortId, options) {
       return type === 'vidio' || type === 'video';
     })
     .map((item) => ({
-      urlShortId: String(item?.['url-short-id'] || '').trim(),
+      urlShortId: normalizeNumericShortId(item?.['url-short-id']),
       name: String(item?.name || item?.title || item?.['canonical-name'] || '').trim() || null,
       duration: item?.duration || item?.['duration-seconds'] || item?.['video-duration'] || null,
       type: String(item?.type || '').trim()
@@ -1850,7 +1877,6 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
 
       let metadataRetryError = '';
       let videoUrl = String(metadata['video-url'] || '').trim();
-      let detailWebhookSent = false;
 
       if (!videoUrl) {
         try {
@@ -1863,8 +1889,7 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
           videoUrl = String(metadata['video-url'] || '').trim();
         } catch (error) {
           metadataRetryError = error.message;
-          detailWebhookSent = true;
-          await webhookService.sendBatchItemError(db, {
+          pushBatchItemError(runId, {
             batchRunId: runId,
             rootCgId: chain.rootCgId,
             rootCgName: chain.rootCgName,
@@ -1875,16 +1900,14 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
             path: instance.path || container.path || '',
             stage: 'instance-details',
             error: error.message
-          }).catch((webhookError) => {
-            console.error('[Webhook] Batch item error notification failed:', webhookError.message);
           });
         }
       }
 
       if (!videoUrl) {
         const detailErrorMessage = metadataRetryError || instance.metadataError || 'Missing video-url in instance-details';
-        if (!detailWebhookSent) {
-          await webhookService.sendBatchItemError(db, {
+        if (!metadataRetryError) {
+          pushBatchItemError(runId, {
             batchRunId: runId,
             rootCgId: chain.rootCgId,
             rootCgName: chain.rootCgName,
@@ -1895,8 +1918,6 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
             path: instance.path || container.path || '',
             stage: 'instance-details',
             error: detailErrorMessage
-          }).catch((webhookError) => {
-            console.error('[Webhook] Batch item error notification failed:', webhookError.message);
           });
         }
 
@@ -2153,6 +2174,7 @@ async function processBackgroundBatchRun(run, payload) {
         discoveredVideoCount: run.discoveredVideoCount,
         downloadCompletedCount: run.downloadCompletedCount || 0,
         downloadFailedCount: run.downloadFailedCount || 0,
+        itemErrors: run.itemErrors || [],
         error: run.error,
         chainErrors: run.chainErrors,
         startedAt: run.startedAt,
