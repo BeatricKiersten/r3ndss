@@ -51,6 +51,10 @@ const websocketHandler = {
       'download:completed',
       'download:failed',
       'batch:progress',
+      'zenius:batch:started',
+      'zenius:batch:progress',
+      'zenius:batch:completed',
+      'zenius:batch:failed',
       'provider:checked',
       'provider:checked:bulk',
       'system:checked'
@@ -60,7 +64,7 @@ const websocketHandler = {
       emitter.on(event, (data) => {
         this.broadcast(event, data);
 
-        if (['job:completed', 'job:failed', 'upload:completed', 'upload:failed', 'download:completed', 'download:failed', 'batch:progress'].includes(event)) {
+        if (['job:completed', 'job:failed', 'upload:completed', 'upload:failed', 'download:completed', 'download:failed'].includes(event)) {
           setTimeout(() => {
             clients.forEach(client => sendDashboardData(client));
           }, 500);
@@ -70,7 +74,7 @@ const websocketHandler = {
 
     setInterval(() => {
       clients.forEach(client => sendDashboardData(client));
-    }, 5000);
+    }, 15000);
   },
 
   getClientCount() {

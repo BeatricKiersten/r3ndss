@@ -57,6 +57,7 @@ import {
 import { getProviderConfig } from '../config/providers';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { toast } from '../store/toastStore';
+import { useWebSocketStore } from '../store/websocketStore';
 
 const HEADERS_STORAGE_KEY = 'zenius-headers-raw';
 const PROVIDERS_STORAGE_KEY = 'zenius-selected-providers';
@@ -704,7 +705,12 @@ export default function ZeniusPage() {
   const { data: webhookConfig } = useWebhookConfig();
   const updateWebhookMutation = useUpdateWebhookConfig();
   const testWebhookMutation = useTestWebhook();
-  const { data: queueStatus } = useZeniusQueueStatus();
+  const isWsConnected = useWebSocketStore((state) => state.isConnected);
+  const { data: queueStatus } = useZeniusQueueStatus({
+    enabled: true,
+    refetchInterval: isWsConnected ? 20000 : 5000,
+    refetchIntervalInBackground: !isWsConnected
+  });
   const { data: providers } = useProviders();
   const { data: folderTree } = useFolders();
 

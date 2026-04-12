@@ -5,7 +5,7 @@ const pLimit = require('p-limit');
 const { EventEmitter } = require('events');
 
 const config = require('../config');
-const { db, videoProcessor, uploaderService, eventEmitter } = require('../services/runtime');
+const { db, videoProcessor, uploaderService, eventEmitter, cleanupService } = require('../services/runtime');
 const webhookService = require('../services/webhookService');
 
 const ZENIUS_BASE_URL = 'https://www.zenius.net';
@@ -18,6 +18,8 @@ const UPSTREAM_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_UPSTREAM_MAX_RET
 const UPSTREAM_RETRY_BASE_DELAY_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_RETRY_BASE_DELAY_MS || '500', 10);
 const BATCH_CG_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CG_FETCH_CONCURRENCY || '4', 10);
 const BATCH_CONTAINER_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CONTAINER_FETCH_CONCURRENCY || '4', 10);
+const BATCH_DETAIL_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_DETAIL_FETCH_CONCURRENCY || '4', 10);
+const BATCH_INSTANCE_METADATA_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_INSTANCE_METADATA_CONCURRENCY || '6', 10);
 const MAX_BATCH_ERRORS = Number.parseInt(process.env.ZENIUS_MAX_BATCH_ERRORS || '100', 10);
 const DEFAULT_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_CHUNK_SIZE || '8', 10);
 const MAX_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_MAX_CHUNK_SIZE || '20', 10);
@@ -31,10 +33,45 @@ const BACKGROUND_BATCH_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BACKGROUN
 const BACKGROUND_BATCH_RUN_TTL_MS = Number.parseInt(process.env.ZENIUS_BACKGROUND_BATCH_RUN_TTL_MS || '21600000', 10);
 const BACKGROUND_BATCH_KEEPALIVE_INTERVAL_MS = Number.parseInt(process.env.ZENIUS_BACKGROUND_BATCH_KEEPALIVE_INTERVAL_MS || '20000', 10);
 const BACKGROUND_BATCH_KEEPALIVE_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_BACKGROUND_BATCH_KEEPALIVE_TIMEOUT_MS || '10000', 10);
+// Max iterations for background batch loop (configurable to prevent infinite loops)
+const BACKGROUND_BATCH_MAX_ITERATIONS = Number.parseInt(process.env.ZENIUS_BACKGROUND_BATCH_MAX_ITERATIONS || '120', 10);
+const INSTANCE_METADATA_CACHE_TTL_MS = Number.parseInt(process.env.ZENIUS_INSTANCE_METADATA_CACHE_TTL_MS || '1800000', 10);
+const BATCH_METADATA_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_BATCH_METADATA_TIMEOUT_MS || '15000', 10);
+const BATCH_METADATA_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_BATCH_METADATA_MAX_RETRIES || '4', 10);
+// Caps for in-memory arrays to prevent unbounded memory growth
+const MAX_QUEUED_ITEMS_IN_MEMORY = Number.parseInt(process.env.ZENIUS_MAX_QUEUED_ITEMS_IN_MEMORY || '500', 10);
+const MAX_SKIPPED_ITEMS_IN_MEMORY = Number.parseInt(process.env.ZENIUS_MAX_SKIPPED_ITEMS_IN_MEMORY || '500', 10);
+const MAX_ITEM_ERRORS_IN_MEMORY = Number.parseInt(process.env.ZENIUS_MAX_ITEM_ERRORS_IN_MEMORY || '200', 10);
 const batchChainSessions = new Map();
 const backgroundBatchRuns = new Map();
 let backgroundBatchKeepaliveTimer = null;
 let backgroundBatchKeepaliveUrl = String(process.env.ZENIUS_BATCH_KEEPALIVE_URL || '').trim();
+
+// DB write retry config
+const DB_WRITE_RETRY_ATTEMPTS = Number.parseInt(process.env.ZENIUS_DB_WRITE_RETRY_ATTEMPTS || '2', 10);
+const DB_WRITE_RETRY_DELAY_MS = Number.parseInt(process.env.ZENIUS_DB_WRITE_RETRY_DELAY_MS || '500', 10);
+
+/**
+ * Retry a DB write operation on transient failure.
+ * Returns the result of fn() on success, null on final failure (never throws).
+ */
+async function withDbRetry(fn, label = 'db-write') {
+  let lastError;
+  for (let attempt = 1; attempt <= DB_WRITE_RETRY_ATTEMPTS + 1; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt <= DB_WRITE_RETRY_ATTEMPTS) {
+        const delay = DB_WRITE_RETRY_DELAY_MS * attempt;
+        console.warn(`[Zenius] ${label} attempt ${attempt} failed, retrying in ${delay}ms: ${error.message}`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+  console.error(`[Zenius] ${label} failed after ${DB_WRITE_RETRY_ATTEMPTS + 1} attempts: ${lastError?.message}`);
+  return null;
+}
 
 // Download concurrency control
 const DEFAULT_MAX_CONCURRENT_DOWNLOADS = Number.parseInt(process.env.ZENIUS_MAX_CONCURRENT_DOWNLOADS || '10', 10);
@@ -53,7 +90,7 @@ class DownloadQueue {
   get activeCount() { return this._active.size; }
   get queuedCount() { return this._queue.length; }
   get isProcessing() { return this._processing; }
-  get activeTasks() { return Array.from(this._active.values()).map((t) => ({ id: t.id, urlShortId: t.urlShortId, outputName: t.outputName, startTime: t.startTime })); }
+  get activeTasks() { return Array.from(this._active.values()).map((t) => ({ id: t.id, urlShortId: t.urlShortId, outputName: t.outputName, fileId: t.fileId || null, jobId: t.jobId || null, startTime: t.startTime })); }
   get queuedTasks() { return this._queue.map((t) => ({ urlShortId: t.urlShortId, outputName: t.outputName })); }
 
   setMaxConcurrent(value) {
@@ -143,6 +180,8 @@ class DownloadQueue {
       });
 
       fileId = result.fileId;
+      task.fileId = result.fileId || null;
+      task.jobId = result.jobId || null;
 
       broadcastDownloadProgress({
         urlShortId,
@@ -492,6 +531,8 @@ function createBatchChainSession({ rootCgId, targetCgSelector, parentContainerNa
     traversal: [],
     containerByShortId: new Map(),
     containerVideoInstancesByShortId: new Map(),
+    instanceMetadataByShortId: new Map(),
+    instanceMetadataPromisesByShortId: new Map(),
     cgPathById: new Map([[rootCgId, []]]),
     errors: []
   };
@@ -549,8 +590,11 @@ function createBackgroundBatchRun({ rootCgId, targetCgSelector, baseFolderInput,
     downloadCompletedCount: 0,
     downloadFailedCount: 0,
     queued: [],
+    queuedOverflow: 0,
     skipped: [],
+    skippedOverflow: 0,
     itemErrors: [],
+    _itemErrorsOverflow: 0,
     chainErrors: [],
     hasMoreContainers: true,
     nextContainerOffset: 0,
@@ -575,6 +619,13 @@ function pushBatchItemError(runId, itemError) {
     run.itemErrors = [];
   }
 
+  // Cap itemErrors to prevent unbounded memory growth
+  if (run.itemErrors.length >= MAX_ITEM_ERRORS_IN_MEMORY) {
+    if (!run._itemErrorsOverflow) run._itemErrorsOverflow = 0;
+    run._itemErrorsOverflow += 1;
+    return;
+  }
+
   run.itemErrors.push({
     batchRunId: runId,
     rootCgId: itemError.rootCgId || run.rootCgId,
@@ -589,6 +640,19 @@ function pushBatchItemError(runId, itemError) {
   });
 
   touchBackgroundBatchRun(run);
+}
+
+function pushCappedItem(target, item, maxItems, overflowKey, owner) {
+  if (!Array.isArray(target) || !owner) {
+    return;
+  }
+
+  if (target.length < maxItems) {
+    target.push(item);
+    return;
+  }
+
+  owner[overflowKey] = Number(owner[overflowKey] || 0) + 1;
 }
 
 function summarizeBackgroundBatchRun(run) {
@@ -613,6 +677,12 @@ function summarizeBackgroundBatchRun(run) {
     discoveredVideoCount,
     queuedCount: run.queuedCount,
     skippedCount: run.skippedCount,
+    queuedItemsTracked: Array.isArray(run.queued) ? run.queued.length : 0,
+    skippedItemsTracked: Array.isArray(run.skipped) ? run.skipped.length : 0,
+    queuedItemsOverflow: Number(run.queuedOverflow || 0),
+    skippedItemsOverflow: Number(run.skippedOverflow || 0),
+    itemErrorsTracked: Array.isArray(run.itemErrors) ? run.itemErrors.length : 0,
+    itemErrorsOverflow: Number(run._itemErrorsOverflow || 0),
     downloadCompletedCount: run.downloadCompletedCount || 0,
     downloadFailedCount: run.downloadFailedCount || 0,
     hasMoreContainers: run.hasMoreContainers,
@@ -1307,6 +1377,45 @@ async function fetchInstanceMetadata(urlShortId, options) {
   };
 }
 
+async function getCachedInstanceMetadata(urlShortId, options, session = null) {
+  const normalizedUrlShortId = normalizeNumericShortId(urlShortId);
+  if (!normalizedUrlShortId || !session) {
+    return fetchInstanceMetadata(urlShortId, options);
+  }
+
+  if (session.instanceMetadataByShortId?.has(normalizedUrlShortId)) {
+    const cachedEntry = session.instanceMetadataByShortId.get(normalizedUrlShortId);
+    if (cachedEntry && typeof cachedEntry === 'object' && cachedEntry.cachedAt) {
+      if ((Date.now() - cachedEntry.cachedAt) <= INSTANCE_METADATA_CACHE_TTL_MS) {
+        return cachedEntry.value;
+      }
+      session.instanceMetadataByShortId.delete(normalizedUrlShortId);
+    } else if (cachedEntry) {
+      // Backward-compatible with old cache shape
+      return cachedEntry;
+    }
+  }
+
+  if (session.instanceMetadataPromisesByShortId?.has(normalizedUrlShortId)) {
+    return session.instanceMetadataPromisesByShortId.get(normalizedUrlShortId);
+  }
+
+  const metadataPromise = fetchInstanceMetadata(normalizedUrlShortId, options)
+    .then((metadata) => {
+      session.instanceMetadataByShortId.set(normalizedUrlShortId, {
+        value: metadata,
+        cachedAt: Date.now()
+      });
+      return metadata;
+    })
+    .finally(() => {
+      session.instanceMetadataPromisesByShortId?.delete(normalizedUrlShortId);
+    });
+
+  session.instanceMetadataPromisesByShortId?.set(normalizedUrlShortId, metadataPromise);
+  return metadataPromise;
+}
+
 async function initializeBatchChainSessionDiscovery(session, options) {
   if (session.discoveryInitialized) {
     return;
@@ -1635,6 +1744,217 @@ async function buildBatchContainerDetail({ container, options, session, deadline
   };
 }
 
+async function resolveFolderIdWithCache(folderCache, folderInput) {
+  const cacheKey = String(folderInput || 'root');
+  if (folderCache.has(cacheKey)) {
+    return folderCache.get(cacheKey);
+  }
+
+  const pendingFolderId = resolveFolderId(cacheKey).catch((error) => {
+    folderCache.delete(cacheKey);
+    throw error;
+  });
+
+  folderCache.set(cacheKey, pendingFolderId);
+  return pendingFolderId;
+}
+
+async function queueBatchDownloadItem({
+  chain,
+  container,
+  instance,
+  requestContext,
+  refererPath,
+  baseFolderInput,
+  selectedProviders,
+  runId,
+  session,
+  folderCache,
+  cancelled = () => false
+}) {
+  if (cancelled()) {
+    return { counted: false, cancelled: true };
+  }
+
+  let metadata = instance.metadata && typeof instance.metadata === 'object'
+    ? { ...instance.metadata }
+    : {};
+  const rawUrlShortId = instance.urlShortId || metadata.urlShortId;
+
+  if (!rawUrlShortId || !/^\d+$/.test(String(rawUrlShortId).trim())) {
+    return {
+      counted: true,
+      skipped: {
+        urlShortId: rawUrlShortId || null,
+        reason: 'Invalid or missing urlShortId',
+        path: instance.path || container.path || ''
+      }
+    };
+  }
+
+  const urlShortId = normalizeShortId(rawUrlShortId);
+  const outputName = sanitizeOutputName(
+    instance.outputName || instance.name || `zenius-${urlShortId}`,
+    `zenius-${urlShortId}`
+  );
+  const chainPath = String(instance.path || container.path || '').trim();
+
+  if (cancelled()) {
+    return { counted: false, cancelled: true };
+  }
+
+  const finalFolderInput = joinFolderPaths(baseFolderInput, chainPath) || 'root';
+  const folderId = await resolveFolderIdWithCache(folderCache, finalFolderInput);
+  const outputFileName = `${outputName}.mp4`;
+  const existingFile = await db.findFileByNameInFolder(folderId, outputFileName);
+
+  if (existingFile) {
+    const existingStatus = String(existingFile.status || '').trim().toLowerCase();
+    console.log(`[Zenius] Pre-detail duplicate check hit for ${urlShortId}: ${outputFileName} in folder ${folderId} (${existingStatus || 'unknown'})`);
+
+    if (existingStatus === 'failed') {
+      console.log(`[Zenius] Retrying failed batch item ${urlShortId}: ${outputFileName} in folder ${folderId}`);
+    } else {
+      let uploadQueueResult = null;
+      let skipReason = 'File already exists';
+      if (existingStatus === 'completed') {
+        uploadQueueResult = await uploaderService.queueFileUpload(existingFile.id, existingFile.localPath, folderId, selectedProviders);
+      } else if (existingStatus === 'processing') {
+        skipReason = 'File is already being processed';
+      }
+
+      return {
+        counted: true,
+        skipped: {
+          urlShortId,
+          reason: skipReason,
+          path: chainPath,
+          fileId: existingFile.id,
+          outputName: outputFileName,
+          uploadQueue: uploadQueueResult
+        }
+      };
+    }
+  }
+
+  let metadataRetryError = '';
+  let videoUrl = String(metadata['video-url'] || '').trim();
+
+  if (!videoUrl) {
+    if (cancelled()) {
+      return { counted: false, cancelled: true };
+    }
+
+    try {
+      metadata = await getCachedInstanceMetadata(urlShortId, {
+        requestContext,
+        refererPath,
+        timeoutMs: clampPositiveInt(BATCH_METADATA_TIMEOUT_MS, 15000),
+        maxRetries: clampPositiveInt(BATCH_METADATA_MAX_RETRIES, 4)
+      }, session);
+      videoUrl = String(metadata['video-url'] || '').trim();
+    } catch (error) {
+      metadataRetryError = error.message;
+      pushBatchItemError(runId, {
+        batchRunId: runId,
+        rootCgId: chain.rootCgId,
+        rootCgName: chain.rootCgName,
+        containerUrlShortId: container.containerUrlShortId,
+        containerName: container.containerName,
+        instanceUrlShortId: urlShortId,
+        instanceName: instance.name || metadata.name || null,
+        path: instance.path || container.path || '',
+        stage: 'instance-details',
+        error: error.message
+      });
+    }
+  }
+
+  if (!videoUrl) {
+    const detailErrorMessage = metadataRetryError || instance.metadataError || 'Missing video-url in instance-details';
+    if (!metadataRetryError) {
+      pushBatchItemError(runId, {
+        batchRunId: runId,
+        rootCgId: chain.rootCgId,
+        rootCgName: chain.rootCgName,
+        containerUrlShortId: container.containerUrlShortId,
+        containerName: container.containerName,
+        instanceUrlShortId: urlShortId,
+        instanceName: instance.name || metadata.name || null,
+        path: instance.path || container.path || '',
+        stage: 'instance-details',
+        error: detailErrorMessage
+      });
+    }
+
+    return {
+      counted: true,
+      skipped: {
+        urlShortId,
+        reason: detailErrorMessage,
+        path: instance.path || container.path || ''
+      }
+    };
+  }
+
+  const ffmpegHeaders = {
+    'User-Agent': requestContext.userAgent,
+    Referer: resolveReferer(
+      urlShortId,
+      refererPath,
+      metadata['path-url'] || container.containerPathUrl || ''
+    )
+  };
+
+  if (requestContext.cookieHeader) {
+    ffmpegHeaders.Cookie = requestContext.cookieHeader;
+  }
+
+  if (cancelled()) {
+    return { counted: false, cancelled: true };
+  }
+
+  queueDownload({
+    urlShortId,
+    videoUrl,
+    folderId,
+    outputName,
+    ffmpegHeaders,
+    selectedProviders
+  }).then((result) => {
+    if (result.cancelled) {
+      console.log(`[Zenius] Batch download ${urlShortId} was cancelled`);
+    } else {
+      console.log(`[Zenius] Batch download ${urlShortId} completed successfully`);
+      if (runId && backgroundBatchRuns.has(runId)) {
+        const run = backgroundBatchRuns.get(runId);
+        run.downloadCompletedCount = (run.downloadCompletedCount || 0) + 1;
+        touchBackgroundBatchRun(run);
+      }
+    }
+  }).catch((error) => {
+    console.error(`[Zenius] Batch download pipeline failed for ${urlShortId}:`, error.message);
+    if (runId && backgroundBatchRuns.has(runId)) {
+      const run = backgroundBatchRuns.get(runId);
+      run.downloadFailedCount = (run.downloadFailedCount || 0) + 1;
+      touchBackgroundBatchRun(run);
+    }
+  });
+
+  return {
+    counted: true,
+    queued: {
+      urlShortId,
+      name: metadata.name || instance.name || null,
+      outputName: `${outputName}.mp4`,
+      path: chainPath,
+      folderInput: finalFolderInput,
+      folderId,
+      videoUrl
+    }
+  };
+}
+
 async function buildBatchChain({
   rootCgId,
   targetCgSelector,
@@ -1697,22 +2017,28 @@ async function buildBatchChain({
   const pathParentName = resolveBatchParentContainerName(session);
 
   const details = [];
+  const detailConcurrency = clampPositiveInt(BATCH_DETAIL_FETCH_CONCURRENCY, 4);
+  const detailLimit = pLimit(detailConcurrency);
+  const pendingContainers = [];
   let cursor = normalizedOffset;
   while (
     cursor < totalContainers
-    && details.length < normalizedLimit
+    && pendingContainers.length < normalizedLimit
     && !shouldStopForDeadline(deadlineAt, 1600)
   ) {
-    const container = mergedContainers[cursor];
-    const detail = await buildBatchContainerDetail({
+    pendingContainers.push(mergedContainers[cursor]);
+    cursor += 1;
+  }
+
+  const resolvedDetails = await Promise.all(
+    pendingContainers.map((container) => detailLimit(() => buildBatchContainerDetail({
       container,
       options,
       session,
       deadlineAt
-    });
-    details.push(detail);
-    cursor += 1;
-  }
+    })))
+  );
+  details.push(...resolvedDetails);
 
   const hasMoreKnownContainers = cursor < totalContainers;
   const hasMoreContainers = hasMoreKnownContainers || !session.discoveryDone;
@@ -1815,173 +2141,54 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
   const queued = [];
   const skipped = [];
   let totalInstances = 0;
+  const session = chain.sessionId ? batchChainSessions.get(chain.sessionId) || null : null;
+  const folderCache = new Map();
+  const metadataConcurrency = clampPositiveInt(BATCH_INSTANCE_METADATA_CONCURRENCY, 6);
+  const metadataLimit = pLimit(metadataConcurrency);
 
   for (const container of chain.containerDetails || []) {
     if (cancelled()) {
       break;
     }
 
-    for (const instance of container.videoInstances || []) {
-      totalInstances += 1;
+    const containerResults = await Promise.all(
+      (container.videoInstances || []).map((instance) => metadataLimit(async () => {
+        if (cancelled()) {
+          return { counted: false };
+        }
+
+        return queueBatchDownloadItem({
+          chain,
+          container,
+          instance,
+          requestContext,
+          refererPath,
+          baseFolderInput,
+          selectedProviders,
+          runId,
+          session,
+          folderCache,
+          cancelled
+        });
+      }))
+    );
+
+    for (const result of containerResults) {
       if (cancelled()) {
         break;
       }
 
-      let metadata = instance.metadata && typeof instance.metadata === 'object'
-        ? { ...instance.metadata }
-        : {};
-      const rawUrlShortId = instance.urlShortId || metadata.urlShortId;
-
-      if (!rawUrlShortId || !/^\d+$/.test(String(rawUrlShortId).trim())) {
-        skipped.push({
-          urlShortId: rawUrlShortId || null,
-          reason: 'Invalid or missing urlShortId',
-          path: instance.path || container.path || ''
-        });
+      if (!result?.counted) {
         continue;
       }
 
-      const urlShortId = normalizeShortId(rawUrlShortId);
-      const outputName = sanitizeOutputName(
-        instance.outputName || instance.name || `zenius-${urlShortId}`,
-        `zenius-${urlShortId}`
-      );
-      const chainPath = String(instance.path || container.path || '').trim();
-      const finalFolderInput = joinFolderPaths(baseFolderInput, chainPath) || 'root';
-      const folderId = await resolveFolderId(finalFolderInput);
-      const outputFileName = `${outputName}.mp4`;
-      const existingFile = await db.findFileByNameInFolder(folderId, outputFileName);
-
-      if (existingFile) {
-        const existingStatus = String(existingFile.status || '').trim().toLowerCase();
-        console.log(`[Zenius] Pre-detail duplicate check hit for ${urlShortId}: ${outputFileName} in folder ${folderId} (${existingStatus || 'unknown'})`);
-
-        if (existingStatus === 'failed') {
-          console.log(`[Zenius] Retrying failed batch item ${urlShortId}: ${outputFileName} in folder ${folderId}`);
-        } else {
-          let uploadQueueResult = null;
-          let skipReason = 'File already exists';
-          if (existingStatus === 'completed') {
-            uploadQueueResult = await uploaderService.queueFileUpload(existingFile.id, existingFile.localPath, folderId, selectedProviders);
-          } else if (existingStatus === 'processing') {
-            skipReason = 'File is already being processed';
-          }
-
-          skipped.push({
-            urlShortId,
-            reason: skipReason,
-            path: chainPath,
-            fileId: existingFile.id,
-            outputName: outputFileName,
-            uploadQueue: uploadQueueResult
-          });
-          continue;
-        }
+      totalInstances += 1;
+      if (result.queued) {
+        queued.push(result.queued);
       }
-
-      let metadataRetryError = '';
-      let videoUrl = String(metadata['video-url'] || '').trim();
-
-      if (!videoUrl) {
-        try {
-          metadata = await fetchInstanceMetadata(urlShortId, {
-            requestContext,
-            refererPath,
-            timeoutMs: clampPositiveInt(UPSTREAM_TIMEOUT_MS, 12000),
-            maxRetries: clampPositiveInt(UPSTREAM_MAX_RETRIES, 3)
-          });
-          videoUrl = String(metadata['video-url'] || '').trim();
-        } catch (error) {
-          metadataRetryError = error.message;
-          pushBatchItemError(runId, {
-            batchRunId: runId,
-            rootCgId: chain.rootCgId,
-            rootCgName: chain.rootCgName,
-            containerUrlShortId: container.containerUrlShortId,
-            containerName: container.containerName,
-            instanceUrlShortId: urlShortId,
-            instanceName: instance.name || metadata.name || null,
-            path: instance.path || container.path || '',
-            stage: 'instance-details',
-            error: error.message
-          });
-        }
+      if (result.skipped) {
+        skipped.push(result.skipped);
       }
-
-      if (!videoUrl) {
-        const detailErrorMessage = metadataRetryError || instance.metadataError || 'Missing video-url in instance-details';
-        if (!metadataRetryError) {
-          pushBatchItemError(runId, {
-            batchRunId: runId,
-            rootCgId: chain.rootCgId,
-            rootCgName: chain.rootCgName,
-            containerUrlShortId: container.containerUrlShortId,
-            containerName: container.containerName,
-            instanceUrlShortId: urlShortId,
-            instanceName: instance.name || metadata.name || null,
-            path: instance.path || container.path || '',
-            stage: 'instance-details',
-            error: detailErrorMessage
-          });
-        }
-
-        skipped.push({
-          urlShortId,
-          reason: detailErrorMessage,
-          path: instance.path || container.path || ''
-        });
-        continue;
-      }
-
-      const ffmpegHeaders = {
-        'User-Agent': requestContext.userAgent,
-        Referer: resolveReferer(
-          urlShortId,
-          refererPath,
-          metadata['path-url'] || container.containerPathUrl || ''
-        )
-      };
-
-      if (requestContext.cookieHeader) {
-        ffmpegHeaders.Cookie = requestContext.cookieHeader;
-      }
-
-      queueDownload({
-        urlShortId,
-        videoUrl,
-        folderId,
-        outputName,
-        ffmpegHeaders,
-        selectedProviders
-      }).then((result) => {
-        if (result.cancelled) {
-          console.log(`[Zenius] Batch download ${urlShortId} was cancelled`);
-        } else {
-          console.log(`[Zenius] Batch download ${urlShortId} completed successfully`);
-          if (runId && backgroundBatchRuns.has(runId)) {
-            const run = backgroundBatchRuns.get(runId);
-            run.downloadCompletedCount = (run.downloadCompletedCount || 0) + 1;
-            touchBackgroundBatchRun(run);
-          }
-        }
-      }).catch((error) => {
-        console.error(`[Zenius] Batch download pipeline failed for ${urlShortId}:`, error.message);
-        if (runId && backgroundBatchRuns.has(runId)) {
-          const run = backgroundBatchRuns.get(runId);
-          run.downloadFailedCount = (run.downloadFailedCount || 0) + 1;
-          touchBackgroundBatchRun(run);
-        }
-      });
-
-      queued.push({
-        urlShortId,
-        name: metadata.name || instance.name || null,
-        outputName: `${outputName}.mp4`,
-        path: chainPath,
-        folderInput: finalFolderInput,
-        folderId,
-        videoUrl
-      });
     }
   }
 
@@ -2012,7 +2219,35 @@ async function processBackgroundBatchRun(run, payload) {
       expiresAt: run.expiresAt
     });
   } catch (dbError) {
-    console.warn(`[Zenius] Failed to persist batch session to DB: ${dbError.message}`);
+    console.warn(`[Zenius] Failed to persist batch session to DB (will retry in background): ${dbError.message}`);
+    // Schedule a retry after a brief delay — don't block the batch from starting
+    setTimeout(async () => {
+      try {
+        dbSession = await db.createBatchSession({
+          id: run.id,
+          runId: run.id,
+          rootCgId: payload.rootCgId || DEFAULT_BATCH_ROOT_CGROUP_ID,
+          rootCgName: null,
+          targetCgSelector: payload.targetCgSelector || null,
+          parentContainerName: payload.parentContainerName || '',
+          status: run.status === 'running' ? 'running' : run.status,
+          totalContainers: run.totalContainers || 0,
+          processedContainers: run.processedContainers || 0,
+          queuedCount: run.queuedCount || 0,
+          skippedCount: run.skippedCount || 0,
+          nextContainerOffset: run.nextContainerOffset || 0,
+          hasMore: run.hasMoreContainers !== false,
+          sessionData: {},
+          queuedItems: [],
+          skippedItems: [],
+          chainErrors: run.chainErrors || [],
+          expiresAt: run.expiresAt
+        });
+        console.log(`[Zenius] Batch session ${run.id} persisted to DB on retry`);
+      } catch (retryErr) {
+        console.error(`[Zenius] Batch session ${run.id} DB persist retry also failed: ${retryErr.message}`);
+      }
+    }, 3000);
   }
 
   try {
@@ -2027,8 +2262,8 @@ async function processBackgroundBatchRun(run, payload) {
       }
 
       iteration += 1;
-      if (iteration > 120) {
-        throw new Error('Background batch iteration limit reached');
+      if (iteration > BACKGROUND_BATCH_MAX_ITERATIONS) {
+        throw new Error(`Background batch iteration limit reached (${BACKGROUND_BATCH_MAX_ITERATIONS}). Increase ZENIUS_BACKGROUND_BATCH_MAX_ITERATIONS if needed.`);
       }
 
       const chain = await buildBatchChain({
@@ -2065,8 +2300,12 @@ async function processBackgroundBatchRun(run, payload) {
       run.discoveredVideoCount += Number(chunkResult.totalInstances || 0);
       run.queuedCount += chunkResult.queued.length;
       run.skippedCount += chunkResult.skipped.length;
-      run.queued.push(...chunkResult.queued);
-      run.skipped.push(...chunkResult.skipped);
+      for (const queuedItem of chunkResult.queued) {
+        pushCappedItem(run.queued, queuedItem, MAX_QUEUED_ITEMS_IN_MEMORY, 'queuedOverflow', run);
+      }
+      for (const skippedItem of chunkResult.skipped) {
+        pushCappedItem(run.skipped, skippedItem, MAX_SKIPPED_ITEMS_IN_MEMORY, 'skippedOverflow', run);
+      }
       run.scannedContainerCount = chain.nextContainerOffset === null
         ? Number(chain.totalContainers || run.scannedContainerCount || 0)
         : Number.isFinite(Number(chain.nextContainerOffset))
@@ -2081,8 +2320,8 @@ async function processBackgroundBatchRun(run, payload) {
       touchBackgroundBatchRun(run);
 
       if (dbSession) {
-        try {
-          dbSession = await db.updateBatchSession(run.id, {
+        const updatedSession = await withDbRetry(
+          () => db.updateBatchSession(run.id, {
             status: 'running',
             rootCgName: run.rootCgName,
             parentContainerName: run.parentContainerName,
@@ -2092,14 +2331,23 @@ async function processBackgroundBatchRun(run, payload) {
             skippedCount: run.skippedCount,
             nextContainerOffset: run.nextContainerOffset,
             hasMore: run.hasMoreContainers,
+            // Persist only the capped in-memory sample, not the full logical count.
             queuedItems: run.queued,
             skippedItems: run.skipped,
             chainErrors: run.chainErrors,
-            sessionData: { sessionId: currentSessionId }
-          });
-        } catch (dbErr) {
-          console.warn(`[Zenius] Failed to update batch session in DB: ${dbErr.message}`);
-        }
+            sessionData: {
+              sessionId: currentSessionId,
+              queuedItemsTracked: Array.isArray(run.queued) ? run.queued.length : 0,
+              skippedItemsTracked: Array.isArray(run.skipped) ? run.skipped.length : 0,
+              queuedItemsOverflow: Number(run.queuedOverflow || 0),
+              skippedItemsOverflow: Number(run.skippedOverflow || 0),
+              itemErrorsTracked: Array.isArray(run.itemErrors) ? run.itemErrors.length : 0,
+              itemErrorsOverflow: Number(run._itemErrorsOverflow || 0)
+            }
+          }),
+          `batch-session-update[${run.id}]`
+        );
+        if (updatedSession) dbSession = updatedSession;
       }
 
       eventEmitter.emit('batch:progress', {
@@ -2131,6 +2379,21 @@ async function processBackgroundBatchRun(run, payload) {
         sessionId: currentSessionId
       });
 
+      eventEmitter.emit('zenius:batch:progress', {
+        batchRunId: run.id,
+        status: run.status,
+        sessionId: currentSessionId,
+        scannedContainerCount: run.scannedContainerCount,
+        processedContainers: run.processedContainers,
+        totalContainers: run.totalContainers,
+        discoveredVideoCount: run.discoveredVideoCount,
+        queuedCount: run.queuedCount,
+        skippedCount: run.skippedCount,
+        downloadCompletedCount: run.downloadCompletedCount || 0,
+        downloadFailedCount: run.downloadFailedCount || 0,
+        hasMore: run.hasMoreContainers
+      });
+
       hasMore = Boolean(chain.hasMoreContainers);
       nextOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : 0;
     }
@@ -2148,8 +2411,8 @@ async function processBackgroundBatchRun(run, payload) {
     console.error(`[Zenius] Background batch run ${run.id} failed:`, error.message);
   } finally {
     if (dbSession) {
-      try {
-        await db.updateBatchSession(run.id, {
+      await withDbRetry(
+        () => db.updateBatchSession(run.id, {
           status: run.status,
           error: run.error,
           queuedCount: run.queuedCount,
@@ -2159,13 +2422,24 @@ async function processBackgroundBatchRun(run, payload) {
           queuedItems: run.queued,
           skippedItems: run.skipped,
           chainErrors: run.chainErrors
-        });
-      } catch (dbErr) {
-        console.warn(`[Zenius] Failed to finalize batch session in DB: ${dbErr.message}`);
-      }
+        }),
+        `batch-session-finalize[${run.id}]`
+      );
     }
 
     if (run.status === 'completed' || run.status === 'failed') {
+      eventEmitter.emit(run.status === 'completed' ? 'zenius:batch:completed' : 'zenius:batch:failed', {
+        batchRunId: run.id,
+        sessionId: run.sessionId,
+        status: run.status,
+        error: run.error || null,
+        queuedCount: run.queuedCount,
+        skippedCount: run.skippedCount,
+        downloadCompletedCount: run.downloadCompletedCount || 0,
+        downloadFailedCount: run.downloadFailedCount || 0,
+        message: run.status === 'completed' ? 'Batch completed' : 'Batch failed'
+      });
+
       webhookService.sendBatchComplete(db, {
         id: run.id,
         rootCgId: run.rootCgId,
@@ -2183,6 +2457,11 @@ async function processBackgroundBatchRun(run, payload) {
         downloadCompletedCount: run.downloadCompletedCount || 0,
         downloadFailedCount: run.downloadFailedCount || 0,
         itemErrors: run.itemErrors || [],
+        itemErrorsOverflow: Number(run._itemErrorsOverflow || 0),
+        queuedItemsTracked: Array.isArray(run.queued) ? run.queued.length : 0,
+        skippedItemsTracked: Array.isArray(run.skipped) ? run.skipped.length : 0,
+        queuedItemsOverflow: Number(run.queuedOverflow || 0),
+        skippedItemsOverflow: Number(run.skippedOverflow || 0),
         error: run.error,
         chainErrors: run.chainErrors,
         startedAt: run.startedAt,
@@ -2191,6 +2470,14 @@ async function processBackgroundBatchRun(run, payload) {
     }
     if (!hasActiveBackgroundBatchRuns()) {
       stopBackgroundBatchKeepalive();
+
+      // Trigger a cleanup cycle after all batches are done to remove temp files
+      // and reset any stuck jobs caused by the batch run.
+      if (cleanupService && typeof cleanupService.runNow === 'function') {
+        cleanupService.runNow('post-batch').catch((e) =>
+          console.warn('[Zenius] Post-batch cleanup failed:', e.message)
+        );
+      }
     }
   }
 }
@@ -2211,14 +2498,26 @@ async function cancelAllZeniusDownloads() {
   // 2. Cancel active FFmpeg processes from downloadQueue
   for (const taskInfo of downloadQueue.activeTasks) {
     try {
-      const jobs = await db.getJobsByFile(taskInfo.id);
-      for (const job of jobs) {
-        if (job.type === 'process') {
-          await videoProcessor.cancelJob(job.id);
-          await db.updateJob(job.id, { status: 'cancelled', error: 'Cancelled by user (cancel all)' });
+      const processJobIds = new Set();
+
+      if (taskInfo.jobId) {
+        processJobIds.add(taskInfo.jobId);
+      }
+
+      if (taskInfo.fileId) {
+        const jobs = await db.getJobsByFile(taskInfo.fileId);
+        for (const job of jobs) {
+          if (job.type === 'process') {
+            processJobIds.add(job.id);
+          }
         }
       }
-      cancelled.downloads.push({ id: taskInfo.id, urlShortId: taskInfo.urlShortId, fromActive: true });
+
+      for (const processJobId of processJobIds) {
+        await videoProcessor.cancelJob(processJobId);
+        await db.updateJob(processJobId, { status: 'cancelled', error: 'Cancelled by user (cancel all)' });
+      }
+      cancelled.downloads.push({ id: taskInfo.id, urlShortId: taskInfo.urlShortId, jobIds: Array.from(processJobIds), fromActive: true });
     } catch (error) {
       cancelled.errors.push({ id: taskInfo.id, error: error.message });
     }
@@ -2488,6 +2787,16 @@ const zeniusController = {
       backgroundBatchRuns.set(run.id, run);
       ensureBackgroundBatchKeepalive(keepaliveUrl);
 
+      eventEmitter.emit('zenius:batch:started', {
+        batchRunId: run.id,
+        sessionId,
+        rootCgId: run.rootCgId,
+        targetCgSelector: run.targetCgSelector,
+        baseFolderInput,
+        providers: selectedProviders,
+        message: 'Zenius batch download started in background'
+      });
+
       void processBackgroundBatchRun(run, {
         rootCgId: req.body?.rootCgId,
         targetCgSelector: req.body?.targetCgSelector,
@@ -2691,4 +3000,76 @@ const zeniusController = {
   }
 };
 
+/**
+ * Persist all in-memory background batch runs to DB.
+ * Called on graceful shutdown (SIGTERM/SIGINT) so progress is not lost.
+ */
+async function persistAllBatchRunsToDb() {
+  const runs = Array.from(backgroundBatchRuns.values());
+  if (runs.length === 0) return;
+
+  console.log(`[Zenius] Persisting ${runs.length} in-memory batch run(s) to DB before shutdown`);
+  const results = { persisted: 0, failed: 0 };
+
+  await Promise.allSettled(runs.map(async (run) => {
+    if (!run?.id) return;
+
+    // Mark running batches as interrupted so they can be identified on next boot
+    const shutdownStatus = run.status === 'running' ? 'failed' : run.status;
+    const shutdownError = run.status === 'running'
+      ? 'Server shut down during batch processing'
+      : run.error;
+
+    try {
+      // Try upsert (update if exists, create if not)
+      const existing = await db.getBatchSession(run.id).catch(() => null);
+      if (existing) {
+        await db.updateBatchSession(run.id, {
+          status: shutdownStatus,
+          error: shutdownError,
+          rootCgName: run.rootCgName,
+          parentContainerName: run.parentContainerName,
+          totalContainers: run.totalContainers,
+          processedContainers: run.processedContainers,
+          queuedCount: run.queuedCount,
+          skippedCount: run.skippedCount,
+          nextContainerOffset: run.nextContainerOffset,
+          hasMore: run.hasMoreContainers && shutdownStatus === 'running',
+          chainErrors: run.chainErrors
+        });
+      } else {
+        await db.createBatchSession({
+          id: run.id,
+          runId: run.id,
+          rootCgId: run.rootCgId,
+          rootCgName: run.rootCgName,
+          targetCgSelector: run.targetCgSelector,
+          parentContainerName: run.parentContainerName || '',
+          status: shutdownStatus,
+          error: shutdownError,
+          totalContainers: run.totalContainers,
+          processedContainers: run.processedContainers,
+          queuedCount: run.queuedCount,
+          skippedCount: run.skippedCount,
+          nextContainerOffset: run.nextContainerOffset,
+          hasMore: false,
+          sessionData: {},
+          queuedItems: [],
+          skippedItems: [],
+          chainErrors: run.chainErrors || [],
+          expiresAt: run.expiresAt
+        });
+      }
+      results.persisted += 1;
+    } catch (error) {
+      console.error(`[Zenius] Failed to persist batch run ${run.id} on shutdown: ${error.message}`);
+      results.failed += 1;
+    }
+  }));
+
+  console.log(`[Zenius] Shutdown persistence: ${results.persisted} persisted, ${results.failed} failed`);
+  return results;
+}
+
 module.exports = zeniusController;
+module.exports.persistAllBatchRunsToDb = persistAllBatchRunsToDb;

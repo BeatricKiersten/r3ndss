@@ -356,7 +356,13 @@ export const useZeniusResetFiles = () => {
   );
 };
 
-export const useZeniusQueueStatus = () => {
+export const useZeniusQueueStatus = (options = {}) => {
+  const {
+    enabled = true,
+    refetchInterval = 15000,
+    refetchIntervalInBackground = true
+  } = options;
+
   return useQuery(
     ['zenius-queue-status'],
     async () => {
@@ -364,8 +370,10 @@ export const useZeniusQueueStatus = () => {
       return response.data.data;
     },
     {
-      refetchInterval: 5000,
-      refetchIntervalInBackground: true
+      enabled,
+      refetchInterval,
+      refetchIntervalInBackground,
+      staleTime: 3000
     }
   );
 };

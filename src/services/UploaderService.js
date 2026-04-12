@@ -684,7 +684,15 @@ class UploaderService extends EventEmitter {
       item.status === 'pending' || item.status === 'processing'
     ));
 
-    const hasRunningUploadState = relatedJobs.some((item) => item.status === 'uploading');
+    // A job stuck in 'uploading' should NOT block cleanup indefinitely.
+    // If the upload heartbeat is old (> 10 min), treat it as stale and allow cleanup.
+    const UPLOADING_STALE_MS = 10 * 60 * 1000;
+    const hasRunningUploadState = relatedJobs.some((item) => {
+      if (item.status !== 'uploading') return false;
+      const updatedAt = item.updatedAt ? new Date(item.updatedAt).getTime() : 0;
+      const isStale = updatedAt && (Date.now() - updatedAt) > UPLOADING_STALE_MS;
+      return !isStale; // Only block if the upload is recent (not stale)
+    });
 
     const allJobsFinished = relatedJobs.every((item) => (
       item.status === 'completed' || item.status === 'failed' || item.status === 'cancelled'

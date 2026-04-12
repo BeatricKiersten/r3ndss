@@ -207,6 +207,12 @@ export const useWebSocketStore = create((set, get) => ({
         }
         break;
 
+      case 'batch:progress':
+        if (queryClient) {
+          queryClient.invalidateQueries('zenius-queue-status');
+        }
+        break;
+
       case 'zenius:batch:completed':
         if (queryClient) {
           queryClient.invalidateQueries('zenius-queue-status');

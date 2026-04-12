@@ -16,7 +16,13 @@ const config = require('./config');
 const routes = require('./routes');
 const errorHandler = require('./middleware/errorHandler');
 const websocketHandler = require('./websocket/events');
-const { db, eventEmitter, uploaderService } = require('./services/runtime');
+const { db, eventEmitter, uploaderService, cleanupService } = require('./services/runtime');
+// Lazy-import to avoid circular deps — zeniusController loads runtime which is already loaded
+let _zeniusController = null;
+function getZeniusController() {
+  if (!_zeniusController) _zeniusController = require('./controllers/zeniusController');
+  return _zeniusController;
+}
 
 const app = express();
 const server = createServer(app);
@@ -249,6 +255,9 @@ async function startServer() {
 
     await uploaderService.start();
 
+    // Start periodic cleanup scheduler (orphaned files, stuck jobs, expired sessions)
+    cleanupService.start();
+
     try {
       const staleResult = await db.resetStaleProcessingJobs(10);
       if (staleResult.resetCount > 0) {
@@ -348,6 +357,16 @@ async function runSystemCheck() {
 
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down gracefully');
+  cleanupService.stop();
+  // Persist any in-memory batch run state before exiting
+  try {
+    const ctrl = getZeniusController();
+    if (ctrl?.persistAllBatchRunsToDb) {
+      await ctrl.persistAllBatchRunsToDb();
+    }
+  } catch (e) {
+    console.error('[Server] Failed to persist batch runs on shutdown:', e.message);
+  }
   await uploaderService.stop();
   if (weeklyCheckerInterval) clearInterval(weeklyCheckerInterval);
   server.close(() => {
@@ -358,6 +377,15 @@ process.on('SIGTERM', async () => {
 
 process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down gracefully');
+  cleanupService.stop();
+  try {
+    const ctrl = getZeniusController();
+    if (ctrl?.persistAllBatchRunsToDb) {
+      await ctrl.persistAllBatchRunsToDb();
+    }
+  } catch (e) {
+    console.error('[Server] Failed to persist batch runs on shutdown:', e.message);
+  }
   await uploaderService.stop();
   if (weeklyCheckerInterval) clearInterval(weeklyCheckerInterval);
   server.close(() => {

@@ -2493,6 +2493,22 @@ class DatabaseHandler {
     };
   }
 
+  /**
+   * Get jobs that are stuck in 'uploading' state (a transient state that should
+   * never survive a server restart). These are cleaned up by CleanupService.
+   */
+  async getStaleUploadingJobs(staleThresholdMinutes = 60) {
+    await this._ready();
+    const cutoffIso = new Date(Date.now() - staleThresholdMinutes * 60 * 1000).toISOString();
+    const [rows] = await this.pool.query(
+      `SELECT * FROM jobs
+       WHERE status = 'uploading'
+         AND updated_at < ?`,
+      [cutoffIso]
+    );
+    return rows.map((row) => this._mapJobRow(row));
+  }
+
   async close() {
     if (this.pool) {
       await this.pool.end();
