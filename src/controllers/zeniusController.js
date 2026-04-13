@@ -2508,6 +2508,12 @@ async function cancelAllZeniusDownloads() {
     uploads: [],
     errors: []
   };
+
+  const isLikelyZeniusFile = (file) => {
+    const originalUrl = String(file?.originalUrl || '').toLowerCase();
+    const fileName = String(file?.name || '').toLowerCase();
+    return originalUrl.includes('zenius') || fileName.includes('zenius');
+  };
   
   // 1. Cancel queued downloads via DownloadQueue
   const queueCancelled = downloadQueue.cancelAll();
@@ -2544,20 +2550,29 @@ async function cancelAllZeniusDownloads() {
   // 3. Cancel pending uploads
   try {
     const allFiles = await db.listFiles();
-    const zeniusFiles = allFiles.filter(f => 
-      f.originalUrl?.includes('zenius.net') || 
-      f.name?.startsWith('zenius-') ||
-      f.name?.toLowerCase().includes('zenius')
-    );
-    
-    for (const file of zeniusFiles) {
-      const jobs = await db.getJobsByFile(file.id);
-      for (const job of jobs) {
-        if (job.status === 'pending' || job.status === 'processing') {
-          await uploaderService.cancelJob(job.id);
-          cancelled.uploads.push({ fileId: file.id, jobId: job.id });
-        }
+    const activeJobs = await uploaderService.listJobs({ limit: 2000 });
+    const zeniusFileIds = new Set(allFiles.filter(isLikelyZeniusFile).map((file) => file.id));
+    const zeniusJobs = activeJobs.filter((job) => {
+      if (!['pending', 'processing'].includes(job.status)) {
+        return false;
       }
+
+      if (job.type === 'process') {
+        return true;
+      }
+
+      return Boolean(job.fileId && zeniusFileIds.has(job.fileId));
+    });
+
+    const uploadJobIds = zeniusJobs
+      .filter((job) => job.type !== 'process')
+      .map((job) => job.id);
+
+    const uploadCancelResults = await uploaderService.cancelJobs(uploadJobIds);
+    cancelled.uploads.push(...uploadCancelResults.cancelled.map((item) => ({ jobId: item.jobId })));
+
+    if (uploadCancelResults.failed.length > 0) {
+      cancelled.errors.push(...uploadCancelResults.failed.map((item) => ({ phase: 'uploads', jobId: item.jobId, error: item.error })));
     }
   } catch (error) {
     cancelled.errors.push({ phase: 'uploads', error: error.message });

@@ -193,7 +193,7 @@ export default function BackupStatusPage() {
                           const cfg = getProviderConfig(p);
                           const canCopy = s.status !== 'completed' && s.status !== 'uploading' && s.status !== 'processing';
                           const isCopying = copyToProvider.isLoading && copyToProvider.variables?.fileId === file.id && copyToProvider.variables?.targetProvider === p;
-                          const canClearLink = Boolean(s.url || s.embedUrl || s.fileId);
+                          const canClearLink = s.status === 'completed' || Boolean(s.url || s.embedUrl || s.fileId);
                           const isClearing = clearFileProviderLink.isLoading && clearFileProviderLink.variables?.fileId === file.id && clearFileProviderLink.variables?.provider === p;
                           return (
                             <div key={p} className="space-y-1.5">

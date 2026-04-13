@@ -1619,6 +1619,15 @@ class UploaderService extends EventEmitter {
     this.processingJobIds.delete(jobId);
   }
 
+  async _isJobStillRunnable(jobId) {
+    try {
+      const latest = await this.db.getJob(jobId);
+      return latest.status === 'pending';
+    } catch (_) {
+      return false;
+    }
+  }
+
   /**
    * Process all provider uploads for a single file
    */
@@ -1626,6 +1635,11 @@ class UploaderService extends EventEmitter {
     const promises = jobs.map(job =>
       this.providerLimit(async () => {
         try {
+          const runnable = await this._isJobStillRunnable(job.id);
+          if (!runnable) {
+            console.log(`[Uploader] Skipping job ${job.id} for file ${fileId}: status changed before execution`);
+            return;
+          }
           await this._uploadToProvider(job);
         } finally {
           this._releaseJobClaim(job.id);
@@ -1949,6 +1963,8 @@ class UploaderService extends EventEmitter {
       error: 'Cancelled by user'
     });
 
+    console.log(`[Uploader] Cancelled job ${job.id} (${job.type}) for file ${job.fileId || 'n/a'}${provider ? ` on ${provider}` : ''}`);
+
     if (provider && job.fileId) {
       await this.db.updateProviderStatus(job.fileId, provider, 'failed', null, null, 'Cancelled by user', { embedUrl: null });
     }
@@ -1965,6 +1981,30 @@ class UploaderService extends EventEmitter {
     });
 
     return { cancelled: true, jobId: job.id };
+  }
+
+  async cancelJobs(jobIds = []) {
+    const uniqueJobIds = [...new Set((Array.isArray(jobIds) ? jobIds : []).filter(Boolean))];
+    const results = {
+      cancelled: [],
+      skipped: [],
+      failed: []
+    };
+
+    for (const jobId of uniqueJobIds) {
+      try {
+        const result = await this.cancelJob(jobId);
+        if (result.cancelled) {
+          results.cancelled.push({ jobId });
+        } else {
+          results.skipped.push({ jobId, reason: result.reason || 'not-cancelled' });
+        }
+      } catch (error) {
+        results.failed.push({ jobId, error: error.message });
+      }
+    }
+
+    return results;
   }
 
   async listJobs(filters = {}) {

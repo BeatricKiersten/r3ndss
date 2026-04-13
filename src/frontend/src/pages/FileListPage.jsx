@@ -357,7 +357,7 @@ function FileDetailModal({ file, onClose }) {
                 const availableSources = Object.entries(file.providers || {})
                   .filter(([_, sourcePs]) => sourcePs.status === 'completed')
                   .filter(([sourceKey]) => sourceKey !== key);
-                const canClearLink = Boolean(ps.url || ps.embedUrl || ps.fileId);
+                const canClearLink = ps.status === 'completed' || Boolean(ps.url || ps.embedUrl || ps.fileId);
                 const isClearingLink = clearFileProviderLink.isLoading
                   && clearFileProviderLink.variables?.fileId === file.id
                   && clearFileProviderLink.variables?.provider === key;
