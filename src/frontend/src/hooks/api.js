@@ -881,6 +881,24 @@ export const useClearJobLogs = () => {
   );
 };
 
+export const useWipeAllJobs = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation(
+    async () => {
+      const response = await api.post('/api/jobs/wipe-all');
+      return response.data;
+    },
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('jobs');
+        queryClient.invalidateQueries('files');
+        queryClient.invalidateQueries('dashboard');
+      }
+    }
+  );
+};
+
 export const useSystemCheck = () => {
   const queryClient = useQueryClient();
 

@@ -106,6 +106,56 @@ const jobController = {
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
     }
+  },
+
+  async wipeAll(req, res) {
+    try {
+      const jobs = await db.getAllJobs();
+      const results = {
+        totalJobs: jobs.length,
+        abortedProcesses: 0,
+        abortedUploads: 0,
+        deletedCount: 0,
+        errors: []
+      };
+
+      for (const job of jobs) {
+        try {
+          if (job.status !== 'pending' && job.status !== 'processing') {
+            continue;
+          }
+
+          if (job.type === 'process') {
+            const aborted = await videoProcessor.cancelJob(job.id);
+            if (aborted) {
+              results.abortedProcesses += 1;
+            }
+            continue;
+          }
+
+          const provider = job.metadata?.provider || job.metadata?.targetProvider;
+          if (provider) {
+            const aborted = await uploaderService.cancelUpload(job.id, provider);
+            if (aborted) {
+              results.abortedUploads += 1;
+            }
+          }
+        } catch (error) {
+          results.errors.push({ jobId: job.id, error: error.message });
+        }
+      }
+
+      const deleted = await db.deleteAllJobs();
+      results.deletedCount = deleted.deletedCount;
+
+      res.json({
+        success: true,
+        message: `Deleted ${results.deletedCount} jobs and cleared all logs`,
+        data: results
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
   }
 };
 

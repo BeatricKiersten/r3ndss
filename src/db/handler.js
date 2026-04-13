@@ -1814,6 +1814,28 @@ class DatabaseHandler {
     };
   }
 
+  async getAllJobs() {
+    await this._ready();
+    const [rows] = await this.pool.query('SELECT * FROM jobs ORDER BY created_at DESC');
+    return rows.map((row) => this._mapJobRow(row));
+  }
+
+  async deleteAllJobs() {
+    await this._ready();
+
+    const [rows] = await this.pool.query('SELECT * FROM jobs');
+    if (rows.length === 0) {
+      return { deleted: [], deletedCount: 0 };
+    }
+
+    await this.pool.query('DELETE FROM jobs');
+
+    return {
+      deleted: rows.map((row) => this._mapJobRow(row)),
+      deletedCount: rows.length
+    };
+  }
+
   async deleteCompletedJobs() {
     await this._ready();
 

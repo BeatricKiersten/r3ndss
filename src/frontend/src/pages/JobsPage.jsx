@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { useCancelJob, useCancelAllJobs, useClearJobLogs, useDeleteJob, useJobs, useProviders, useQueueTransferJob } from '../hooks/api';
-import { Trash2, Plus, Loader2, XCircle, CheckCircle2, Clock3, RefreshCw, AlertOctagon, Eraser } from 'lucide-react';
+import { useCancelJob, useCancelAllJobs, useClearJobLogs, useDeleteJob, useJobs, useProviders, useQueueTransferJob, useWipeAllJobs } from '../hooks/api';
+import { Trash2, Plus, Loader2, XCircle, CheckCircle2, Clock3, RefreshCw, AlertOctagon, Eraser, Bomb } from 'lucide-react';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 
 const JOB_STATUS_OPTIONS = ['', 'pending', 'processing', 'completed', 'failed', 'cancelled'];
@@ -26,11 +26,13 @@ export default function JobsPage() {
   const [typeFilter, setTypeFilter] = useState('');
   const [showCancelAllConfirm, setShowCancelAllConfirm] = useState(false);
   const [showClearLogsConfirm, setShowClearLogsConfirm] = useState(false);
+  const [showWipeAllConfirm, setShowWipeAllConfirm] = useState(false);
 
   const queueTransfer = useQueueTransferJob();
   const cancelJob = useCancelJob();
   const cancelAllJobs = useCancelAllJobs();
   const clearJobLogs = useClearJobLogs();
+  const wipeAllJobs = useWipeAllJobs();
   const deleteJob = useDeleteJob();
   const { data: providers = {} } = useProviders();
 
@@ -86,6 +88,11 @@ export default function JobsPage() {
   const handleClearLogs = async () => {
     await clearJobLogs.mutateAsync();
     setShowClearLogsConfirm(false);
+  };
+
+  const handleWipeAll = async () => {
+    await wipeAllJobs.mutateAsync();
+    setShowWipeAllConfirm(false);
   };
 
   // Count active jobs
@@ -188,6 +195,20 @@ export default function JobsPage() {
                 <Eraser className="w-3.5 h-3.5" />
               )}
               <span className="ml-1 text-xs">Clear Logs</span>
+            </button>
+            <button
+              onClick={() => setShowWipeAllConfirm(true)}
+              disabled={wipeAllJobs.isLoading}
+              className="btn !py-1.5 !px-2 bg-red-600/20 text-red-300 hover:bg-red-600/30 border-red-600/40"
+              type="button"
+              title="Delete every job and log entry"
+            >
+              {wipeAllJobs.isLoading ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Bomb className="w-3.5 h-3.5" />
+              )}
+              <span className="ml-1 text-xs">Wipe All Jobs</span>
             </button>
           </div>
         </div>
@@ -309,6 +330,16 @@ export default function JobsPage() {
         variant="warning"
       />
 
+      <ConfirmDialog
+        isOpen={showWipeAllConfirm}
+        onClose={() => setShowWipeAllConfirm(false)}
+        onConfirm={handleWipeAll}
+        title="Wipe All Jobs"
+        message="This will abort active work where possible and permanently delete every row in the jobs table, including pending, processing, completed, failed, and cancelled jobs. This action cannot be undone. Are you sure?"
+        confirmText="Wipe All"
+        variant="danger"
+      />
+
       {/* Clear Logs Success/Error Messages */}
       {clearJobLogs.isSuccess && (
         <div className="fixed bottom-4 right-4 bg-[#1a1a1a] border border-emerald-500/40 text-emerald-400 px-4 py-3 rounded-lg shadow-lg z-50">
@@ -318,6 +349,17 @@ export default function JobsPage() {
       {clearJobLogs.isError && (
         <div className="fixed bottom-4 right-4 bg-[#1a1a1a] border border-red-500/40 text-red-400 px-4 py-3 rounded-lg shadow-lg z-50">
           Failed to clear logs: {clearJobLogs.error?.message}
+        </div>
+      )}
+
+      {wipeAllJobs.isSuccess && (
+        <div className="fixed bottom-4 right-4 bg-[#1a1a1a] border border-emerald-500/40 text-emerald-400 px-4 py-3 rounded-lg shadow-lg z-50">
+          Wiped {wipeAllJobs.data?.data?.deletedCount} jobs successfully
+        </div>
+      )}
+      {wipeAllJobs.isError && (
+        <div className="fixed bottom-4 right-4 bg-[#1a1a1a] border border-red-500/40 text-red-400 px-4 py-3 rounded-lg shadow-lg z-50">
+          Failed to wipe jobs: {wipeAllJobs.error?.message}
         </div>
       )}
     </div>
