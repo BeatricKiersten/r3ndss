@@ -13,5 +13,6 @@ router.post('/:id/delete-force', fileController.deleteForce);
 router.post('/:id/retry', fileController.retry);
 router.post('/:id/reupload/:provider', fileController.reupload);
 router.post('/:id/copy/:targetProvider', fileController.copy);
+router.delete('/:id/providers/:provider', fileController.clearProviderLink);
 
 module.exports = router;

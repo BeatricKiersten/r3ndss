@@ -112,6 +112,17 @@ const providerController = {
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
     }
+  },
+
+  async clearMissingLinks(req, res) {
+    try {
+      const { provider } = req.params;
+      const reason = String(req.body?.reason || '').trim() || `Provider link removed by user after missing-remote check for ${provider}`;
+      const result = await uploaderService.clearMissingProviderLinks(provider, { reason });
+      res.json({ success: true, data: result });
+    } catch (error) {
+      res.status(400).json({ success: false, error: error.message });
+    }
   }
 };
 

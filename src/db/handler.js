@@ -1256,6 +1256,73 @@ class DatabaseHandler {
     return this._mapFileRow(fileRow, providerMap.get(fileId) || []);
   }
 
+  async clearFileProviderLink(fileId, provider, reason = 'Provider link removed by user') {
+    return this._withTransaction(async (connection) => {
+      const [fileRows] = await connection.query('SELECT id FROM files WHERE id = ? FOR UPDATE', [fileId]);
+      if (!fileRows[0]) {
+        throw new Error(`File ${fileId} not found`);
+      }
+
+      const [currentRows] = await connection.query(
+        'SELECT * FROM file_providers WHERE file_id = ? AND provider = ? FOR UPDATE',
+        [fileId, provider]
+      );
+
+      const current = currentRows[0] || null;
+      if (!current) {
+        throw new Error(`Provider '${provider}' not found for file ${fileId}`);
+      }
+
+      const history = parseJson(current.url_history, []) || [];
+      if (current.url || current.remote_file_id || current.embed_url) {
+        history.push({
+          url: current.url || null,
+          fileId: current.remote_file_id || null,
+          embedUrl: current.embed_url || null,
+          archivedAt: this._now(),
+          reason
+        });
+      }
+
+      const now = this._now();
+      await connection.query(
+        `UPDATE file_providers
+         SET status = 'failed',
+             url = NULL,
+             remote_file_id = NULL,
+             embed_url = NULL,
+             error = ?,
+             url_history = ?,
+             updated_at = ?
+         WHERE file_id = ? AND provider = ?`,
+        [reason, stringifyJson(history), now, fileId, provider]
+      );
+
+      const [providerRows] = await connection.query('SELECT status FROM file_providers WHERE file_id = ?', [fileId]);
+      const statuses = providerRows.map((row) => row.status);
+      const providerCount = Math.max(1, statuses.length);
+      const completed = statuses.filter((value) => value === 'completed').length;
+      const failed = statuses.filter((value) => value === 'failed').length;
+
+      let fileStatus = 'uploading';
+      if (completed === providerCount) {
+        fileStatus = 'completed';
+      } else if (completed + failed === providerCount) {
+        fileStatus = failed === providerCount ? 'failed' : 'partial';
+      }
+
+      const syncStatus = Math.round((completed / providerCount) * 100);
+      const canDelete = completed === providerCount && failed === 0;
+
+      await connection.query(
+        'UPDATE files SET sync_status = ?, can_delete = ?, status = ?, updated_at = ? WHERE id = ?',
+        [syncStatus, canDelete ? 1 : 0, fileStatus, now, fileId]
+      );
+
+      return { fileId, provider, cleared: true, reason };
+    });
+  }
+
   async updateProviderStatus(fileId, provider, status, url = null, fileId_provider = null, error = null, extra = {}) {
     this._assertProviderSupported(provider);
 

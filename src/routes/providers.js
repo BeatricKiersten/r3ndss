@@ -8,6 +8,7 @@ router.get('/check-snapshots', providerController.getCheckSnapshots);
 router.get('/:name/status', providerController.getStatus);
 router.put('/:name', providerController.update);
 router.post('/:provider/check', providerController.check);
+router.post('/:provider/clear-missing-links', providerController.clearMissingLinks);
 router.post('/check', providerController.checkBulk);
 
 module.exports = router;

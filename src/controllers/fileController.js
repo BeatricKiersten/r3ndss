@@ -97,6 +97,16 @@ const fileController = {
     }
   },
 
+  async clearProviderLink(req, res) {
+    try {
+      const reason = String(req.body?.reason || '').trim() || 'Provider link removed by user';
+      const result = await uploaderService.clearFileProviderLink(req.params.id, req.params.provider, reason);
+      res.json({ success: true, data: result });
+    } catch (error) {
+      res.status(400).json({ success: false, error: error.message });
+    }
+  },
+
   async deleteAllFailed(req, res) {
     try {
       const failedFiles = await db.listFiles(null, 'failed');

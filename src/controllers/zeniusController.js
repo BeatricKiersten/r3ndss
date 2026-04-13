@@ -1,6 +1,7 @@
 const axios = require('axios');
 const { randomUUID } = require('crypto');
 const path = require('path');
+const fs = require('fs-extra');
 const pLimit = require('p-limit');
 const { EventEmitter } = require('events');
 
@@ -1816,24 +1817,41 @@ async function queueBatchDownloadItem({
       console.log(`[Zenius] Retrying failed batch item ${urlShortId}: ${outputFileName} in folder ${folderId}`);
     } else {
       let uploadQueueResult = null;
+      let pendingProviderInfo = null;
       let skipReason = 'File already exists';
-      if (existingStatus === 'completed') {
-        uploadQueueResult = await uploaderService.queueFileUpload(existingFile.id, existingFile.localPath, folderId, selectedProviders);
-      } else if (existingStatus === 'processing') {
+      if (existingStatus === 'processing' || existingStatus === 'uploading') {
         skipReason = 'File is already being processed';
+      } else {
+        pendingProviderInfo = await uploaderService.getPendingUploadProviders(existingFile.id, selectedProviders);
+
+        if (!pendingProviderInfo.hasPendingProviders) {
+          skipReason = 'File already exists on selected providers';
+        } else {
+          const hasLocalSource = Boolean(existingFile.localPath && await fs.pathExists(existingFile.localPath));
+
+          if (hasLocalSource) {
+            uploadQueueResult = await uploaderService.queueFileUpload(existingFile.id, existingFile.localPath, folderId, selectedProviders);
+            skipReason = 'File already exists locally; queued missing providers only';
+          } else {
+            console.log(`[Zenius] Existing file ${existingFile.id} is missing local source; re-downloading for providers: ${pendingProviderInfo.pendingProviders.join(', ')}`);
+          }
+        }
       }
 
-      return {
-        counted: true,
-        skipped: {
-          urlShortId,
-          reason: skipReason,
-          path: chainPath,
-          fileId: existingFile.id,
-          outputName: outputFileName,
-          uploadQueue: uploadQueueResult
-        }
-      };
+      if (!pendingProviderInfo?.hasPendingProviders || uploadQueueResult || existingStatus === 'processing' || existingStatus === 'uploading') {
+        return {
+          counted: true,
+          skipped: {
+            urlShortId,
+            reason: skipReason,
+            path: chainPath,
+            fileId: existingFile.id,
+            outputName: outputFileName,
+            uploadQueue: uploadQueueResult,
+            pendingProviders: pendingProviderInfo?.pendingProviders || []
+          }
+        };
+      }
     }
   }
 

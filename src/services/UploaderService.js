@@ -334,6 +334,152 @@ class UploaderService extends EventEmitter {
     };
   }
 
+  async getPendingUploadProviders(fileId, selectedProviders = null) {
+    const file = await this.db.getFile(fileId);
+    const providerCatalog = await this._refreshProviderRuntime();
+    const enabledProviders = providerCatalog
+      .filter((item) => item.enabled !== false)
+      .map((item) => item.id);
+
+    let targetProviders;
+    if (Array.isArray(selectedProviders) && selectedProviders.length > 0) {
+      const resolved = [];
+      for (const provider of selectedProviders) {
+        try {
+          const providerId = await this._resolveProviderId(provider, { allowDisabled: false });
+          if (!resolved.includes(providerId)) {
+            resolved.push(providerId);
+          }
+        } catch (_) {
+          // Ignore invalid providers in payload.
+        }
+      }
+      targetProviders = resolved;
+    } else {
+      targetProviders = enabledProviders;
+    }
+
+    const jobsByFile = await this.db.getJobsByFile(fileId);
+    const activeUploadProviders = new Set();
+    for (const job of jobsByFile) {
+      if (job.type !== 'upload' || !['pending', 'processing'].includes(job.status)) {
+        continue;
+      }
+
+      const rawProvider = String(job.metadata?.provider || '').trim();
+      if (!rawProvider) {
+        continue;
+      }
+
+      try {
+        const resolvedProvider = await this._resolveProviderId(rawProvider, { allowDisabled: true });
+        activeUploadProviders.add(resolvedProvider);
+      } catch {
+        activeUploadProviders.add(rawProvider);
+      }
+    }
+
+    const pendingProviders = [];
+    const skippedProviders = [];
+
+    for (const provider of targetProviders) {
+      const providerStatus = file.providers?.[provider] || null;
+
+      if (providerStatus?.status === 'completed') {
+        skippedProviders.push({ provider, reason: 'already-uploaded' });
+        continue;
+      }
+
+      if (activeUploadProviders.has(provider)) {
+        skippedProviders.push({ provider, reason: 'already-queued' });
+        continue;
+      }
+
+      pendingProviders.push(provider);
+    }
+
+    return {
+      file,
+      providerCatalog,
+      targetProviders,
+      pendingProviders,
+      skippedProviders,
+      hasPendingProviders: pendingProviders.length > 0
+    };
+  }
+
+  async clearFileProviderLink(fileId, provider, reason = 'Provider link removed by user') {
+    let resolvedProvider = String(provider || '').trim();
+    if (!resolvedProvider) {
+      throw new Error('Provider is required');
+    }
+
+    try {
+      resolvedProvider = await this._resolveProviderId(resolvedProvider, { allowDisabled: true });
+    } catch (_) {
+      const file = await this.db.getFile(fileId);
+      if (!file.providers?.[resolvedProvider]) {
+        throw new Error(`Provider '${resolvedProvider}' not found for file ${fileId}`);
+      }
+    }
+
+    return this.db.clearFileProviderLink(fileId, resolvedProvider, reason);
+  }
+
+  async clearMissingProviderLinks(provider, options = {}) {
+    const resolvedProvider = await this._resolveProviderId(provider, { allowDisabled: true });
+    const reason = String(options.reason || '').trim() || `Provider link removed after integrity check for ${resolvedProvider}`;
+
+    const files = await this.db.listFiles();
+    const results = {
+      provider: resolvedProvider,
+      checkedAt: new Date().toISOString(),
+      totalFiles: files.length,
+      checked: 0,
+      cleared: [],
+      skipped: [],
+      failed: []
+    };
+
+    for (const file of files) {
+      const statusResult = await this.checkFileProviderStatus(file.id, resolvedProvider);
+      const status = statusResult[resolvedProvider];
+      results.checked += 1;
+
+      if (status.status !== 'completed') {
+        continue;
+      }
+
+      if (status.remoteExists) {
+        results.skipped.push({
+          fileId: file.id,
+          fileName: file.name,
+          provider: resolvedProvider,
+          reason: 'remote-still-exists'
+        });
+        continue;
+      }
+
+      try {
+        await this.db.clearFileProviderLink(file.id, resolvedProvider, reason);
+        results.cleared.push({
+          fileId: file.id,
+          fileName: file.name,
+          provider: resolvedProvider
+        });
+      } catch (error) {
+        results.failed.push({
+          fileId: file.id,
+          fileName: file.name,
+          provider: resolvedProvider,
+          error: error.message
+        });
+      }
+    }
+
+    return results;
+  }
+
   async _getPrimaryProvider() {
     await this._refreshProviderRuntime();
 

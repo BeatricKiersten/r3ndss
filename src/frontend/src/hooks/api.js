@@ -676,6 +676,25 @@ export const useCheckSelectedProviders = () => {
   );
 };
 
+export const useClearMissingProviderLinks = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation(
+    async ({ provider, reason }) => {
+      const response = await api.post(`/api/providers/${encodeURIComponent(provider)}/clear-missing-links`, { reason });
+      return response.data.data;
+    },
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('files');
+        queryClient.invalidateQueries('dashboard');
+        queryClient.invalidateQueries('providers-status');
+        queryClient.invalidateQueries('provider-check-snapshots');
+      }
+    }
+  );
+};
+
 export const useProviderCheckSnapshots = () => {
   return useQuery(
     'provider-check-snapshots',
@@ -727,6 +746,27 @@ export const useCopyToProvider = () => {
       onSuccess: () => {
         queryClient.invalidateQueries('files');
         queryClient.invalidateQueries('dashboard');
+      }
+    }
+  );
+};
+
+export const useClearFileProviderLink = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation(
+    async ({ fileId, provider, reason }) => {
+      const response = await api.delete(`/api/files/${fileId}/providers/${encodeURIComponent(provider)}`, {
+        data: { reason }
+      });
+      return response.data.data;
+    },
+    {
+      onSuccess: (_, variables) => {
+        queryClient.invalidateQueries('files');
+        queryClient.invalidateQueries('dashboard');
+        queryClient.invalidateQueries(['file', variables?.fileId]);
+        queryClient.invalidateQueries(['file-providers-status', variables?.fileId]);
       }
     }
   );

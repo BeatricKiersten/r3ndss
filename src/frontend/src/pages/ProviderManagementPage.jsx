@@ -10,7 +10,8 @@ import {
   useFiles,
   useReuploadToProvider,
   useCheckSelectedProviders,
-  useProviderCheckSnapshots
+  useProviderCheckSnapshots,
+  useClearMissingProviderLinks
 } from '../hooks/api';
 import { useWebSocketStore } from '../store/websocketStore';
 import {
@@ -26,9 +27,11 @@ import {
   Calendar,
   ShieldCheck,
   Sparkles,
-  Copy
+  Copy,
+  Trash2
 } from 'lucide-react';
 import { getProviderConfig } from '../config/providers';
+import { toast } from '../store/toastStore';
 
 export default function ProviderManagementPage() {
   const [expandedProvider, setExpandedProvider] = useState(null);
@@ -48,6 +51,7 @@ export default function ProviderManagementPage() {
   const systemCheck = useSystemCheck();
   const checkSelectedProviders = useCheckSelectedProviders();
   const reuploadToProvider = useReuploadToProvider();
+  const clearMissingProviderLinks = useClearMissingProviderLinks();
 
   const { isConnected } = useWebSocketStore();
 
@@ -120,6 +124,27 @@ export default function ProviderManagementPage() {
   const handleReupload = async (fileId, provider) => {
     if (!window.confirm(`Re-upload this file to ${getProviderConfig(provider)?.name || provider}?`)) return;
     await reuploadToProvider.mutateAsync({ fileId, provider });
+  };
+
+  const handleClearMissingLinks = async (provider) => {
+    const providerName = getProviderConfig(provider)?.name || provider;
+    const confirmed = window.confirm(`Hapus semua link stale untuk ${providerName}? Sistem akan cek ulang semua file dan hanya menghapus record yang status-nya completed tapi remote-nya sudah tidak ada.`);
+    if (!confirmed) return;
+
+    try {
+      const result = await clearMissingProviderLinks.mutateAsync({
+        provider,
+        reason: `Bulk stale link cleanup requested by user for ${provider}`
+      });
+
+      toast.success(
+        'Cleanup completed',
+        `${result.cleared?.length || 0} link dihapus, ${result.failed?.length || 0} gagal, ${result.skipped?.length || 0} dilewati`
+      );
+      await refetchStatus();
+    } catch (error) {
+      toast.error('Cleanup failed', error?.response?.data?.error || error.message);
+    }
   };
 
   const formatDate = (dateString) => {
@@ -409,6 +434,19 @@ export default function ProviderManagementPage() {
                       disabled={!info.enabled}
                     >
                       {selectedCheckProviders.includes(key) ? 'Remove from batch check' : 'Add to batch check'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleClearMissingLinks(key)}
+                      className="btn flex items-center gap-2"
+                      disabled={clearMissingProviderLinks.isLoading}
+                    >
+                      {clearMissingProviderLinks.isLoading && clearMissingProviderLinks.variables?.provider === key ? (
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="w-4 h-4" />
+                      )}
+                      Clear Missing Links
                     </button>
                   </div>
 

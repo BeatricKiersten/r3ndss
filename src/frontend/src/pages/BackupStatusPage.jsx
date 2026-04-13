@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { useDashboard, useStats, useProviders, useToggleProvider, useCopyToProvider } from '../hooks/api';
+import { useDashboard, useStats, useProviders, useToggleProvider, useCopyToProvider, useClearFileProviderLink } from '../hooks/api';
 import { useWebSocketStore } from '../store/websocketStore';
-import { Activity, Cloud, CheckCircle, Clock, Loader2, HardDrive, Server, Wifi, WifiOff, Copy, ChevronDown, ChevronUp, History, ExternalLink, ArrowRight } from 'lucide-react';
+import { Activity, Cloud, CheckCircle, Clock, Loader2, HardDrive, Server, Wifi, WifiOff, Copy, ChevronDown, ChevronUp, History, ExternalLink, ArrowRight, Trash2 } from 'lucide-react';
 import { getProviderConfig } from '../config/providers';
 
 export default function BackupStatusPage() {
@@ -10,6 +10,7 @@ export default function BackupStatusPage() {
   const { data: providers } = useProviders();
   const toggleProvider = useToggleProvider();
   const copyToProvider = useCopyToProvider();
+  const clearFileProviderLink = useClearFileProviderLink();
   const { events, isConnected } = useWebSocketStore();
   const [expandedFile, setExpandedFile] = useState(null);
   const [showCopyDropdown, setShowCopyDropdown] = useState(null);
@@ -19,6 +20,12 @@ export default function BackupStatusPage() {
   function handleCopyToProvider(fileId, targetProvider) {
     copyToProvider.mutate({ fileId, targetProvider });
     setShowCopyDropdown(null);
+  }
+
+  function handleClearProviderLink(fileId, provider) {
+    const confirmed = window.confirm(`Hapus link tersimpan untuk provider ${getProviderConfig(provider)?.label || provider}? Status provider akan direset agar bisa di-upload ulang.`);
+    if (!confirmed) return;
+    clearFileProviderLink.mutate({ fileId, provider, reason: 'Provider link removed by user from backup status' });
   }
 
   function getEnabledProviders() {
@@ -186,6 +193,8 @@ export default function BackupStatusPage() {
                           const cfg = getProviderConfig(p);
                           const canCopy = s.status !== 'completed' && s.status !== 'uploading' && s.status !== 'processing';
                           const isCopying = copyToProvider.isLoading && copyToProvider.variables?.fileId === file.id && copyToProvider.variables?.targetProvider === p;
+                          const canClearLink = Boolean(s.url || s.embedUrl || s.fileId);
+                          const isClearing = clearFileProviderLink.isLoading && clearFileProviderLink.variables?.fileId === file.id && clearFileProviderLink.variables?.provider === p;
                           return (
                             <div key={p} className="space-y-1.5">
                               <div className="flex items-center justify-between">
@@ -212,6 +221,20 @@ export default function BackupStatusPage() {
                                     >
                                       <ExternalLink className="w-3 h-3" />
                                     </a>
+                                  )}
+                                  {canClearLink && (
+                                    <button
+                                      onClick={e => { e.stopPropagation(); handleClearProviderLink(file.id, p); }}
+                                      disabled={isClearing}
+                                      className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-red-500/10 text-red-300 hover:bg-red-500/20 hover:text-red-200 disabled:opacity-50 transition-colors"
+                                      title={`Remove stored link for ${cfg?.label || p}`}
+                                    >
+                                      {isClearing
+                                        ? <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                                        : <Trash2 className="w-2.5 h-2.5" />
+                                      }
+                                      {isClearing ? 'Removing...' : 'Remove link'}
+                                    </button>
                                   )}
                                   {canCopy && (
                                     <button

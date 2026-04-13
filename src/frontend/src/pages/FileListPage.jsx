@@ -11,7 +11,8 @@ import {
   useReuploadToProvider,
   useFileProvidersStatus,
   useFailedFiles,
-  useDeleteAllFailedFiles
+  useDeleteAllFailedFiles,
+  useClearFileProviderLink
 } from '../hooks/api';
 import { usePlayerStore } from '../store/websocketStore';
 import { useNavigate } from 'react-router-dom';
@@ -264,6 +265,7 @@ function MoveFolderModal({ folder, folderTree, onClose, onMove }) {
 // File Detail Modal Component
 function FileDetailModal({ file, onClose }) {
   const reuploadToProvider = useReuploadToProvider();
+  const clearFileProviderLink = useClearFileProviderLink();
   const { data: providerStatus, refetch: refetchStatus, isFetching } = useFileProvidersStatus(file?.id);
   const [selectedSource, setSelectedSource] = useState('');
   const [selectedProvider, setSelectedProvider] = useState('');
@@ -293,6 +295,17 @@ function FileDetailModal({ file, onClose }) {
       return;
     }
 
+    refetchStatus();
+  };
+
+  const handleClearProviderLink = async (provider) => {
+    const confirmed = window.confirm(`Remove stored link for ${getProviderConfig(provider)?.name || provider}? This will mark the provider as needing re-upload.`);
+    if (!confirmed) return;
+    await clearFileProviderLink.mutateAsync({
+      fileId: file.id,
+      provider,
+      reason: 'Provider link removed by user from file detail'
+    });
     refetchStatus();
   };
 
@@ -344,6 +357,10 @@ function FileDetailModal({ file, onClose }) {
                 const availableSources = Object.entries(file.providers || {})
                   .filter(([_, sourcePs]) => sourcePs.status === 'completed')
                   .filter(([sourceKey]) => sourceKey !== key);
+                const canClearLink = Boolean(ps.url || ps.embedUrl || ps.fileId);
+                const isClearingLink = clearFileProviderLink.isLoading
+                  && clearFileProviderLink.variables?.fileId === file.id
+                  && clearFileProviderLink.variables?.provider === key;
                 
                 return (
                   <div key={key} className={`p-3 rounded-lg ${config.bgColor} border border-[#222]`}>
@@ -405,6 +422,21 @@ function FileDetailModal({ file, onClose }) {
 
                     {ps.error && (
                       <p className="text-xs text-red-400 mb-2">{ps.error}</p>
+                    )}
+
+                    {canClearLink && (
+                      <button
+                        onClick={() => handleClearProviderLink(key)}
+                        disabled={isClearingLink || reuploadToProvider.isLoading}
+                        className="flex items-center gap-1 text-xs text-red-300 hover:text-red-200 mb-2 disabled:opacity-50"
+                      >
+                        {isClearingLink ? (
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Trash2 className="w-3 h-3" />
+                        )}
+                        {isClearingLink ? 'Removing link...' : 'Remove stored link'}
+                      </button>
                     )}
 
                     {selectedProvider === key ? (
