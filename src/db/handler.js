@@ -1785,6 +1785,35 @@ class DatabaseHandler {
     return job;
   }
 
+  async deleteJobs(jobIds = []) {
+    await this._ready();
+
+    const uniqueJobIds = [...new Set((Array.isArray(jobIds) ? jobIds : []).filter(Boolean))];
+    if (uniqueJobIds.length === 0) {
+      return { deleted: [], deletedCount: 0 };
+    }
+
+    const placeholders = uniqueJobIds.map(() => '?').join(', ');
+    const [rows] = await this.pool.query(
+      `SELECT * FROM jobs WHERE id IN (${placeholders})`,
+      uniqueJobIds
+    );
+
+    if (rows.length === 0) {
+      return { deleted: [], deletedCount: 0 };
+    }
+
+    await this.pool.query(
+      `DELETE FROM jobs WHERE id IN (${placeholders})`,
+      uniqueJobIds
+    );
+
+    return {
+      deleted: rows.map((row) => this._mapJobRow(row)),
+      deletedCount: rows.length
+    };
+  }
+
   async deleteCompletedJobs() {
     await this._ready();
 

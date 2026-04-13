@@ -2007,6 +2007,54 @@ class UploaderService extends EventEmitter {
     return results;
   }
 
+  async deleteQueuedJobs(jobIds = [], options = {}) {
+    const uniqueJobIds = [...new Set((Array.isArray(jobIds) ? jobIds : []).filter(Boolean))];
+    const reason = String(options.reason || '').trim() || 'Deleted by user';
+    const queuedJobs = [];
+    const skipped = [];
+
+    for (const jobId of uniqueJobIds) {
+      try {
+        const job = await this.db.getJob(jobId);
+        if (job.status !== 'pending') {
+          skipped.push({ jobId, reason: `job-not-pending:${job.status}` });
+          continue;
+        }
+        queuedJobs.push(job);
+      } catch (error) {
+        skipped.push({ jobId, reason: error.message });
+      }
+    }
+
+    if (queuedJobs.length === 0) {
+      return { deleted: [], deletedCount: 0, skipped };
+    }
+
+    for (const job of queuedJobs) {
+      const provider = job.metadata?.provider || job.metadata?.targetProvider;
+      if (provider && job.fileId) {
+        try {
+          await this.db.updateProviderStatus(job.fileId, provider, 'failed', null, null, reason, { embedUrl: null });
+        } catch (_) {
+          // Best-effort provider state reset before deleting queued jobs.
+        }
+      }
+      this._releaseJobClaim(job.id);
+    }
+
+    const deleted = await this.db.deleteJobs(queuedJobs.map((job) => job.id));
+    for (const job of deleted.deleted) {
+      this.emit('job:deleted', { jobId: job.id, fileId: job.fileId, type: job.type, reason });
+    }
+
+    console.log(`[Uploader] Deleted ${deleted.deletedCount} queued jobs`);
+
+    return {
+      ...deleted,
+      skipped
+    };
+  }
+
   async listJobs(filters = {}) {
     return this.db.listJobs(filters);
   }

@@ -2506,6 +2506,7 @@ async function cancelAllZeniusDownloads() {
   const cancelled = {
     downloads: [],
     uploads: [],
+    deletedUploads: [],
     errors: []
   };
 
@@ -2547,7 +2548,7 @@ async function cancelAllZeniusDownloads() {
     }
   }
   
-  // 3. Cancel pending uploads
+  // 3. Delete queued uploads immediately, then abort active uploads
   try {
     const allFiles = await db.listFiles();
     const activeJobs = await uploaderService.listJobs({ limit: 2000 });
@@ -2564,12 +2565,25 @@ async function cancelAllZeniusDownloads() {
       return Boolean(job.fileId && zeniusFileIds.has(job.fileId));
     });
 
-    const uploadJobIds = zeniusJobs
-      .filter((job) => job.type !== 'process')
+    const pendingUploadJobIds = zeniusJobs
+      .filter((job) => job.type !== 'process' && job.status === 'pending')
       .map((job) => job.id);
 
-    const uploadCancelResults = await uploaderService.cancelJobs(uploadJobIds);
+    const processingUploadJobIds = zeniusJobs
+      .filter((job) => job.type !== 'process' && job.status === 'processing')
+      .map((job) => job.id);
+
+    const deletedUploadResults = await uploaderService.deleteQueuedJobs(pendingUploadJobIds, {
+      reason: 'Deleted by user (cancel all)'
+    });
+    cancelled.deletedUploads.push(...deletedUploadResults.deleted.map((job) => ({ jobId: job.id, fileId: job.fileId })));
+
+    const uploadCancelResults = await uploaderService.cancelJobs(processingUploadJobIds);
     cancelled.uploads.push(...uploadCancelResults.cancelled.map((item) => ({ jobId: item.jobId })));
+
+    if (deletedUploadResults.skipped.length > 0) {
+      cancelled.errors.push(...deletedUploadResults.skipped.map((item) => ({ phase: 'delete-queued-uploads', jobId: item.jobId, error: item.reason })));
+    }
 
     if (uploadCancelResults.failed.length > 0) {
       cancelled.errors.push(...uploadCancelResults.failed.map((item) => ({ phase: 'uploads', jobId: item.jobId, error: item.error })));
@@ -2867,10 +2881,11 @@ const zeniusController = {
       
       res.json({
         success: true,
-        message: 'All Zenius downloads and uploads cancelled',
+        message: 'All Zenius downloads stopped and queued uploads removed',
         data: {
           cancelledDownloads: result.downloads.length,
           cancelledUploads: result.uploads.length,
+          deletedQueuedUploads: result.deletedUploads.length,
           cancelledBackgroundBatches,
           errors: result.errors,
           details: result
