@@ -299,6 +299,85 @@ class DatabaseHandler {
     };
   }
 
+  async _buildFileCompleteness(fileId, providerRows = null, options = {}) {
+    const includeDisabled = options.includeDisabled === true;
+    const providerCatalog = await this.getProviderCatalog({ includeDisabled });
+    const targetProviders = providerCatalog.map((item) => item.id);
+
+    let rows = providerRows;
+    if (!Array.isArray(rows)) {
+      const providerMap = await this._getProviderRowsByFileIds([fileId]);
+      rows = providerMap.get(fileId) || [];
+    }
+
+    const rowMap = new Map(rows.map((row) => [row.provider, row]));
+    const completedProviders = [];
+    const failedProviders = [];
+    const pendingProviders = [];
+
+    for (const providerId of targetProviders) {
+      const status = String(rowMap.get(providerId)?.status || 'pending').trim().toLowerCase();
+      if (status === 'completed') {
+        completedProviders.push(providerId);
+      } else if (status === 'failed') {
+        failedProviders.push(providerId);
+      } else {
+        pendingProviders.push(providerId);
+      }
+    }
+
+    const targetCount = Math.max(1, targetProviders.length);
+    const completedCount = completedProviders.length;
+    const failedCount = failedProviders.length;
+    const syncStatus = Math.round((completedCount / targetCount) * 100);
+
+    let fileStatus = 'uploading';
+    if (completedCount === targetCount) {
+      fileStatus = 'completed';
+    } else if (completedCount === 0 && failedCount === targetCount) {
+      fileStatus = 'failed';
+    } else if (completedCount > 0 || failedCount > 0) {
+      fileStatus = 'partial';
+    }
+
+    return {
+      providerCatalog,
+      targetProviders,
+      targetCount,
+      completedProviders,
+      failedProviders,
+      pendingProviders,
+      completedCount,
+      failedCount,
+      syncStatus,
+      status: fileStatus,
+      isComplete: completedCount === targetCount,
+      isIncomplete: completedCount !== targetCount,
+      canDelete: completedCount === targetCount && failedCount === 0
+    };
+  }
+
+  async _updateFileCompleteness(connection, fileId, options = {}) {
+    const [fileRows] = await connection.query('SELECT id FROM files WHERE id = ? LIMIT 1', [fileId]);
+    if (!fileRows[0]) {
+      throw new Error(`File ${fileId} not found`);
+    }
+
+    const [providerRows] = await connection.query('SELECT * FROM file_providers WHERE file_id = ?', [fileId]);
+    const completeness = await this._buildFileCompleteness(fileId, providerRows, options);
+    const now = this._now();
+
+    await connection.query(
+      'UPDATE files SET sync_status = ?, can_delete = ?, status = ?, updated_at = ? WHERE id = ?',
+      [completeness.syncStatus, completeness.canDelete ? 1 : 0, completeness.status, now, fileId]
+    );
+
+    return {
+      ...completeness,
+      updatedAt: now
+    };
+  }
+
   async _initialize() {
     if (this.mysql.autoCreateDatabase) {
       await this._createDatabaseIfNeeded();
@@ -1352,26 +1431,7 @@ class DatabaseHandler {
         [reason, stringifyJson(history), now, fileId, provider]
       );
 
-      const [providerRows] = await connection.query('SELECT status FROM file_providers WHERE file_id = ?', [fileId]);
-      const statuses = providerRows.map((row) => row.status);
-      const providerCount = Math.max(1, statuses.length);
-      const completed = statuses.filter((value) => value === 'completed').length;
-      const failed = statuses.filter((value) => value === 'failed').length;
-
-      let fileStatus = 'uploading';
-      if (completed === providerCount) {
-        fileStatus = 'completed';
-      } else if (completed + failed === providerCount) {
-        fileStatus = failed === providerCount ? 'failed' : 'partial';
-      }
-
-      const syncStatus = Math.round((completed / providerCount) * 100);
-      const canDelete = completed === providerCount && failed === 0;
-
-      await connection.query(
-        'UPDATE files SET sync_status = ?, can_delete = ?, status = ?, updated_at = ? WHERE id = ?',
-        [syncStatus, canDelete ? 1 : 0, fileStatus, now, fileId]
-      );
+      await this._updateFileCompleteness(connection, fileId);
 
       return { fileId, provider, cleared: true, reason };
     });
@@ -1441,26 +1501,7 @@ class DatabaseHandler {
         ]
       );
 
-      const [providerRows] = await connection.query('SELECT status FROM file_providers WHERE file_id = ?', [fileId]);
-      const statuses = providerRows.map((row) => row.status);
-      const providerCount = Math.max(1, statuses.length);
-      const completed = statuses.filter((value) => value === 'completed').length;
-      const failed = statuses.filter((value) => value === 'failed').length;
-
-      let fileStatus = 'uploading';
-      if (completed === providerCount) {
-        fileStatus = 'completed';
-      } else if (completed + failed === providerCount) {
-        fileStatus = failed === providerCount ? 'failed' : 'partial';
-      }
-
-      const syncStatus = Math.round((completed / providerCount) * 100);
-      const canDelete = completed === providerCount && failed === 0;
-
-      await connection.query(
-        'UPDATE files SET sync_status = ?, can_delete = ?, status = ?, updated_at = ? WHERE id = ?',
-        [syncStatus, canDelete ? 1 : 0, fileStatus, now, fileId]
-      );
+      await this._updateFileCompleteness(connection, fileId);
     });
 
     return this.getFile(fileId);
@@ -1614,6 +1655,50 @@ class DatabaseHandler {
 
     const [rows] = await this.pool.query(sql, params);
     return this._hydrateFiles(rows);
+  }
+
+  async refreshFileCompleteness(fileId, options = {}) {
+    await this._ready();
+
+    await this._withTransaction(async (connection) => {
+      await this._ensureFileProvidersForFile(connection, fileId);
+      await this._updateFileCompleteness(connection, fileId, options);
+    });
+
+    const file = await this.getFile(fileId);
+    const completeness = await this._buildFileCompleteness(fileId, null, options);
+
+    return {
+      file,
+      completeness
+    };
+  }
+
+  async refreshAllFilesCompleteness(options = {}) {
+    await this._ready();
+
+    const files = await this.listFiles();
+    const results = [];
+
+    for (const file of files) {
+      const refreshed = await this.refreshFileCompleteness(file.id, options);
+      results.push({
+        fileId: file.id,
+        name: file.name,
+        status: refreshed.file.status,
+        syncStatus: refreshed.file.syncStatus,
+        pendingProviders: refreshed.completeness.pendingProviders,
+        completedProviders: refreshed.completeness.completedProviders,
+        failedProviders: refreshed.completeness.failedProviders
+      });
+    }
+
+    return {
+      total: results.length,
+      complete: results.filter((item) => item.pendingProviders.length === 0).length,
+      incomplete: results.filter((item) => item.pendingProviders.length > 0).length,
+      results
+    };
   }
 
   async moveFile(fileId, folderId) {

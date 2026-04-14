@@ -3,6 +3,7 @@ const router = express.Router();
 const fileController = require('../controllers/fileController');
 
 router.get('/', fileController.list);
+router.post('/check-completeness', fileController.refreshCompleteness);
 router.post('/bulk/delete-failed', fileController.deleteAllFailed);
 router.post('/bulk/delete-problem', fileController.deleteAllProblemFiles);
 router.get('/:id', fileController.get);
@@ -14,6 +15,7 @@ router.post('/:id/delete-force', fileController.deleteForce);
 router.post('/:id/retry', fileController.retry);
 router.post('/:id/reupload/:provider', fileController.reupload);
 router.post('/:id/copy/:targetProvider', fileController.copy);
+router.post('/:id/check-completeness', fileController.refreshCompleteness);
 router.delete('/:id/providers/:provider', fileController.clearProviderLink);
 
 module.exports = router;

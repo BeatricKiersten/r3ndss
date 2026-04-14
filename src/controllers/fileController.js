@@ -128,6 +128,22 @@ const fileController = {
     }
   },
 
+  async refreshCompleteness(req, res) {
+    try {
+      const fileId = String(req.params.id || '').trim();
+      if (fileId) {
+        const result = await db.refreshFileCompleteness(fileId);
+        res.json({ success: true, data: result });
+        return;
+      }
+
+      const result = await db.refreshAllFilesCompleteness();
+      res.json({ success: true, data: result });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
   async deleteAllFailed(req, res) {
     try {
       const failedFiles = await db.listFiles(null, 'failed');

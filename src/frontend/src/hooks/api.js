@@ -585,6 +585,41 @@ export const useDeleteAllProblemFiles = () => {
   );
 };
 
+export const useCheckAllFilesCompleteness = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation(
+    async () => {
+      const response = await api.post('/api/files/check-completeness');
+      return response.data.data;
+    },
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('files');
+        queryClient.invalidateQueries('dashboard');
+      }
+    }
+  );
+};
+
+export const useCheckFileCompleteness = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation(
+    async (fileId) => {
+      const response = await api.post(`/api/files/${fileId}/check-completeness`);
+      return response.data.data;
+    },
+    {
+      onSuccess: (_, fileId) => {
+        queryClient.invalidateQueries('files');
+        queryClient.invalidateQueries(['file', fileId]);
+        queryClient.invalidateQueries('dashboard');
+      }
+    }
+  );
+};
+
 // Dashboard hooks
 export const useDashboard = () => {
   return useQuery(

@@ -12,7 +12,9 @@ import {
   useFileProvidersStatus,
   useProblemFiles,
   useDeleteAllProblemFiles,
-  useClearFileProviderLink
+  useClearFileProviderLink,
+  useCheckAllFilesCompleteness,
+  useCheckFileCompleteness
 } from '../hooks/api';
 import { usePlayerStore } from '../store/websocketStore';
 import { useNavigate } from 'react-router-dom';
@@ -32,6 +34,7 @@ import {
   Plus,
   Upload,
   RefreshCw,
+  ScanSearch,
   X,
   Cloud,
   Search,
@@ -642,6 +645,8 @@ export default function FileListPage() {
   const purgeFolder = usePurgeFolder();
   const problemFilesQuery = useProblemFiles();
   const deleteAllProblemFiles = useDeleteAllProblemFiles();
+  const checkAllFilesCompleteness = useCheckAllFilesCompleteness();
+  const checkFileCompleteness = useCheckFileCompleteness();
   const [moveFolderTarget, setMoveFolderTarget] = useState(null);
 
   const allFolders = useMemo(() => {
@@ -793,6 +798,30 @@ export default function FileListPage() {
       setShowRemoveFailedModal(false);
     } catch (error) {
       toast.error('Gagal menghapus file problem: ' + error.message);
+    }
+  };
+
+  const handleCheckCompleteness = async (fileId = null) => {
+    try {
+      if (fileId) {
+        const result = await checkFileCompleteness.mutateAsync(fileId);
+        const pendingCount = result?.completeness?.pendingProviders?.length || 0;
+        toast.success(
+          pendingCount === 0 ? 'File sudah lengkap' : 'File belum lengkap',
+          pendingCount === 0
+            ? `Semua provider aktif sudah lengkap untuk ${result?.file?.name || 'file ini'}`
+            : `${result?.file?.name || 'File ini'} masih kurang ${pendingCount} provider`
+        );
+        return;
+      }
+
+      const result = await checkAllFilesCompleteness.mutateAsync();
+      toast.success(
+        'Completeness check selesai',
+        `${result.complete || 0} lengkap, ${result.incomplete || 0} belum lengkap`
+      );
+    } catch (error) {
+      toast.error('Gagal cek kelengkapan', error?.response?.data?.error || error.message);
     }
   };
 
@@ -1179,6 +1208,15 @@ export default function FileListPage() {
                     )}
                     Remove Problem Files
                   </button>
+                  <button
+                    onClick={() => handleCheckCompleteness()}
+                    disabled={checkAllFilesCompleteness.isLoading}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 border border-blue-500/20 transition-colors disabled:opacity-50"
+                    title="Cek apakah semua file sudah lengkap di provider aktif"
+                  >
+                    <ScanSearch className={`w-3.5 h-3.5 ${checkAllFilesCompleteness.isLoading ? 'animate-spin' : ''}`} />
+                    {checkAllFilesCompleteness.isLoading ? 'Checking...' : 'Check Completeness'}
+                  </button>
                 </div>
               </div>
             ) : null}
@@ -1305,7 +1343,16 @@ export default function FileListPage() {
                               >
                                 <Eye className="w-3.5 h-3.5" /> View Details
                               </button>
-                              
+                              <button
+                                onClick={() => {
+                                  handleCheckCompleteness(file.id);
+                                  setFileMenuOpen(null);
+                                }}
+                                className="w-full text-left px-3 py-2 text-xs text-[#aaa] hover:bg-[#222] hover:text-white flex items-center gap-2"
+                              >
+                                <ScanSearch className="w-3.5 h-3.5" /> Check Completeness
+                              </button>
+                               
                               <div className="border-t border-[#222] px-3 py-1.5 text-[10px] text-[#555] uppercase">Move to</div>
                               {allFolders
                                 .filter((folder) => folder.id !== file.folderId)
