@@ -499,9 +499,9 @@ class DatabaseHandler {
       [now]
     );
 
-    await this._seedMissingFileProviders(now);
-
     await this._runMigrations();
+
+    await this._seedMissingFileProviders(now);
 
     await this._migrateLegacyRcloneProviderRows();
   }
