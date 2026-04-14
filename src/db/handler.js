@@ -335,8 +335,8 @@ class DatabaseHandler {
     if (completedCount === targetCount) {
       fileStatus = 'completed';
     } else if (failedCount > 0 && completedCount + failedCount === targetCount) {
-      fileStatus = 'failed';
-    } else if (completedCount < targetCount) {
+      fileStatus = failedCount === targetCount ? 'failed' : 'partial';
+    } else if (completedCount > 0 || failedCount > 0) {
       fileStatus = 'partial';
     }
 
@@ -367,10 +367,18 @@ class DatabaseHandler {
     const completeness = await this._buildFileCompleteness(fileId, providerRows, options);
     const now = this._now();
 
-    await connection.query(
-      'UPDATE files SET sync_status = ?, can_delete = ?, status = ?, updated_at = ? WHERE id = ?',
-      [completeness.syncStatus, completeness.canDelete ? 1 : 0, completeness.status, now, fileId]
-    );
+    const updateFileStatus = options.updateFileStatus === true;
+    if (updateFileStatus) {
+      await connection.query(
+        'UPDATE files SET sync_status = ?, can_delete = ?, status = ?, updated_at = ? WHERE id = ?',
+        [completeness.syncStatus, completeness.canDelete ? 1 : 0, completeness.status, now, fileId]
+      );
+    } else {
+      await connection.query(
+        'UPDATE files SET sync_status = ?, updated_at = ? WHERE id = ?',
+        [completeness.syncStatus, now, fileId]
+      );
+    }
 
     return {
       ...completeness,
@@ -620,17 +628,21 @@ class DatabaseHandler {
   }
 
   async _seedMissingFileProviders(updatedAt = this._now()) {
-    for (const provider of STATIC_PROVIDER_IDS) {
+    await this._ready();
+    const providerCatalog = await this.getProviderCatalog({ includeDisabled: false });
+    const allProviderIds = providerCatalog.map((item) => item.id);
+
+    for (const provider of allProviderIds) {
       await this.pool.query(
         `INSERT INTO file_providers
-          (file_id, provider, status, url, remote_file_id, public_file_id, embed_url, error, url_history, updated_at)
-         SELECT f.id, ?, 'pending', NULL, NULL, NULL, NULL, NULL, ?, ?
-          FROM files f
-          WHERE NOT EXISTS (
-            SELECT 1
-            FROM file_providers fp
-           WHERE fp.file_id = f.id AND fp.provider = ?
-         )`,
+           (file_id, provider, status, url, remote_file_id, public_file_id, embed_url, error, url_history, updated_at)
+          SELECT f.id, ?, 'pending', NULL, NULL, NULL, NULL, NULL, ?, ?
+           FROM files f
+           WHERE NOT EXISTS (
+             SELECT 1
+             FROM file_providers fp
+            WHERE fp.file_id = f.id AND fp.provider = ?
+           )`,
         [provider, FILE_PROVIDER_EMPTY_HISTORY, updatedAt, provider]
       );
     }

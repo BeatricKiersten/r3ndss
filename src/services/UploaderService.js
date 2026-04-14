@@ -335,6 +335,7 @@ class UploaderService extends EventEmitter {
   }
 
   async getPendingUploadProviders(fileId, selectedProviders = null) {
+    await this.db.refreshFileCompleteness(fileId, { updateFileStatus: false });
     const file = await this.db.getFile(fileId);
     const providerCatalog = await this._refreshProviderRuntime();
     const enabledProviders = providerCatalog
@@ -351,7 +352,6 @@ class UploaderService extends EventEmitter {
             resolved.push(providerId);
           }
         } catch (_) {
-          // Ignore invalid providers in payload.
         }
       }
       targetProviders = resolved;
