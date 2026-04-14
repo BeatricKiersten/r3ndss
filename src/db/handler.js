@@ -632,20 +632,20 @@ class DatabaseHandler {
     const providerCatalog = await this.getProviderCatalog({ includeDisabled: false });
     const allProviderIds = providerCatalog.map((item) => item.id);
 
-    for (const provider of allProviderIds) {
-      await this.pool.query(
-        `INSERT INTO file_providers
-           (file_id, provider, status, url, remote_file_id, public_file_id, embed_url, error, url_history, updated_at)
-          SELECT f.id, ?, 'pending', NULL, NULL, NULL, NULL, NULL, ?, ?
-           FROM files f
-           WHERE NOT EXISTS (
-             SELECT 1
-             FROM file_providers fp
-            WHERE fp.file_id = f.id AND fp.provider = ?
-           )`,
-        [provider, FILE_PROVIDER_EMPTY_HISTORY, updatedAt, provider]
-      );
-    }
+    if (!allProviderIds.length) return;
+
+    const placeholders = allProviderIds.map(() => '?').join(',');
+    await this.pool.query(
+      `INSERT IGNORE INTO file_providers
+        (file_id, provider, status, url, remote_file_id, public_file_id, embed_url, error, url_history, updated_at)
+       SELECT f.id, p.provider, 'pending', NULL, NULL, NULL, NULL, NULL, ?, ?
+       FROM files f
+       CROSS JOIN (
+         SELECT ? AS provider
+         ${allProviderIds.slice(1).map(() => 'UNION ALL SELECT ?').join('\n')}
+       ) p`,
+      [FILE_PROVIDER_EMPTY_HISTORY, updatedAt, ...allProviderIds]
+    );
   }
 
   async _runMigrations() {

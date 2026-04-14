@@ -242,7 +242,7 @@ async function startServer() {
     });
 
     // Validate database initialization with timeout
-    const DB_TIMEOUT_MS = 30000; // 30 seconds max for DB startup work
+    const DB_TIMEOUT_MS = Math.max(30000, Number(process.env.DB_INIT_TIMEOUT_MS || 60000)); // default 60s for cloud DBs
     const dbCheckPromise = db.getProviderConfigs();
     const timeoutPromise = new Promise((_, reject) => 
       setTimeout(() => reject(new Error('Database initialization timeout (30s)')), DB_TIMEOUT_MS)
