@@ -386,7 +386,18 @@ class UploaderService extends EventEmitter {
       const providerStatus = file.providers?.[provider] || null;
 
       if (providerStatus?.status === 'completed') {
-        skippedProviders.push({ provider, reason: 'already-uploaded' });
+        const checkedStatus = await this._checkProviderFileStatus(provider, providerStatus);
+        if (checkedStatus.remoteExists) {
+          skippedProviders.push({ provider, reason: 'already-uploaded' });
+          continue;
+        }
+
+        pendingProviders.push(provider);
+        skippedProviders.push({
+          provider,
+          reason: 'remote-missing',
+          error: checkedStatus.error || null
+        });
         continue;
       }
 
