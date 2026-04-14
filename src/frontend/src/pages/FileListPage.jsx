@@ -10,8 +10,8 @@ import {
   usePurgeFolder,
   useReuploadToProvider,
   useFileProvidersStatus,
-  useFailedFiles,
-  useDeleteAllFailedFiles,
+  useProblemFiles,
+  useDeleteAllProblemFiles,
   useClearFileProviderLink
 } from '../hooks/api';
 import { usePlayerStore } from '../store/websocketStore';
@@ -528,7 +528,7 @@ function FileDetailModal({ file, onClose }) {
   );
 }
 
-function RemoveFailedModal({ files, isLoading, isDeleting, onConfirm, onClose }) {
+function RemoveProblemFilesModal({ files, isLoading, isDeleting, onConfirm, onClose }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" onClick={onClose}>
       <div className="w-full max-w-lg bg-[#1a1a1a] rounded-xl border border-[#333] shadow-2xl" onClick={(e) => e.stopPropagation()}>
@@ -537,7 +537,7 @@ function RemoveFailedModal({ files, isLoading, isDeleting, onConfirm, onClose })
             <AlertTriangle className="w-5 h-5 text-red-400" />
           </div>
           <div>
-            <h3 className="text-sm font-medium text-white">Remove All Failed Files</h3>
+            <h3 className="text-sm font-medium text-white">Remove Problem Files</h3>
             <p className="text-xs text-[#888]">{files.length} file akan dihapus secara permanen</p>
           </div>
           <button onClick={onClose} className="ml-auto p-1 text-[#666] hover:text-white">
@@ -553,8 +553,12 @@ function RemoveFailedModal({ files, isLoading, isDeleting, onConfirm, onClose })
           ) : (
             files.map((file) => (
               <div key={file.id} className="flex items-center gap-3 p-2.5 rounded-lg bg-[#0d0d0d] border border-[#222]">
-                <div className="w-7 h-7 rounded bg-red-500/10 flex items-center justify-center flex-shrink-0">
-                  <AlertCircle className="w-3.5 h-3.5 text-red-400" />
+                <div className={`w-7 h-7 rounded flex items-center justify-center flex-shrink-0 ${file.status === 'processing' ? 'bg-amber-500/10' : 'bg-red-500/10'}`}>
+                  {file.status === 'processing' ? (
+                    <Clock className="w-3.5 h-3.5 text-amber-400" />
+                  ) : (
+                    <AlertCircle className="w-3.5 h-3.5 text-red-400" />
+                  )}
                 </div>
                 <div className="min-w-0 flex-1">
                   <p className="text-sm text-[#ccc] truncate">{file.name}</p>
@@ -564,7 +568,9 @@ function RemoveFailedModal({ files, isLoading, isDeleting, onConfirm, onClose })
                     <span>{formatDate(file.createdAt)}</span>
                   </div>
                 </div>
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-400/10 text-red-400">failed</span>
+                <span className={`text-[10px] px-1.5 py-0.5 rounded ${file.status === 'processing' ? 'bg-amber-400/10 text-amber-400' : 'bg-red-400/10 text-red-400'}`}>
+                  {file.status}
+                </span>
               </div>
             ))
           )}
@@ -632,8 +638,8 @@ export default function FileListPage() {
   const moveFile = useMoveFile();
   const moveFolder = useMoveFolder();
   const purgeFolder = usePurgeFolder();
-  const failedFilesQuery = useFailedFiles();
-  const deleteAllFailed = useDeleteAllFailedFiles();
+  const problemFilesQuery = useProblemFiles();
+  const deleteAllProblemFiles = useDeleteAllProblemFiles();
   const [moveFolderTarget, setMoveFolderTarget] = useState(null);
 
   const allFolders = useMemo(() => {
@@ -768,9 +774,9 @@ export default function FileListPage() {
   };
 
   const handleOpenRemoveFailedModal = async () => {
-    const result = await failedFilesQuery.refetch();
+    const result = await problemFilesQuery.refetch();
     if (!result.data || result.data.length === 0) {
-      toast.info('Tidak ada file dengan status failed');
+      toast.info('Tidak ada file dengan status processing, failed, atau cancelled');
       return;
     }
     setShowRemoveFailedModal(true);
@@ -778,13 +784,13 @@ export default function FileListPage() {
 
   const handleConfirmRemoveFailed = async () => {
     try {
-      const result = await deleteAllFailed.mutateAsync();
+      const result = await deleteAllProblemFiles.mutateAsync();
       const deleted = result.results?.filter((r) => r.deleted).length || 0;
       const failed = result.results?.filter((r) => !r.deleted).length || 0;
-      toast.success(`${deleted} file failed berhasil dihapus${failed > 0 ? `, ${failed} gagal dihapus` : ''}`);
+      toast.success(`${deleted} file problem berhasil dihapus${failed > 0 ? `, ${failed} gagal dihapus` : ''}`);
       setShowRemoveFailedModal(false);
     } catch (error) {
-      toast.error('Gagal menghapus file failed: ' + error.message);
+      toast.error('Gagal menghapus file problem: ' + error.message);
     }
   };
 
@@ -1160,16 +1166,16 @@ export default function FileListPage() {
                   </div>
                   <button
                     onClick={handleOpenRemoveFailedModal}
-                    disabled={failedFilesQuery.isFetching}
+                    disabled={problemFilesQuery.isFetching}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 transition-colors disabled:opacity-50"
-                    title="Hapus semua file yang gagal"
+                    title="Hapus semua file processing, failed, atau cancelled"
                   >
-                    {failedFilesQuery.isFetching ? (
+                    {problemFilesQuery.isFetching ? (
                       <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                     ) : (
                       <ListX className="w-3.5 h-3.5" />
                     )}
-                    Remove Failed
+                    Remove Problem Files
                   </button>
                 </div>
               </div>
@@ -1365,10 +1371,10 @@ export default function FileListPage() {
       )}
 
       {showRemoveFailedModal && (
-        <RemoveFailedModal
-          files={failedFilesQuery.data || []}
-          isLoading={failedFilesQuery.isFetching}
-          isDeleting={deleteAllFailed.isLoading}
+        <RemoveProblemFilesModal
+          files={problemFilesQuery.data || []}
+          isLoading={problemFilesQuery.isFetching}
+          isDeleting={deleteAllProblemFiles.isLoading}
           onConfirm={handleConfirmRemoveFailed}
           onClose={() => setShowRemoveFailedModal(false)}
         />

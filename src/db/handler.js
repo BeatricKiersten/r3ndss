@@ -1447,6 +1447,26 @@ class DatabaseHandler {
     return this.getFile(fileId);
   }
 
+  async markFileProcessingCancelled(fileId) {
+    await this._ready();
+
+    const now = this._now();
+    const [result] = await this.pool.query(
+      `UPDATE files
+       SET status = 'failed',
+           progress_processing = 0,
+           updated_at = ?
+       WHERE id = ? AND status = 'processing'`,
+      [now, fileId]
+    );
+
+    if (result.affectedRows === 0) {
+      return this.getFile(fileId);
+    }
+
+    return this.getFile(fileId);
+  }
+
   async markFileDeleted(fileId) {
     return this._withTransaction(async (connection) => {
       const [rows] = await connection.query('SELECT id, can_delete FROM files WHERE id = ? FOR UPDATE', [fileId]);

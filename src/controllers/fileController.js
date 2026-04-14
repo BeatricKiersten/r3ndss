@@ -126,6 +126,29 @@ const fileController = {
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
     }
+  },
+
+  async deleteAllProblemFiles(req, res) {
+    try {
+      const files = await db.listFiles();
+      const statuses = new Set(['processing', 'failed', 'cancelled']);
+      const targetFiles = files.filter((file) => statuses.has(String(file.status || '').toLowerCase()));
+      const results = [];
+
+      for (const file of targetFiles) {
+        try {
+          await uploaderService.deleteFileResources(file.id);
+          await db.purgeFileAndJobs(file.id);
+          results.push({ fileId: file.id, name: file.name, status: file.status, deleted: true });
+        } catch (error) {
+          results.push({ fileId: file.id, name: file.name, status: file.status, deleted: false, error: error.message });
+        }
+      }
+
+      res.json({ success: true, data: { total: targetFiles.length, results } });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
   }
 };
 

@@ -526,6 +526,11 @@ class VideoProcessor {
    * Cancel active FFmpeg process
    */
   async cancelJob(jobId) {
+    let job = null;
+    try {
+      job = await this.db.getJob(jobId);
+    } catch (_) {}
+
     this._stopJobHeartbeat(jobId);
     const process = this.activeProcesses.get(jobId);
     if (process) {
@@ -540,10 +545,21 @@ class VideoProcessor {
           // Process already terminated
         }
       }, 5000);
-      
-      return true;
     }
-    return false;
+
+    if (job?.metadata?.tempPlaylistPath) {
+      await this._cleanup(job.metadata.tempPlaylistPath);
+    }
+
+    if (job?.metadata?.outputPath) {
+      await fs.remove(job.metadata.outputPath).catch(() => {});
+    }
+
+    if (job?.fileId) {
+      await this.db.markFileProcessingCancelled(job.fileId).catch(() => {});
+    }
+
+    return Boolean(job || process);
   }
 
   /**

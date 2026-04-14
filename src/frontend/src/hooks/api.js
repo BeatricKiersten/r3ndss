@@ -537,12 +537,43 @@ export const useFailedFiles = () => {
   );
 };
 
+export const useProblemFiles = () => {
+  return useQuery(
+    ['files', null, 'problem'],
+    async () => {
+      const response = await api.get('/api/files');
+      return (response.data.data || []).filter((file) => ['processing', 'failed', 'cancelled'].includes(String(file.status || '').toLowerCase()));
+    },
+    {
+      refetchInterval: false,
+      enabled: false
+    }
+  );
+};
+
 export const useDeleteAllFailedFiles = () => {
   const queryClient = useQueryClient();
 
   return useMutation(
     async () => {
       const response = await api.post('/api/files/bulk/delete-failed');
+      return response.data.data;
+    },
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('files');
+        queryClient.invalidateQueries('dashboard');
+      }
+    }
+  );
+};
+
+export const useDeleteAllProblemFiles = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation(
+    async () => {
+      const response = await api.post('/api/files/bulk/delete-problem');
       return response.data.data;
     },
     {
