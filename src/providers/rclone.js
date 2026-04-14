@@ -117,6 +117,19 @@ class RcloneAdapter {
       .replace(/'/g, "\\'");
   }
 
+  _parseRemoteFileId(fileId) {
+    const normalized = String(fileId || '').trim();
+    if (!normalized || !normalized.includes(':')) {
+      return { remoteName: null, remotePath: null };
+    }
+
+    const separatorIndex = normalized.indexOf(':');
+    return {
+      remoteName: normalized.slice(0, separatorIndex).trim() || null,
+      remotePath: normalized.slice(separatorIndex + 1).replace(/^\/+/, '') || ''
+    };
+  }
+
   async _resolveGoogleDriveFileInfo(configPath, profile, remotePath) {
     const normalizedPath = String(remotePath || '').replace(/^\/+/, '').trim();
     if (!normalizedPath) {
@@ -239,7 +252,16 @@ class RcloneAdapter {
   }
 
   async _withTempRcloneConfig(runFn) {
-    const { remotes } = await this._getRcloneConfig();
+    if (!this.db || typeof this.db.getRcloneConfig !== 'function') {
+      throw new Error('Database handler is required for rclone-backed adapter');
+    }
+
+    const rclone = await this.db.getRcloneConfig();
+    const remotes = Array.isArray(rclone?.remotes) ? rclone.remotes : [];
+
+    if (remotes.length === 0) {
+      throw new Error('No rclone remotes configured');
+    }
 
     const configLines = [];
     for (const remote of remotes) {
@@ -388,7 +410,18 @@ class RcloneAdapter {
     }
 
     return this._withTempRcloneConfig(async (configPath) => {
-      await this._runRclone(['deletefile', String(fileId), '--config', configPath]);
+      const { remotes } = await this.db.getRcloneConfig();
+      const { remoteName } = this._parseRemoteFileId(fileId);
+      const remote = Array.isArray(remotes)
+        ? remotes.find((item) => item.name === remoteName) || null
+        : null;
+
+      await this._runRclone(this._withS3SafetyFlags([
+        'deletefile',
+        String(fileId),
+        '--config',
+        configPath
+      ], remote));
       return { deleted: true };
     });
   }
@@ -400,7 +433,18 @@ class RcloneAdapter {
 
     try {
       return await this._withTempRcloneConfig(async (configPath) => {
-        const result = await this._runRclone(['lsf', String(fileId), '--config', configPath]);
+        const { remotes } = await this.db.getRcloneConfig();
+        const { remoteName } = this._parseRemoteFileId(fileId);
+        const remote = Array.isArray(remotes)
+          ? remotes.find((item) => item.name === remoteName) || null
+          : null;
+
+        const result = await this._runRclone(this._withS3SafetyFlags([
+          'lsf',
+          String(fileId),
+          '--config',
+          configPath
+        ], remote));
         return { exists: result.stdout.trim().length > 0, info: { listing: result.stdout.trim() } };
       });
     } catch (error) {
