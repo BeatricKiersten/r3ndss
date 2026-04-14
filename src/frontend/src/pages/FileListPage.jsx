@@ -805,21 +805,46 @@ export default function FileListPage() {
     try {
       if (fileId) {
         const result = await checkFileCompleteness.mutateAsync(fileId);
-        const pendingCount = result?.completeness?.pendingProviders?.length || 0;
-        toast.success(
-          pendingCount === 0 ? 'File sudah lengkap' : 'File belum lengkap',
-          pendingCount === 0
-            ? `Semua provider aktif sudah lengkap untuk ${result?.file?.name || 'file ini'}`
-            : `${result?.file?.name || 'File ini'} masih kurang ${pendingCount} provider`
-        );
+        const { completeness } = result || {};
+        const pendingCount = completeness?.pendingProviders?.length || 0;
+        const completedCount = completeness?.completedCount || 0;
+        const targetCount = completeness?.targetCount || 0;
+        const pending = completeness?.pendingProviders || [];
+
+        if (pendingCount === 0) {
+          toast.success(
+            'File sudah lengkap',
+            `${result?.file?.name || 'File ini'}: ${completedCount}/${targetCount} provider aktif`
+          );
+        } else {
+          toast.warning(
+            `File belum lengkap (${pendingCount}/${targetCount})`,
+            `${result?.file?.name || 'File ini'}: missing ${pending.join(', ')}`
+          );
+        }
         return;
       }
 
       const result = await checkAllFilesCompleteness.mutateAsync();
-      toast.success(
-        'Completeness check selesai',
-        `${result.complete || 0} lengkap, ${result.incomplete || 0} belum lengkap`
-      );
+      const complete = result?.complete || 0;
+      const incomplete = result?.incomplete || 0;
+      const total = result?.total || 0;
+      const incompleteFiles = (result?.results || []).filter((r) => (r.pendingProviders || []).length > 0);
+
+      if (incomplete === 0) {
+        toast.success(
+          `Semua file lengkap (${total}/${total})`,
+          `Seluruh ${total} file sudah lengkap di semua provider aktif`
+        );
+      } else {
+        const sample = incompleteFiles.slice(0, 3);
+        const details = sample.map((f) => `${f.name}: ${(f.pendingProviders || []).join(', ')}`).join('\n');
+        const more = incompleteFiles.length > 3 ? `\n...dan ${incompleteFiles.length - 3} file lainnya` : '';
+        toast.warning(
+          `${incomplete} dari ${total} file belum lengkap`,
+          `${details}${more}`
+        );
+      }
     } catch (error) {
       toast.error('Gagal cek kelengkapan', error?.response?.data?.error || error.message);
     }
@@ -1301,12 +1326,18 @@ export default function FileListPage() {
                             })()}
                           </span>
                         ))}
-                        {file.status === 'completed' && (
+                        {Object.keys(file.providers || {}).length > 0 && (
                           <span
-                            className="w-5 h-5 rounded flex items-center justify-center bg-orange-400/10 text-orange-400 text-[10px] font-medium"
-                            title="File completed locally but missing provider uploads"
+                            className={`w-5 h-5 rounded flex items-center justify-center text-[10px] font-medium ${
+                              file.syncStatus === 100
+                                ? 'bg-green-400/10 text-green-400'
+                                : file.syncStatus > 0
+                                ? 'bg-orange-400/10 text-orange-400'
+                                : 'bg-[#222] text-[#555]'
+                            }`}
+                            title={`${file.syncStatus}% complete across ${Object.keys(file.providers || {}).length} providers`}
                           >
-                            ?
+                            {file.syncStatus}%
                           </span>
                         )}
                       </div>
@@ -1316,7 +1347,7 @@ export default function FileListPage() {
                         <span className={`text-xs ${status.color}`}>{file.status}</span>
                       </div>
 
-                      {file.status !== 'completed' && (
+                      {file.syncStatus !== 100 && (
                         <div className="w-20">
                           <div className="flex items-center justify-between text-xs mb-0.5">
                             <span className="text-[#666]">{file.syncStatus}%</span>
