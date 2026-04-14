@@ -629,23 +629,23 @@ class DatabaseHandler {
 
   async _seedMissingFileProviders(updatedAt = this._now()) {
     await this._ready();
-    const providerCatalog = await this.getProviderCatalog({ includeDisabled: false });
-    const allProviderIds = providerCatalog.map((item) => item.id);
+    const [fileCountRows] = await this.pool.query('SELECT COUNT(*) AS count FROM files');
+    if (toInt(fileCountRows[0]?.count) === 0) return;
 
-    if (!allProviderIds.length) return;
-
-    const placeholders = allProviderIds.map(() => '?').join(',');
-    await this.pool.query(
-      `INSERT IGNORE INTO file_providers
-        (file_id, provider, status, url, remote_file_id, public_file_id, embed_url, error, url_history, updated_at)
-       SELECT f.id, p.provider, 'pending', NULL, NULL, NULL, NULL, NULL, ?, ?
-       FROM files f
-       CROSS JOIN (
-         SELECT ? AS provider
-         ${allProviderIds.slice(1).map(() => 'UNION ALL SELECT ?').join('\n')}
-       ) p`,
-      [FILE_PROVIDER_EMPTY_HISTORY, updatedAt, ...allProviderIds]
-    );
+    for (const provider of STATIC_PROVIDER_IDS) {
+      await this.pool.query(
+        `INSERT INTO file_providers
+           (file_id, provider, status, url, remote_file_id, public_file_id, embed_url, error, url_history, updated_at)
+          SELECT f.id, ?, 'pending', NULL, NULL, NULL, NULL, NULL, ?, ?
+           FROM files f
+           WHERE NOT EXISTS (
+             SELECT 1
+             FROM file_providers fp
+            WHERE fp.file_id = f.id AND fp.provider = ?
+           )`,
+        [provider, FILE_PROVIDER_EMPTY_HISTORY, updatedAt, provider]
+      );
+    }
   }
 
   async _runMigrations() {
