@@ -1301,6 +1301,14 @@ export default function FileListPage() {
                             })()}
                           </span>
                         ))}
+                        {file.status === 'completed' && (
+                          <span
+                            className="w-5 h-5 rounded flex items-center justify-center bg-orange-400/10 text-orange-400 text-[10px] font-medium"
+                            title="File completed locally but missing provider uploads"
+                          >
+                            ?
+                          </span>
+                        )}
                       </div>
 
                       <div className={`flex items-center gap-1 px-2 py-0.5 rounded ${status.bg}`}>

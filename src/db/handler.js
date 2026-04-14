@@ -334,9 +334,9 @@ class DatabaseHandler {
     let fileStatus = 'uploading';
     if (completedCount === targetCount) {
       fileStatus = 'completed';
-    } else if (completedCount === 0 && failedCount === targetCount) {
+    } else if (failedCount > 0 && completedCount + failedCount === targetCount) {
       fileStatus = 'failed';
-    } else if (completedCount > 0 || failedCount > 0) {
+    } else if (completedCount < targetCount) {
       fileStatus = 'partial';
     }
 
@@ -696,9 +696,12 @@ class DatabaseHandler {
   }
 
   async _ensureFileProvidersForFile(connection, fileId) {
+    await this._ready();
     const now = this._now();
+    const providerCatalog = await this.getProviderCatalog({ includeDisabled: false });
+    const allProviderIds = providerCatalog.map((item) => item.id);
 
-    for (const provider of STATIC_PROVIDER_IDS) {
+    for (const provider of allProviderIds) {
       await connection.query(
         `INSERT INTO file_providers
           (file_id, provider, status, url, remote_file_id, embed_url, error, url_history, updated_at)
@@ -1665,8 +1668,10 @@ class DatabaseHandler {
       await this._updateFileCompleteness(connection, fileId, options);
     });
 
-    const file = await this.getFile(fileId);
-    const completeness = await this._buildFileCompleteness(fileId, null, options);
+    const [fileRows] = await this.pool.query('SELECT * FROM files WHERE id = ? LIMIT 1', [fileId]);
+    const [providerRows] = await this.pool.query('SELECT * FROM file_providers WHERE file_id = ?', [fileId]);
+    const completeness = await this._buildFileCompleteness(fileId, providerRows, options);
+    const file = this._mapFileRow(fileRows[0], providerRows);
 
     return {
       file,
