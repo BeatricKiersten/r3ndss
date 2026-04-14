@@ -39,6 +39,10 @@ class RcloneAdapter {
     return remoteType === 's3' || remoteType.includes('s3');
   }
 
+  _isGoogleDriveRemote(remote) {
+    return String(remote?.type || '').trim().toLowerCase() === 'drive';
+  }
+
   _withS3SafetyFlags(args, remote) {
     if (this._isS3Remote(remote)) {
       args.push('--s3-no-check-bucket');
@@ -91,6 +95,90 @@ class RcloneAdapter {
     }
 
     return `${base.replace(/\/+$/, '')}/${encodedPath}`;
+  }
+
+  _escapeDriveQueryValue(value) {
+    return String(value ?? '')
+      .replace(/\\/g, '\\\\')
+      .replace(/'/g, "\\'");
+  }
+
+  async _resolveGoogleDriveFileInfo(configPath, profile, remotePath) {
+    const normalizedPath = String(remotePath || '').replace(/^\/+/, '').trim();
+    if (!normalizedPath) {
+      return null;
+    }
+
+    try {
+      const directResult = await this._runRclone([
+        'lsf',
+        `${profile.remoteName}:${normalizedPath}`,
+        '--config',
+        configPath,
+        '--format',
+        'i',
+        '--files-only'
+      ]);
+
+      const directId = String(directResult.stdout || '')
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find(Boolean);
+
+      if (directId) {
+        return {
+          id: directId,
+          webViewLink: `https://drive.google.com/file/d/${encodeURIComponent(directId)}/view`
+        };
+      }
+    } catch (_) {
+      // Fall back to parent query when direct stat/list does not return the ID.
+    }
+
+    const parts = normalizedPath.split('/').filter(Boolean);
+    const fileName = parts.pop();
+    if (!fileName) {
+      return null;
+    }
+
+    const parentPath = parts.join('/');
+    const parentTarget = `${profile.remoteName}:${parentPath}`;
+    const parentResult = await this._runRclone([
+      'lsjson',
+      parentTarget,
+      '--config',
+      configPath,
+      '--dirs-only',
+      '--stat'
+    ]);
+
+    const parentEntry = JSON.parse(parentResult.stdout || '{}');
+    const parentId = String(parentEntry?.ID || '').trim();
+    if (!parentId) {
+      return null;
+    }
+
+    const query = `'${this._escapeDriveQueryValue(parentId)}' in parents and name = '${this._escapeDriveQueryValue(fileName)}' and trashed = false`;
+    const queryResult = await this._runRclone([
+      'backend',
+      'query',
+      `${profile.remoteName}:`,
+      query,
+      '--config',
+      configPath
+    ]);
+
+    const matches = JSON.parse(queryResult.stdout || '[]');
+    if (!Array.isArray(matches) || matches.length === 0) {
+      return null;
+    }
+
+    const exactMatch = matches.find((item) => String(item?.name || '') === fileName) || matches[0];
+    const id = String(exactMatch?.id || '').trim() || null;
+    return {
+      id,
+      webViewLink: String(exactMatch?.webViewLink || '').trim() || (id ? `https://drive.google.com/file/d/${encodeURIComponent(id)}/view` : null)
+    };
   }
 
   async _getRcloneConfig() {
@@ -244,11 +332,24 @@ class RcloneAdapter {
 
       if (onProgress) onProgress(100);
 
-      const url = this._buildPublicUrl(profile, remotePath);
+      let url = this._buildPublicUrl(profile, remotePath);
+      let publicId = null;
+      let embedUrl = null;
+
+      if (this._isGoogleDriveRemote(remote)) {
+        const driveInfo = await this._resolveGoogleDriveFileInfo(configPath, profile, remotePath).catch(() => null);
+        if (driveInfo?.id) {
+          publicId = driveInfo.id;
+          url = driveInfo.webViewLink || url;
+          embedUrl = `https://drive.google.com/file/d/${encodeURIComponent(publicId)}/preview`;
+        }
+      }
 
       return {
         url,
         fileId: destination,
+        publicId,
+        embedUrl,
         provider: this.providerName,
         size: fileSize,
         remotePath,

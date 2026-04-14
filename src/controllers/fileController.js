@@ -1,4 +1,25 @@
+const pLimit = require('p-limit');
 const { db, uploaderService } = require('../services/runtime');
+
+const BULK_FILE_DELETE_CONCURRENCY = Math.max(1, Number(process.env.BULK_FILE_DELETE_CONCURRENCY || 4));
+
+async function deleteFilesInBulk(files) {
+  const limit = pLimit(BULK_FILE_DELETE_CONCURRENCY);
+  const results = await Promise.all(files.map((file) => limit(async () => {
+    try {
+      await uploaderService.deleteFileResources(file.id);
+      await db.purgeFileAndJobs(file.id);
+      return { fileId: file.id, name: file.name, status: file.status, deleted: true };
+    } catch (error) {
+      return { fileId: file.id, name: file.name, status: file.status, deleted: false, error: error.message };
+    }
+  })));
+
+  return {
+    total: files.length,
+    results
+  };
+}
 
 const fileController = {
   async list(req, res) {
@@ -110,19 +131,8 @@ const fileController = {
   async deleteAllFailed(req, res) {
     try {
       const failedFiles = await db.listFiles(null, 'failed');
-      const results = [];
-
-      for (const file of failedFiles) {
-        try {
-          await uploaderService.deleteFileResources(file.id);
-          await db.purgeFileAndJobs(file.id);
-          results.push({ fileId: file.id, name: file.name, deleted: true });
-        } catch (error) {
-          results.push({ fileId: file.id, name: file.name, deleted: false, error: error.message });
-        }
-      }
-
-      res.json({ success: true, data: { total: failedFiles.length, results } });
+      const result = await deleteFilesInBulk(failedFiles);
+      res.json({ success: true, data: result });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
     }
@@ -133,19 +143,8 @@ const fileController = {
       const files = await db.listFiles();
       const statuses = new Set(['processing', 'failed', 'cancelled']);
       const targetFiles = files.filter((file) => statuses.has(String(file.status || '').toLowerCase()));
-      const results = [];
-
-      for (const file of targetFiles) {
-        try {
-          await uploaderService.deleteFileResources(file.id);
-          await db.purgeFileAndJobs(file.id);
-          results.push({ fileId: file.id, name: file.name, status: file.status, deleted: true });
-        } catch (error) {
-          results.push({ fileId: file.id, name: file.name, status: file.status, deleted: false, error: error.message });
-        }
-      }
-
-      res.json({ success: true, data: { total: targetFiles.length, results } });
+      const result = await deleteFilesInBulk(targetFiles);
+      res.json({ success: true, data: result });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
     }

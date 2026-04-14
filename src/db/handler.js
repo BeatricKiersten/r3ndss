@@ -217,11 +217,19 @@ class DatabaseHandler {
     const providers = {};
 
     for (const row of providerRows) {
+      const publicId = row.public_file_id || null;
+      const derivedViewUrl = publicId ? `https://drive.google.com/file/d/${encodeURIComponent(publicId)}/view` : null;
+      const derivedEmbedUrl = publicId ? `https://drive.google.com/file/d/${encodeURIComponent(publicId)}/preview` : null;
+      const normalizedUrl = row.url && /^https?:\/\//i.test(String(row.url).trim())
+        ? row.url
+        : (derivedViewUrl || row.url || null);
+
       providers[row.provider] = {
         status: row.status || 'pending',
-        url: row.url || null,
+        url: normalizedUrl,
         fileId: row.remote_file_id || null,
-        embedUrl: row.embed_url || null,
+        embedUrl: row.embed_url || derivedEmbedUrl,
+        publicId,
         error: row.error || null,
         urlHistory: parseJson(row.url_history, []) || [],
         updatedAt: row.updated_at || null
@@ -345,6 +353,7 @@ class DatabaseHandler {
         status VARCHAR(32) NOT NULL,
         url TEXT NULL,
         remote_file_id TEXT NULL,
+        public_file_id TEXT NULL,
         embed_url TEXT NULL,
         error TEXT NULL,
         url_history LONGTEXT NULL,
@@ -501,12 +510,12 @@ class DatabaseHandler {
     for (const provider of STATIC_PROVIDER_IDS) {
       await this.pool.query(
         `INSERT INTO file_providers
-          (file_id, provider, status, url, remote_file_id, embed_url, error, url_history, updated_at)
-         SELECT f.id, ?, 'pending', NULL, NULL, NULL, NULL, ?, ?
-         FROM files f
-         WHERE NOT EXISTS (
-           SELECT 1
-           FROM file_providers fp
+          (file_id, provider, status, url, remote_file_id, public_file_id, embed_url, error, url_history, updated_at)
+         SELECT f.id, ?, 'pending', NULL, NULL, NULL, NULL, NULL, ?, ?
+          FROM files f
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM file_providers fp
            WHERE fp.file_id = f.id AND fp.provider = ?
          )`,
         [provider, FILE_PROVIDER_EMPTY_HISTORY, updatedAt, provider]
@@ -525,6 +534,16 @@ class DatabaseHandler {
           return columns.length === 0;
         },
         sql: "ALTER TABLE jobs ADD COLUMN heartbeat_at VARCHAR(40) NULL, ADD INDEX idx_jobs_heartbeat (heartbeat_at)"
+      },
+      {
+        name: 'add_public_file_id_to_file_providers',
+        check: async () => {
+          const [columns] = await this.pool.query(
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'file_providers' AND COLUMN_NAME = 'public_file_id'"
+          );
+          return columns.length === 0;
+        },
+        sql: "ALTER TABLE file_providers ADD COLUMN public_file_id TEXT NULL AFTER remote_file_id"
       }
     ];
 
@@ -1279,6 +1298,7 @@ class DatabaseHandler {
           url: current.url || null,
           fileId: current.remote_file_id || null,
           embedUrl: current.embed_url || null,
+          publicId: current.public_file_id || null,
           archivedAt: this._now(),
           reason
         });
@@ -1347,23 +1367,28 @@ class DatabaseHandler {
           url: current.url,
           fileId: current.remote_file_id || null,
           embedUrl: current.embed_url || null,
+          publicId: current.public_file_id || null,
           archivedAt: this._now()
         });
       }
 
       const now = this._now();
+      const publicFileId = extra.publicId !== undefined
+        ? extra.publicId
+        : (current?.public_file_id || null);
       const embedUrl = extra.embedUrl !== undefined
         ? extra.embedUrl
         : (current?.embed_url || null);
 
       await connection.query(
         `INSERT INTO file_providers
-          (file_id, provider, status, url, remote_file_id, embed_url, error, url_history, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (file_id, provider, status, url, remote_file_id, public_file_id, embed_url, error, url_history, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
           status = VALUES(status),
           url = VALUES(url),
           remote_file_id = VALUES(remote_file_id),
+          public_file_id = VALUES(public_file_id),
           embed_url = VALUES(embed_url),
           error = VALUES(error),
           url_history = VALUES(url_history),
@@ -1374,6 +1399,7 @@ class DatabaseHandler {
           status,
           url,
           fileId_provider,
+          publicFileId,
           embedUrl,
           error,
           stringifyJson(history),

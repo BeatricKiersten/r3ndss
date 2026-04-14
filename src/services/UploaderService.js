@@ -1500,7 +1500,7 @@ class UploaderService extends EventEmitter {
         result.url,
         result.fileId,
         null,
-        { embedUrl: result.embedUrl || null }
+        { publicId: result.publicId || null, embedUrl: result.embedUrl || null }
       );
 
       await this.db.updateJob(job.id, {
@@ -1753,7 +1753,7 @@ class UploaderService extends EventEmitter {
           result.url,
           result.fileId,
           null,
-          { embedUrl: result.embedUrl || null }
+          { publicId: result.publicId || null, embedUrl: result.embedUrl || null }
         );
 
         await this.db.updateJob(job.id, {

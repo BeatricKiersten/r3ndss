@@ -505,6 +505,7 @@ function FileDetailModal({ file, onClose }) {
 
               return rcloneEntries.map(([providerKey, rcloneStatus]) => {
                 const parsed = parseRcloneFileId(rcloneStatus.fileId);
+                const googleDriveFileId = rcloneStatus.publicId || null;
 
                 return (
                   <div key={`rclone-info-${providerKey}`} className="mt-3 p-3 rounded-lg bg-red-400/10 border border-red-400/20">
@@ -515,6 +516,7 @@ function FileDetailModal({ file, onClose }) {
                     <div className="space-y-1 text-xs text-[#ddd]">
                       <p>Remote: <span className="text-white">{parsed.remoteName || '-'}</span></p>
                       <p>Path: <span className="text-white break-all">{parsed.remotePath || '-'}</span></p>
+                      {googleDriveFileId ? <p>Google Drive File ID: <span className="text-white break-all">{googleDriveFileId}</span></p> : null}
                       <p>Public URL: <span className="text-white break-all">{rcloneStatus.url || '-'}</span></p>
                     </div>
                   </div>
