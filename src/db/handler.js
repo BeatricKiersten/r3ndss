@@ -690,6 +690,28 @@ class DatabaseHandler {
     await this.initPromise;
   }
 
+  async waitForConnectionOnly() {
+    const pingConfig = {
+      host: this.mysql.host,
+      port: this.mysql.port,
+      user: this.mysql.user,
+      password: this.mysql.password,
+      database: this.mysql.database,
+      charset: 'utf8mb4'
+    };
+
+    if (this.mysql.ssl) {
+      pingConfig.ssl = { rejectUnauthorized: this.mysql.sslRejectUnauthorized };
+    }
+
+    const connection = await mysql.createConnection(pingConfig);
+    try {
+      await connection.query('SELECT 1 AS ok');
+    } finally {
+      await connection.end();
+    }
+  }
+
   async _withTransaction(fn) {
     await this._ready();
     const connection = await this.pool.getConnection();

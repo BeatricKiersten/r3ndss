@@ -245,7 +245,7 @@ async function startServer() {
     const DB_TIMEOUT_MS = Math.max(30000, Number(process.env.DB_INIT_TIMEOUT_MS || 180000)); // 180s default for slow cloud DB migrations
     const dbTimeoutSeconds = Math.floor(DB_TIMEOUT_MS / 1000);
     console.log(`[Server] Waiting for database initialization (timeout: ${dbTimeoutSeconds}s)`);
-    const dbCheckPromise = db.getProviderConfigs();
+    const dbCheckPromise = db.waitForConnectionOnly();
     const timeoutPromise = new Promise((_, reject) => 
       setTimeout(() => reject(new Error(`Database initialization timeout (${dbTimeoutSeconds}s)`)), DB_TIMEOUT_MS)
     );
