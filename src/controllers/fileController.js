@@ -1,13 +1,14 @@
 const pLimit = require('p-limit');
 const { db, uploaderService } = require('../services/runtime');
 
-const BULK_FILE_DELETE_CONCURRENCY = Math.max(1, Number(process.env.BULK_FILE_DELETE_CONCURRENCY || 4));
+const BULK_FILE_DELETE_CONCURRENCY = Math.max(1, Number(process.env.BULK_FILE_DELETE_CONCURRENCY || 10));
 
-async function deleteFilesInBulk(files) {
+async function deleteFilesInBulk(files, options = {}) {
+  const { skipRemoteDelete = false } = options;
   const limit = pLimit(BULK_FILE_DELETE_CONCURRENCY);
   const results = await Promise.all(files.map((file) => limit(async () => {
     try {
-      await uploaderService.deleteFileResources(file.id);
+      await uploaderService.deleteFileResources(file.id, { skipRemoteDelete });
       await db.purgeFileAndJobs(file.id);
       return { fileId: file.id, name: file.name, status: file.status, deleted: true };
     } catch (error) {
@@ -147,7 +148,7 @@ const fileController = {
   async deleteAllFailed(req, res) {
     try {
       const failedFiles = await db.listFiles(null, 'failed');
-      const result = await deleteFilesInBulk(failedFiles);
+      const result = await deleteFilesInBulk(failedFiles, { skipRemoteDelete: true });
       res.json({ success: true, data: result });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
@@ -159,7 +160,7 @@ const fileController = {
       const files = await db.listFiles();
       const statuses = new Set(['processing', 'failed', 'cancelled']);
       const targetFiles = files.filter((file) => statuses.has(String(file.status || '').toLowerCase()));
-      const result = await deleteFilesInBulk(targetFiles);
+      const result = await deleteFilesInBulk(targetFiles, { skipRemoteDelete: true });
       res.json({ success: true, data: result });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });

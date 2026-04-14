@@ -2078,7 +2078,8 @@ class UploaderService extends EventEmitter {
     return { deleted: true, jobId };
   }
 
-  async deleteFileResources(fileId) {
+  async deleteFileResources(fileId, options = {}) {
+    const { skipRemoteDelete = false } = options;
     await this._refreshProviderRuntime();
 
     const file = await this.db.getFile(fileId);
@@ -2095,23 +2096,48 @@ class UploaderService extends EventEmitter {
 
     await this.db.cancelJobsForFile(fileId);
 
-    const providerDeleteResults = {};
-    for (const [provider, status] of Object.entries(file.providers || {})) {
-      if (status.status === 'completed' && status.fileId) {
-        try {
-          const adapter = this.adapters[provider];
-          if (!adapter || typeof adapter.delete !== 'function') {
-            throw new Error(`Provider adapter unavailable: ${provider}`);
-          }
-          await adapter.delete(status.fileId);
-          providerDeleteResults[provider] = { success: true, deletedRemote: true };
-        } catch (error) {
-          providerDeleteResults[provider] = {
-            success: false,
-            deletedRemote: false,
-            error: error.message
-          };
+    if (skipRemoteDelete) {
+      const providerDeleteResults = {};
+      for (const [provider, status] of Object.entries(file.providers || {})) {
+        providerDeleteResults[provider] = {
+          success: true,
+          deletedRemote: false,
+          skipped: true,
+          note: 'Remote delete skipped.'
+        };
+      }
+      return {
+        fileId,
+        cancelledUploads,
+        providerDeleteResults,
+        skippedRemoteDelete: true
+      };
+    }
+
+    const completedProviders = Object.entries(file.providers || {})
+      .filter(([, status]) => status.status === 'completed' && status.fileId)
+      .map(([provider, status]) => ({ provider, fileId: status.fileId }));
+
+    const deletePromises = completedProviders.map(async ({ provider, fileId: remoteFileId }) => {
+      try {
+        const adapter = this.adapters[provider];
+        if (!adapter || typeof adapter.delete !== 'function') {
+          throw new Error(`Provider adapter unavailable: ${provider}`);
         }
+        await adapter.delete(remoteFileId);
+        return { provider, result: { success: true, deletedRemote: true } };
+      } catch (error) {
+        return { provider, result: { success: false, deletedRemote: false, error: error.message } };
+      }
+    });
+
+    const deleteResults = await Promise.all(deletePromises);
+    const providerDeleteResults = {};
+
+    for (const [provider, status] of Object.entries(file.providers || {})) {
+      const found = deleteResults.find((r) => r.provider === provider);
+      if (found) {
+        providerDeleteResults[provider] = found.result;
       } else if (status.status === 'pending' || status.status === 'uploading' || status.status === 'processing') {
         providerDeleteResults[provider] = {
           success: true,
