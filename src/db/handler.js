@@ -220,12 +220,43 @@ class DatabaseHandler {
       const publicId = row.public_file_id || null;
       const derivedViewUrl = publicId ? `https://drive.google.com/file/d/${encodeURIComponent(publicId)}/view` : null;
       const derivedEmbedUrl = publicId ? `https://drive.google.com/file/d/${encodeURIComponent(publicId)}/preview` : null;
-      const normalizedUrl = row.url && /^https?:\/\//i.test(String(row.url).trim())
-        ? row.url
-        : (derivedViewUrl || row.url || null);
-      const normalizedEmbedUrl = row.embed_url && /^https?:\/\//i.test(String(row.embed_url).trim())
-        ? row.embed_url
-        : (derivedEmbedUrl || row.embed_url || null);
+      const rawUrl = row.url ? String(row.url).trim() : '';
+      const rawEmbedUrl = row.embed_url ? String(row.embed_url).trim() : '';
+      const isHttpUrl = (value) => /^https?:\/\//i.test(String(value || '').trim());
+
+      let normalizedUrl = rawUrl || null;
+      let normalizedEmbedUrl = rawEmbedUrl || null;
+
+      const appBaseUrl = String(process.env.APP_BASE_URL || '').trim();
+      const rcloneProxyBase = appBaseUrl ? `${appBaseUrl.replace(/\/+$/, '')}/media/rclone` : '';
+
+      if (!normalizedUrl && derivedViewUrl) {
+        normalizedUrl = derivedViewUrl;
+      }
+
+      if (!normalizedEmbedUrl && derivedEmbedUrl) {
+        normalizedEmbedUrl = derivedEmbedUrl;
+      }
+
+      if (row.provider && String(row.provider).startsWith('rclone:')) {
+        const rawFileId = row.remote_file_id ? String(row.remote_file_id).trim() : '';
+        const separatorIndex = rawFileId.indexOf(':');
+        const remotePath = separatorIndex >= 0 ? rawFileId.slice(separatorIndex + 1).replace(/^\/+/, '') : '';
+
+        if (rcloneProxyBase && remotePath) {
+          const proxiedUrl = `${rcloneProxyBase}/${remotePath.split('/').map(encodeURIComponent).join('/')}`;
+          normalizedUrl = proxiedUrl;
+          if (!isHttpUrl(rawEmbedUrl)) {
+            normalizedEmbedUrl = proxiedUrl;
+          }
+        } else if (rawUrl && !isHttpUrl(rawUrl)) {
+          normalizedUrl = rawUrl;
+        }
+
+        if (rawEmbedUrl && !isHttpUrl(rawEmbedUrl)) {
+          normalizedEmbedUrl = rawEmbedUrl;
+        }
+      }
 
       providers[row.provider] = {
         status: row.status || 'pending',
