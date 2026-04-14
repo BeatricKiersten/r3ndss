@@ -53,7 +53,7 @@ function getPlayableUrl(provider, url) {
   return url;
 }
 
-export const IFRAME_PROVIDERS = ['seekstreaming', 'voesx', 'streamtape', 'mixdrop', 'catbox', 'rclone'];
+export const IFRAME_PROVIDERS = ['seekstreaming', 'voesx', 'streamtape', 'mixdrop', 'catbox'];
 
 export function requiresIframe(provider) {
   return IFRAME_PROVIDERS.includes(provider);

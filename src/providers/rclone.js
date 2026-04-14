@@ -97,6 +97,20 @@ class RcloneAdapter {
     return `${base.replace(/\/+$/, '')}/${encodedPath}`;
   }
 
+  _getGoogleDriveProxyBase(profile) {
+    const explicitBase = String(profile.publicBaseUrl || '').trim();
+    if (explicitBase) {
+      return explicitBase;
+    }
+
+    const appBaseUrl = String(process.env.APP_BASE_URL || '').trim();
+    if (!appBaseUrl) {
+      return '';
+    }
+
+    return `${appBaseUrl.replace(/\/+$/, '')}/media/rclone`;
+  }
+
   _escapeDriveQueryValue(value) {
     return String(value ?? '')
       .replace(/\\/g, '\\\\')
@@ -337,11 +351,21 @@ class RcloneAdapter {
       let embedUrl = null;
 
       if (this._isGoogleDriveRemote(remote)) {
+        const proxyBaseUrl = this._getGoogleDriveProxyBase(profile);
+        if (proxyBaseUrl) {
+          url = this._buildPublicUrl({ ...profile, publicBaseUrl: proxyBaseUrl }, remotePath);
+        }
+
         const driveInfo = await this._resolveGoogleDriveFileInfo(configPath, profile, remotePath).catch(() => null);
         if (driveInfo?.id) {
           publicId = driveInfo.id;
-          url = driveInfo.webViewLink || url;
-          embedUrl = `https://drive.google.com/file/d/${encodeURIComponent(publicId)}/preview`;
+
+          // If the user configured rclone serve/public proxy, prefer that direct file URL.
+          // Otherwise fall back to Google Drive view/preview links.
+          if (!proxyBaseUrl) {
+            url = driveInfo.webViewLink || url;
+            embedUrl = `https://drive.google.com/file/d/${encodeURIComponent(publicId)}/preview`;
+          }
         }
       }
 

@@ -18,7 +18,7 @@ import {
 import { useFiles, useFolder, useFolders } from '../hooks/api';
 import { getProviderConfig } from '../config/providers';
 
-const IFRAME_PROVIDERS = new Set(['seekstreaming', 'voesx', 'streamtape', 'mixdrop', 'catbox', 'rclone']);
+const IFRAME_PROVIDERS = new Set(['seekstreaming', 'voesx', 'streamtape', 'mixdrop', 'catbox']);
 
 function formatDuration(totalSeconds) {
   const seconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));

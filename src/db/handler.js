@@ -223,12 +223,15 @@ class DatabaseHandler {
       const normalizedUrl = row.url && /^https?:\/\//i.test(String(row.url).trim())
         ? row.url
         : (derivedViewUrl || row.url || null);
+      const normalizedEmbedUrl = row.embed_url && /^https?:\/\//i.test(String(row.embed_url).trim())
+        ? row.embed_url
+        : (derivedEmbedUrl || row.embed_url || null);
 
       providers[row.provider] = {
         status: row.status || 'pending',
         url: normalizedUrl,
         fileId: row.remote_file_id || null,
-        embedUrl: row.embed_url || derivedEmbedUrl,
+        embedUrl: normalizedEmbedUrl,
         publicId,
         error: row.error || null,
         urlHistory: parseJson(row.url_history, []) || [],

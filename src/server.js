@@ -16,7 +16,8 @@ const config = require('./config');
 const routes = require('./routes');
 const errorHandler = require('./middleware/errorHandler');
 const websocketHandler = require('./websocket/events');
-const { db, eventEmitter, uploaderService, cleanupService } = require('./services/runtime');
+const mediaController = require('./controllers/mediaController');
+const { db, eventEmitter, uploaderService, cleanupService, rcloneServeService } = require('./services/runtime');
 // Lazy-import to avoid circular deps — zeniusController loads runtime which is already loaded
 let _zeniusController = null;
 function getZeniusController() {
@@ -213,6 +214,9 @@ app.get('/uploads/:filename', async (req, res) => {
   }
 });
 
+app.options('/media/rclone/*', mediaController.proxyRclone);
+app.get('/media/rclone/*', mediaController.proxyRclone);
+
 const frontendDistPath = path.join(__dirname, 'frontend/dist');
 if (fs.existsSync(frontendDistPath)) {
   app.use(express.static(frontendDistPath));
@@ -254,6 +258,9 @@ async function startServer() {
     }
 
     await uploaderService.start();
+    await rcloneServeService.ensureDefaultGoogleDriveRemote().catch((error) => {
+      console.warn('[Server] Failed to start rclone serve:', error.message);
+    });
 
     // Start periodic cleanup scheduler (orphaned files, stuck jobs, expired sessions)
     cleanupService.start();
@@ -367,6 +374,7 @@ process.on('SIGTERM', async () => {
   } catch (e) {
     console.error('[Server] Failed to persist batch runs on shutdown:', e.message);
   }
+  await rcloneServeService.stop().catch(() => {});
   await uploaderService.stop();
   if (weeklyCheckerInterval) clearInterval(weeklyCheckerInterval);
   server.close(() => {
@@ -386,6 +394,7 @@ process.on('SIGINT', async () => {
   } catch (e) {
     console.error('[Server] Failed to persist batch runs on shutdown:', e.message);
   }
+  await rcloneServeService.stop().catch(() => {});
   await uploaderService.stop();
   if (weeklyCheckerInterval) clearInterval(weeklyCheckerInterval);
   server.close(() => {
