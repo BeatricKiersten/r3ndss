@@ -113,6 +113,7 @@ class DatabaseHandler {
     this.mysql = buildMysqlConfigFromEnv();
 
     this.pool = null;
+    this.startupMaintenancePromise = null;
     this.initPromise = this._initialize();
   }
 
@@ -620,11 +621,56 @@ class DatabaseHandler {
       [now]
     );
 
-    await this._runMigrations();
+    this._scheduleStartupMaintenance(now);
+  }
 
-    await this._seedMissingFileProviders(now);
+  _scheduleStartupMaintenance(updatedAt = this._now()) {
+    if (this.startupMaintenancePromise) {
+      return;
+    }
 
-    await this._migrateLegacyRcloneProviderRows();
+    const runMigrations = String(process.env.DB_STARTUP_RUN_MIGRATIONS || 'true').toLowerCase() !== 'false';
+    const seedMissingFileProviders = String(process.env.DB_STARTUP_SEED_FILE_PROVIDERS || 'false').toLowerCase() === 'true';
+    const migrateLegacyRcloneProviders = String(process.env.DB_STARTUP_MIGRATE_LEGACY_RCLONE || 'false').toLowerCase() === 'true';
+
+    if (!runMigrations && !seedMissingFileProviders && !migrateLegacyRcloneProviders) {
+      console.log('[DB Startup] Skipping non-essential startup maintenance');
+      return;
+    }
+
+    this.startupMaintenancePromise = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      console.log('[DB Startup] Background maintenance started');
+
+      if (runMigrations) {
+        try {
+          await this._runMigrations();
+        } catch (error) {
+          console.warn(`[DB Startup] Migrations skipped: ${error.message}`);
+        }
+      }
+
+      if (seedMissingFileProviders) {
+        try {
+          await this._seedMissingFileProviders(updatedAt);
+        } catch (error) {
+          console.warn(`[DB Startup] Seed missing providers skipped: ${error.message}`);
+        }
+      }
+
+      if (migrateLegacyRcloneProviders) {
+        try {
+          await this._migrateLegacyRcloneProviderRows();
+        } catch (error) {
+          console.warn(`[DB Startup] Legacy rclone migration skipped: ${error.message}`);
+        }
+      }
+
+      console.log('[DB Startup] Background maintenance finished');
+    })().catch((error) => {
+      console.warn(`[DB Startup] Background maintenance failed: ${error.message}`);
+    });
   }
 
   async _seedMissingFileProviders(updatedAt = this._now()) {
@@ -858,8 +904,30 @@ class DatabaseHandler {
   async _hydrateFiles(fileRows) {
     const fileIds = fileRows.map((row) => row.id);
     const providerMap = await this._getProviderRowsByFileIds(fileIds);
+    const providerIds = STATIC_PROVIDER_IDS;
 
-    return fileRows.map((row) => this._mapFileRow(row, providerMap.get(row.id) || []));
+    return fileRows.map((row) => {
+      const rows = Array.isArray(providerMap.get(row.id)) ? [...providerMap.get(row.id)] : [];
+      const existing = new Set(rows.map((providerRow) => providerRow.provider));
+
+      for (const providerId of providerIds) {
+        if (!existing.has(providerId)) {
+          rows.push({
+            provider: providerId,
+            status: 'pending',
+            url: null,
+            remote_file_id: null,
+            public_file_id: null,
+            embed_url: null,
+            error: null,
+            url_history: FILE_PROVIDER_EMPTY_HISTORY,
+            updated_at: row.updated_at || null
+          });
+        }
+      }
+
+      return this._mapFileRow(row, rows);
+    });
   }
 
   async _getSystemPayload() {
@@ -1406,9 +1474,8 @@ class DatabaseHandler {
       return null;
     }
 
-    const fileId = rows[0].id;
-    const providerMap = await this._getProviderRowsByFileIds([fileId]);
-    return this._mapFileRow(rows[0], providerMap.get(fileId) || []);
+    const hydrated = await this._hydrateFiles([rows[0]]);
+    return hydrated[0] || null;
   }
 
   async getFile(fileId) {
@@ -1421,8 +1488,8 @@ class DatabaseHandler {
       throw new Error(`File ${fileId} not found`);
     }
 
-    const providerMap = await this._getProviderRowsByFileIds([fileId]);
-    return this._mapFileRow(fileRow, providerMap.get(fileId) || []);
+    const hydrated = await this._hydrateFiles([fileRow]);
+    return hydrated[0];
   }
 
   async clearFileProviderLink(fileId, provider, reason = 'Provider link removed by user') {
