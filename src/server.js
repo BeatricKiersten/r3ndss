@@ -11,6 +11,7 @@ const fs = require('fs-extra');
 const axios = require('axios');
 const { createServer } = require('http');
 const { WebSocketServer } = require('ws');
+const { randomUUID } = require('crypto');
 
 const config = require('./config');
 const routes = require('./routes');
@@ -33,6 +34,11 @@ app.use(cors({
   origin: config.frontendUrl,
   credentials: true
 }));
+app.use((req, res, next) => {
+  req.id = req.headers['x-request-id'] ? String(req.headers['x-request-id']) : randomUUID();
+  res.setHeader('X-Request-Id', req.id);
+  next();
+});
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -42,22 +48,22 @@ if (process.env.NODE_ENV !== 'production') {
     const verbose = String(process.env.DEBUG_HTTP_VERBOSE || 'false').toLowerCase() === 'true';
 
     if (verbose) {
-      console.log(`[HTTP] -> ${req.method} ${req.originalUrl}`, {
-        query: req.query,
-        body: req.body,
-        headers: {
+        console.log(`[HTTP] [${req.id}] -> ${req.method} ${req.originalUrl}`, {
+          query: req.query,
+          body: req.body,
+          headers: {
           'content-type': req.headers['content-type'],
           'user-agent': req.headers['user-agent'],
           origin: req.headers.origin
         }
       });
     } else {
-      console.log(`[HTTP] -> ${req.method} ${req.originalUrl}`);
-    }
+        console.log(`[HTTP] [${req.id}] -> ${req.method} ${req.originalUrl}`);
+      }
 
-    res.on('finish', () => {
-      console.log(`[HTTP] <- ${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now() - startedAt}ms`);
-    });
+      res.on('finish', () => {
+        console.log(`[HTTP] [${req.id}] <- ${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now() - startedAt}ms`);
+      });
 
     next();
   });
@@ -97,6 +103,10 @@ app.get('/api/health', (req, res) => {
 
 app.get('/api/proxy/video', async (req, res) => {
   try {
+    if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
+      return res.status(405).json({ success: false, error: 'Method not allowed' });
+    }
+
     const targetUrl = String(req.query.url || '');
     if (!targetUrl) {
       return res.status(400).json({ success: false, error: 'url query is required' });
@@ -122,6 +132,7 @@ app.get('/api/proxy/video', async (req, res) => {
     ]);
 
     if (parsed.protocol !== 'https:' || !allowedHosts.has(parsed.hostname)) {
+      console.warn(`[Proxy] [${req.id}] rejected host ${parsed.hostname}`);
       return res.status(403).json({ success: false, error: 'Host is not allowed' });
     }
 
@@ -129,7 +140,8 @@ app.get('/api/proxy/video', async (req, res) => {
       'user-agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       accept: req.headers.accept || '*/*',
       referer: `https://${parsed.hostname}/`,
-      origin: `https://${parsed.hostname}`
+      origin: `https://${parsed.hostname}`,
+      'x-request-id': req.id
     };
     if (req.headers.range) {
       upstreamHeaders.range = req.headers.range;
@@ -145,11 +157,11 @@ app.get('/api/proxy/video', async (req, res) => {
     res.status(upstream.status);
 
     if (upstream.status >= 400) {
-      const chunks = [];
-      upstream.data.on('data', (chunk) => chunks.push(chunk));
+      console.warn(`[Proxy] [${req.id}] upstream returned ${upstream.status} from ${parsed.hostname}`);
+      res.setHeader('content-type', 'application/json; charset=utf-8');
+      upstream.data.resume();
       upstream.data.on('end', () => {
-        const message = Buffer.concat(chunks).toString('utf8').slice(0, 400);
-        res.end(message || `Upstream returned ${upstream.status}`);
+        res.end(JSON.stringify({ success: false, error: 'Upstream media host failed', status: upstream.status }));
       });
       return;
     }
@@ -180,8 +192,9 @@ app.get('/api/proxy/video', async (req, res) => {
     }
 
     upstream.data.on('error', () => {
+      console.error(`[Proxy] [${req.id}] upstream stream error from ${parsed.hostname}`);
       if (!res.headersSent) {
-        res.status(502).end('Upstream stream error');
+        res.status(502).json({ success: false, error: 'Upstream stream error' });
       } else {
         res.end();
       }
@@ -195,7 +208,8 @@ app.get('/api/proxy/video', async (req, res) => {
 
     upstream.data.pipe(res);
   } catch (error) {
-    res.status(502).json({ success: false, error: error.message || 'Proxy error' });
+    console.error(`[Proxy] [${req.id}] proxy error: ${error.message}`);
+    res.status(502).json({ success: false, error: 'Proxy error' });
   }
 });
 

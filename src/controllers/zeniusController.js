@@ -8,12 +8,16 @@ const { EventEmitter } = require('events');
 const config = require('../config');
 const { db, videoProcessor, uploaderService, eventEmitter, cleanupService } = require('../services/runtime');
 const webhookService = require('../services/webhookService');
+const { buildRequestContext, stripWrappingQuotes } = require('../services/requestContext');
+const {
+  resolveReferer,
+  getJson: getUpstreamJson,
+  getInstanceDetails,
+  ZENIUS_BASE_URL
+} = require('../services/zeniusUpstreamService');
 
-const ZENIUS_BASE_URL = 'https://www.zenius.net';
-const DEFAULT_USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0';
 const DEFAULT_BATCH_ROOT_CGROUP_ID = '34';
 const DEFAULT_BATCH_PARENT_CONTAINER_NAME = '';
-const RETRYABLE_UPSTREAM_STATUS = new Set([429, 500, 502, 503, 504]);
 const UPSTREAM_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_TIMEOUT_MS || '12000', 10);
 const UPSTREAM_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_UPSTREAM_MAX_RETRIES || '3', 10);
 const UPSTREAM_RETRY_BASE_DELAY_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_RETRY_BASE_DELAY_MS || '500', 10);
@@ -156,7 +160,8 @@ class DownloadQueue {
   }
 
   async _runDownload(task) {
-    const { urlShortId, videoUrl, folderId, outputName, ffmpegHeaders, selectedProviders } = task;
+    const resolvedTask = await resolveQueuedDownloadTask(task);
+    const { urlShortId, videoUrl, folderId, outputName, ffmpegHeaders, selectedProviders } = resolvedTask;
 
     console.log(`[DownloadQueue] Starting #${task.id} ${urlShortId} (active: ${this._active.size}/${this._maxConcurrent}, queued: ${this._queue.length})`);
 
@@ -197,6 +202,7 @@ class DownloadQueue {
         let uploadQueueResult = null;
         if (result.reason === 'File already exists') {
           uploadQueueResult = await uploaderService.queueFileUpload(result.fileId, result.outputPath, folderId, selectedProviders);
+          await uploaderService.waitForFileUploadCompletion(result.fileId, selectedProviders);
         }
         console.log(`[DownloadQueue] #${task.id} ${urlShortId} skipped: ${result.reason}`);
 
@@ -215,6 +221,7 @@ class DownloadQueue {
       console.log(`[DownloadQueue] #${task.id} ${urlShortId} downloaded, fileId=${fileId}, queuing upload`);
 
       await uploaderService.queueFileUpload(result.fileId, result.outputPath, folderId, selectedProviders);
+      await uploaderService.waitForFileUploadCompletion(result.fileId, selectedProviders);
 
       broadcastDownloadComplete({
         urlShortId,
@@ -291,42 +298,8 @@ function broadcastDownloadFailed(data) {
   eventEmitter.emit('download:failed', data);
 }
 
-const KNOWN_REQUEST_HEADERS = new Set([
-  'accept',
-  'accept-language',
-  'accept-encoding',
-  'referer',
-  'user-agent',
-  'sentry-trace',
-  'baggage',
-  'connection',
-  'sec-fetch-dest',
-  'sec-fetch-mode',
-  'sec-fetch-site',
-  'priority',
-  'te',
-  'pragma',
-  'cache-control',
-  'cookie',
-  'host'
-]);
-
-const PASSTHROUGH_HEADER_MAP = {
-  accept: 'Accept',
-  'accept-language': 'Accept-Language',
-  'accept-encoding': 'Accept-Encoding',
-  'sec-fetch-dest': 'Sec-Fetch-Dest',
-  'sec-fetch-mode': 'Sec-Fetch-Mode',
-  'sec-fetch-site': 'Sec-Fetch-Site',
-  priority: 'Priority',
-  te: 'TE',
-  pragma: 'Pragma',
-  'cache-control': 'Cache-Control',
-  connection: 'Connection'
-};
-
 function normalizeShortId(rawValue) {
-  const value = String(rawValue || '').trim();
+  const value = String(rawValue || '').trim().replace(/:+$/g, '');
   if (!value) {
     throw new Error('urlShortId is required');
   }
@@ -336,32 +309,6 @@ function normalizeShortId(rawValue) {
   }
 
   return value;
-}
-
-function resolveReferer(urlShortId, customRefererPath = '', fallbackPath = '') {
-  const raw = String(customRefererPath || '').trim();
-  if (raw) {
-    if (raw.startsWith('http://') || raw.startsWith('https://')) {
-      try {
-        const parsed = new URL(raw);
-        if (parsed.hostname === 'www.zenius.net' || parsed.hostname === 'zenius.net') {
-          return parsed.toString();
-        }
-      } catch {
-        // Ignore and fall through to path-based referer.
-      }
-    }
-
-    if (raw.startsWith('/')) {
-      return `${ZENIUS_BASE_URL}${raw}`;
-    }
-  }
-
-  if (fallbackPath && String(fallbackPath).startsWith('/')) {
-    return `${ZENIUS_BASE_URL}${fallbackPath}`;
-  }
-
-  return `${ZENIUS_BASE_URL}/ci/${urlShortId}`;
 }
 
 function sanitizeOutputName(rawName, fallback = 'zenius-video') {
@@ -879,7 +826,7 @@ function normalizeCgId(rawValue, fallback = null) {
 }
 
 function normalizeNumericShortId(rawValue) {
-  const value = String(rawValue || '').trim();
+  const value = String(rawValue || '').trim().replace(/:+$/g, '');
   if (!/^\d+$/.test(value)) {
     return null;
   }
@@ -953,178 +900,6 @@ function resolveBatchParentContainerName(session) {
   return sanitizePathSegment(session.parentContainerName, 'unknown-parent');
 }
 
-function stripWrappingQuotes(value) {
-  const trimmed = String(value || '').trim();
-  if (!trimmed) return '';
-
-  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith('\'') && trimmed.endsWith('\''))) {
-    return trimmed.slice(1, -1).trim();
-  }
-
-  return trimmed;
-}
-
-function sanitizeHeaderValue(value) {
-  const raw = String(value || '').replace(/[\r\n]+/g, ' ').trim();
-  if (!raw) return '';
-
-  let sanitized = '';
-  for (const char of raw) {
-    const code = char.charCodeAt(0);
-    if (code >= 32 && code <= 255) {
-      sanitized += char;
-    }
-  }
-
-  return sanitized.trim();
-}
-
-function sanitizeCookiePair(pair) {
-  const normalized = sanitizeHeaderValue(pair);
-  if (!normalized) return null;
-
-  const cleaned = normalized.replace(/^;+|;+$/g, '').trim();
-  if (!cleaned) return null;
-
-  const eqIndex = cleaned.indexOf('=');
-  if (eqIndex <= 0) return null;
-
-  const key = cleaned.slice(0, eqIndex).trim();
-  const value = cleaned.slice(eqIndex + 1).trim();
-  if (!key) return null;
-
-  return `${key}=${value}`;
-}
-
-function parseCookieHeaderValue(cookieHeaderValue) {
-  const normalized = sanitizeHeaderValue(stripWrappingQuotes(cookieHeaderValue));
-  if (!normalized) return [];
-
-  return normalized
-    .split(';')
-    .map((part) => sanitizeCookiePair(part))
-    .filter(Boolean);
-}
-
-function parseHeaderLine(line) {
-  const raw = String(line || '').trim();
-  if (!raw) return null;
-
-  const tabMatch = raw.match(/^([^\t]+)\t+(.+)$/);
-  if (tabMatch) {
-    return { key: tabMatch[1].trim(), value: tabMatch[2].trim() };
-  }
-
-  const colonIdx = raw.indexOf(':');
-  if (colonIdx > 0) {
-    const key = raw.slice(0, colonIdx).trim();
-    const value = raw.slice(colonIdx + 1).trim();
-    if (key && value) {
-      return { key, value };
-    }
-  }
-
-  const spaceMatch = raw.match(/^([A-Za-z0-9._-]+)\s+(.+)$/);
-  if (spaceMatch) {
-    return { key: spaceMatch[1].trim(), value: spaceMatch[2].trim() };
-  }
-
-  return null;
-}
-
-function parseHeadersRaw(rawHeaders) {
-  if (!rawHeaders) {
-    return { headers: {}, cookiePairs: [] };
-  }
-
-  const lines = String(rawHeaders)
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  const headers = {};
-  const cookiePairs = [];
-
-  for (const line of lines) {
-    const parsed = parseHeaderLine(line);
-    if (!parsed) continue;
-
-    const key = parsed.key;
-    const value = sanitizeHeaderValue(stripWrappingQuotes(parsed.value));
-    if (!value) continue;
-
-    const keyLower = key.toLowerCase();
-
-    if (keyLower === 'cookie') {
-      cookiePairs.push(...parseCookieHeaderValue(value));
-      continue;
-    }
-
-    if (KNOWN_REQUEST_HEADERS.has(keyLower)) {
-      headers[keyLower] = value;
-      continue;
-    }
-
-    cookiePairs.push(`${key}=${value}`);
-  }
-
-  return { headers, cookiePairs };
-}
-
-function mergeCookiePairs(...cookieSources) {
-  const merged = [];
-  const latestByKey = new Map();
-
-  for (const source of cookieSources) {
-    const pairs = Array.isArray(source)
-      ? source
-      : parseCookieHeaderValue(source);
-
-    for (const pair of pairs) {
-      const sanitized = sanitizeCookiePair(pair);
-      if (!sanitized) continue;
-
-      const eqIndex = sanitized.indexOf('=');
-      const key = sanitized.slice(0, eqIndex).trim();
-      if (!key) continue;
-
-      latestByKey.set(key, sanitized);
-    }
-  }
-
-  for (const pair of latestByKey.values()) {
-    merged.push(pair);
-  }
-
-  return merged;
-}
-
-function buildRequestContext(payload = {}) {
-  const parsedRaw = parseHeadersRaw(payload.headersRaw || payload.rawHeaders || '');
-
-  const userAgent = String(
-    payload.userAgent
-    || parsedRaw.headers['user-agent']
-    || DEFAULT_USER_AGENT
-  );
-
-  const sentryTrace = payload.sentryTrace || parsedRaw.headers['sentry-trace'] || '';
-  const baggage = payload.baggage || parsedRaw.headers.baggage || '';
-
-  const cookiePairs = mergeCookiePairs(
-    parsedRaw.cookiePairs,
-    parsedRaw.headers.cookie
-  );
-
-  return {
-    parsedHeaders: parsedRaw.headers,
-    userAgent,
-    sentryTrace,
-    baggage,
-    cookieHeader: cookiePairs.length > 0 ? cookiePairs.join('; ') : ''
-  };
-}
-
 async function resolveFolderId(folderInput) {
   const normalizedInput = stripWrappingQuotes(folderInput || 'root');
   if (!normalizedInput || normalizedInput.toLowerCase() === 'root') {
@@ -1165,129 +940,14 @@ async function normalizeProviders(rawProviders) {
   return unique.size > 0 ? Array.from(unique) : null;
 }
 
-function buildUpstreamHeaders({ requestContext, referer }) {
-  const headers = {
-    Host: 'www.zenius.net',
-    'User-Agent': requestContext.userAgent,
-    Accept: '*/*',
-    'Accept-Language': 'en-US,en;q=0.9',
-    Referer: referer,
-    Connection: 'keep-alive',
-    'Sec-Fetch-Dest': 'empty',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'same-origin',
-    Pragma: 'no-cache',
-    'Cache-Control': 'no-cache'
-  };
-
-  for (const [key, outputHeaderName] of Object.entries(PASSTHROUGH_HEADER_MAP)) {
-    if (requestContext.parsedHeaders[key]) {
-      headers[outputHeaderName] = requestContext.parsedHeaders[key];
-    }
-  }
-
-  if (requestContext.cookieHeader) headers.Cookie = requestContext.cookieHeader;
-  if (requestContext.sentryTrace) headers['sentry-trace'] = String(requestContext.sentryTrace);
-  if (requestContext.baggage) headers.baggage = String(requestContext.baggage);
-
-  return headers;
-}
-
-async function getJson(endpoint, {
-  requestContext,
-  urlShortId,
-  refererPath,
-  fallbackRefererPath = '',
-  timeoutMs,
-  maxRetries,
-  deadlineAt
-}) {
-  const referer = resolveReferer(
-    urlShortId,
-    refererPath || requestContext.parsedHeaders.referer,
-    fallbackRefererPath
-  );
-  const headers = buildUpstreamHeaders({ requestContext, referer });
-
-  const requestTimeoutMs = clampPositiveInt(timeoutMs, clampPositiveInt(UPSTREAM_TIMEOUT_MS, 12000));
-  const requestMaxRetries = clampPositiveInt(maxRetries, clampPositiveInt(UPSTREAM_MAX_RETRIES, 3));
-  const retryBaseDelay = clampPositiveInt(UPSTREAM_RETRY_BASE_DELAY_MS, 500);
-
-  for (let attempt = 0; attempt <= requestMaxRetries; attempt += 1) {
-    try {
-      const remainingMs = deadlineAt ? deadlineAt - Date.now() : null;
-      if (remainingMs !== null && remainingMs <= clampPositiveInt(BATCH_DEADLINE_GUARD_MS, 1200)) {
-        throw new Error(`Batch request time budget reached before fetching ${endpoint}`);
-      }
-
-      const effectiveTimeoutMs = remainingMs !== null
-        ? Math.max(1000, Math.min(requestTimeoutMs, remainingMs - 500))
-        : requestTimeoutMs;
-
-      const response = await axios.get(endpoint, {
-        headers,
-        timeout: effectiveTimeoutMs,
-        validateStatus: () => true
-      });
-
-      if (response.status >= 200 && response.status < 300) {
-        const payload = response.data;
-        const isObjectPayload = payload && typeof payload === 'object' && !Array.isArray(payload);
-        const payloadOk = isObjectPayload && payload.ok !== false;
-
-        if (payloadOk) {
-          return payload;
-        }
-
-        const payloadErrorText = isObjectPayload ? String(payload.error || '').toLowerCase() : '';
-        const looksTransientPayload = payload === ''
-          || payload === null
-          || payload === undefined
-          || typeof payload === 'string'
-          || (isObjectPayload
-            && payload.ok === false
-            && (payloadErrorText.includes('503')
-              || payloadErrorText.includes('tempor')
-              || payloadErrorText.includes('service unavailable')));
-
-        if (looksTransientPayload && attempt < requestMaxRetries && !shouldStopForDeadline(deadlineAt, 1500)) {
-          const delayMs = retryBaseDelay * (2 ** attempt) + Math.floor(Math.random() * 250);
-          await sleep(delayMs);
-          continue;
-        }
-
-        throw new Error(`API returned non-ok payload for ${endpoint}: ${JSON.stringify(payload)}`);
-      }
-
-      const isRetryable = RETRYABLE_UPSTREAM_STATUS.has(response.status);
-      if (isRetryable && attempt < requestMaxRetries) {
-        const delayMs = retryBaseDelay * (2 ** attempt) + Math.floor(Math.random() * 250);
-        await sleep(delayMs);
-        continue;
-      }
-
-      throw new Error(`Request failed (${response.status}) for ${endpoint}. Body: ${bodyPreview(response.data)}`);
-    } catch (error) {
-      const status = error?.response?.status;
-      const isRetryableStatus = typeof status === 'number' && RETRYABLE_UPSTREAM_STATUS.has(status);
-      const isRetryableNetwork = !status && (
-        error?.code === 'ECONNABORTED'
-        || error?.code === 'ETIMEDOUT'
-        || error?.code === 'ECONNRESET'
-        || error?.code === 'EAI_AGAIN'
-      );
-
-      if ((isRetryableStatus || isRetryableNetwork) && attempt < requestMaxRetries && !shouldStopForDeadline(deadlineAt, 1500)) {
-        const delayMs = retryBaseDelay * (2 ** attempt) + Math.floor(Math.random() * 250);
-        await sleep(delayMs);
-        continue;
-      }
-
-      throw error;
-    }
-  }
-
-  throw new Error(`Request failed after retries for ${endpoint}`);
+function getJson(endpoint, options) {
+  return getUpstreamJson(endpoint, {
+    ...options,
+    timeoutMs: clampPositiveInt(options?.timeoutMs, clampPositiveInt(UPSTREAM_TIMEOUT_MS, 12000)),
+    maxRetries: clampPositiveInt(options?.maxRetries, clampPositiveInt(UPSTREAM_MAX_RETRIES, 3)),
+    retryBaseDelayMs: clampPositiveInt(UPSTREAM_RETRY_BASE_DELAY_MS, 500),
+    deadlineGuardMs: clampPositiveInt(BATCH_DEADLINE_GUARD_MS, 1200)
+  });
 }
 
 async function getCgByShortId(id, options) {
@@ -1777,7 +1437,7 @@ async function queueBatchDownloadItem({
     return { counted: false, cancelled: true };
   }
 
-  let metadata = instance.metadata && typeof instance.metadata === 'object'
+  const metadata = instance.metadata && typeof instance.metadata === 'object'
     ? { ...instance.metadata }
     : {};
   const rawUrlShortId = instance.urlShortId || metadata.urlShortId;
@@ -1855,90 +1515,19 @@ async function queueBatchDownloadItem({
     }
   }
 
-  let metadataRetryError = '';
-  let videoUrl = String(metadata['video-url'] || '').trim();
-
-  if (!videoUrl) {
-    if (cancelled()) {
-      return { counted: false, cancelled: true };
-    }
-
-    try {
-      metadata = await getCachedInstanceMetadata(urlShortId, {
-        requestContext,
-        refererPath,
-        timeoutMs: clampPositiveInt(BATCH_METADATA_TIMEOUT_MS, 15000),
-        maxRetries: clampPositiveInt(BATCH_METADATA_MAX_RETRIES, 4)
-      }, session);
-      videoUrl = String(metadata['video-url'] || '').trim();
-    } catch (error) {
-      metadataRetryError = error.message;
-      pushBatchItemError(runId, {
-        batchRunId: runId,
-        rootCgId: chain.rootCgId,
-        rootCgName: chain.rootCgName,
-        containerUrlShortId: container.containerUrlShortId,
-        containerName: container.containerName,
-        instanceUrlShortId: urlShortId,
-        instanceName: instance.name || metadata.name || null,
-        path: instance.path || container.path || '',
-        stage: 'instance-details',
-        error: error.message
-      });
-    }
-  }
-
-  if (!videoUrl) {
-    const detailErrorMessage = metadataRetryError || instance.metadataError || 'Missing video-url in instance-details';
-    if (!metadataRetryError) {
-      pushBatchItemError(runId, {
-        batchRunId: runId,
-        rootCgId: chain.rootCgId,
-        rootCgName: chain.rootCgName,
-        containerUrlShortId: container.containerUrlShortId,
-        containerName: container.containerName,
-        instanceUrlShortId: urlShortId,
-        instanceName: instance.name || metadata.name || null,
-        path: instance.path || container.path || '',
-        stage: 'instance-details',
-        error: detailErrorMessage
-      });
-    }
-
-    return {
-      counted: true,
-      skipped: {
-        urlShortId,
-        reason: detailErrorMessage,
-        path: instance.path || container.path || ''
-      }
-    };
-  }
-
-  const ffmpegHeaders = {
-    'User-Agent': requestContext.userAgent,
-    Referer: resolveReferer(
-      urlShortId,
-      refererPath,
-      metadata['path-url'] || container.containerPathUrl || ''
-    )
-  };
-
-  if (requestContext.cookieHeader) {
-    ffmpegHeaders.Cookie = requestContext.cookieHeader;
-  }
-
   if (cancelled()) {
     return { counted: false, cancelled: true };
   }
 
   queueDownload({
     urlShortId,
-    videoUrl,
     folderId,
     outputName,
-    ffmpegHeaders,
-    selectedProviders
+    selectedProviders,
+    requestContext,
+    refererPath,
+    fallbackRefererPath: container.containerPathUrl || '',
+    requestedFilename: outputName
   }).then((result) => {
     if (result.cancelled) {
       console.log(`[Zenius] Batch download ${urlShortId} was cancelled`);
@@ -1968,7 +1557,7 @@ async function queueBatchDownloadItem({
       path: chainPath,
       folderInput: finalFolderInput,
       folderId,
-      videoUrl
+      status: 'queued'
     }
   };
 }
@@ -2104,30 +1693,6 @@ function joinFolderPaths(prefix, suffix) {
   return `${left.replace(/\/+$/g, '')}/${right.replace(/^\/+/, '')}`;
 }
 
-async function getInstanceDetails({ urlShortId, refererPath, fallbackRefererPath, requestContext }) {
-  const endpoint = `${ZENIUS_BASE_URL}/api/instance-details?url-short-id=${encodeURIComponent(urlShortId)}`;
-  const referer = resolveReferer(
-    urlShortId,
-    refererPath || requestContext.parsedHeaders.referer,
-    fallbackRefererPath
-  );
-  const headers = buildUpstreamHeaders({ requestContext, referer });
-
-  const response = await axios.get(endpoint, {
-    headers,
-    timeout: 30000,
-    validateStatus: () => true
-  });
-
-  return {
-    endpoint,
-    referer,
-    status: response.status,
-    headers: response.headers,
-    body: response.data
-  };
-}
-
 // ==================== CONCURRENCY CONTROL ====================
 
 function getActiveDownloadCount() {
@@ -2151,6 +1716,55 @@ function getZeniusStatusSnapshot() {
   };
 }
 
+async function resolveQueuedDownloadTask(task) {
+  if (task.videoUrl && task.ffmpegHeaders) {
+    return task;
+  }
+
+  const urlShortId = normalizeShortId(task.urlShortId);
+  const requestContext = task.requestContext || buildRequestContext({});
+  const details = await getInstanceDetails({
+    urlShortId,
+    refererPath: task.refererPath,
+    fallbackRefererPath: task.fallbackRefererPath,
+    requestContext
+  });
+
+  const isSuccessStatus = details.status >= 200 && details.status < 300;
+  if (!isSuccessStatus || !details.body?.ok || !details.body?.value) {
+    throw new Error(`Failed to fetch instance details (HTTP ${details.status})`);
+  }
+
+  const instanceValue = details.body.value;
+  const videoUrl = String(instanceValue['video-url'] || '').trim();
+  if (!videoUrl) {
+    throw new Error('Instance does not contain video-url');
+  }
+
+  const outputName = sanitizeOutputName(
+    task.outputName || task.requestedFilename || instanceValue.name || instanceValue['canonical-name'] || `zenius-${urlShortId}`,
+    `zenius-${urlShortId}`
+  );
+
+  const ffmpegHeaders = {
+    'User-Agent': requestContext.userAgent,
+    Referer: resolveReferer(urlShortId, task.refererPath, instanceValue['path-url'] || task.fallbackRefererPath || '')
+  };
+
+  if (requestContext.cookieHeader) {
+    ffmpegHeaders.Cookie = requestContext.cookieHeader;
+  }
+
+  return {
+    ...task,
+    urlShortId,
+    videoUrl,
+    outputName,
+    ffmpegHeaders,
+    details: instanceValue
+  };
+}
+
 function queueDownload(task) {
   return downloadQueue.add(task);
 }
@@ -2161,35 +1775,32 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
   let totalInstances = 0;
   const session = chain.sessionId ? batchChainSessions.get(chain.sessionId) || null : null;
   const folderCache = new Map();
-  const metadataConcurrency = clampPositiveInt(BATCH_INSTANCE_METADATA_CONCURRENCY, 6);
-  const metadataLimit = pLimit(metadataConcurrency);
 
   for (const container of chain.containerDetails || []) {
     if (cancelled()) {
       break;
     }
 
-    const containerResults = await Promise.all(
-      (container.videoInstances || []).map((instance) => metadataLimit(async () => {
-        if (cancelled()) {
-          return { counted: false };
-        }
+    const containerResults = [];
+    for (const instance of container.videoInstances || []) {
+      if (cancelled()) {
+        break;
+      }
 
-        return queueBatchDownloadItem({
-          chain,
-          container,
-          instance,
-          requestContext,
-          refererPath,
-          baseFolderInput,
-          selectedProviders,
-          runId,
-          session,
-          folderCache,
-          cancelled
-        });
-      }))
-    );
+      containerResults.push(await queueBatchDownloadItem({
+        chain,
+        container,
+        instance,
+        requestContext,
+        refererPath,
+        baseFolderInput,
+        selectedProviders,
+        runId,
+        session,
+        folderCache,
+        cancelled
+      }));
+    }
 
     for (const result of containerResults) {
       if (cancelled()) {
@@ -2655,7 +2266,7 @@ const zeniusController = {
   async getInstanceDetails(req, res) {
     try {
       const urlShortId = normalizeShortId(req.body?.urlShortId ?? req.body?.instanceId ?? req.query?.urlShortId);
-      const requestContext = buildRequestContext(req.body || {});
+      const requestContext = buildRequestContext(req.body || {}, req);
       const details = await getInstanceDetails({
         urlShortId,
         refererPath: req.body?.refererPath,
@@ -2686,60 +2297,21 @@ const zeniusController = {
       const requestedFolder = String(req.body?.folderId || 'root');
       const folderId = await resolveFolderId(requestedFolder);
       const selectedProviders = await normalizeProviders(req.body?.providers);
-      const requestContext = buildRequestContext(req.body || {});
+      const requestContext = buildRequestContext(req.body || {}, req);
 
-      const details = await getInstanceDetails({
-        urlShortId,
-        refererPath: req.body?.refererPath,
-        requestContext
-      });
-
-      const isSuccessStatus = details.status >= 200 && details.status < 300;
-      if (!isSuccessStatus || !details.body?.ok || !details.body?.value) {
-        return res.status(400).json({
-          success: false,
-          error: `Failed to fetch instance details (HTTP ${details.status})`,
-          data: {
-            upstreamStatus: details.status,
-            body: details.body
-          }
-        });
-      }
-
-      const instanceValue = details.body.value;
-      const videoUrl = String(instanceValue['video-url'] || '').trim();
-      if (!videoUrl) {
-        return res.status(400).json({
-          success: false,
-          error: 'Instance does not contain video-url'
-        });
-      }
-
-      const outputName = sanitizeOutputName(
-        req.body?.filename || instanceValue.name || instanceValue['canonical-name'] || `zenius-${urlShortId}`,
-        `zenius-${urlShortId}`
-      );
-
-      const ffmpegHeaders = {
-        'User-Agent': requestContext.userAgent,
-        Referer: resolveReferer(urlShortId, req.body?.refererPath, instanceValue['path-url'])
-      };
-
-      if (requestContext.cookieHeader) {
-        ffmpegHeaders.Cookie = requestContext.cookieHeader;
-      }
-
-      // Queue download with concurrency control
       const queueStatus = getQueueStatus();
       const willQueue = !canStartNewDownload();
+      const requestedOutputName = req.body?.filename
+        ? `${sanitizeOutputName(req.body.filename, `zenius-${urlShortId}`)}.mp4`
+        : null;
       
       queueDownload({
         urlShortId,
-        videoUrl,
         folderId,
-        outputName,
-        ffmpegHeaders,
-        selectedProviders
+        selectedProviders,
+        requestContext,
+        refererPath: req.body?.refererPath,
+        requestedFilename: req.body?.filename
       }).then((result) => {
         if (result.cancelled) {
           console.log(`[Zenius] Download ${urlShortId} was cancelled`);
@@ -2752,12 +2324,10 @@ const zeniusController = {
 
       res.status(202).json({
         success: true,
-        message: willQueue ? 'Zenius download queued (waiting for slot)' : 'Zenius download started',
+        message: willQueue ? 'Zenius pipeline queued (waiting for slot)' : 'Zenius pipeline started',
         data: {
           urlShortId,
-          name: instanceValue.name || null,
-          videoUrl,
-          outputName: `${outputName}.mp4`,
+          outputName: requestedOutputName,
           cleanupLocalFile: true,
           folderInput: stripWrappingQuotes(requestedFolder),
           folderId,
@@ -2772,7 +2342,7 @@ const zeniusController = {
 
   async getBatchChain(req, res) {
     try {
-      const requestContext = buildRequestContext(req.body || {});
+      const requestContext = buildRequestContext(req.body || {}, req);
       const chain = await buildBatchChain({
         rootCgId: req.body?.rootCgId,
         targetCgSelector: req.body?.targetCgSelector,
@@ -2813,7 +2383,7 @@ const zeniusController = {
       cleanupExpiredBatchChainSessions();
       cleanupExpiredBackgroundBatchRuns();
 
-      const requestContext = buildRequestContext(req.body || {});
+      const requestContext = buildRequestContext(req.body || {}, req);
       const selectedProviders = await normalizeProviders(req.body?.providers);
       const baseFolderInput = stripWrappingQuotes(req.body?.folderId || '');
       const containerLimit = normalizeChunkLimit(req.body?.containerLimit)
@@ -2931,7 +2501,7 @@ const zeniusController = {
         return res.status(400).json({ success: false, error: 'maxConcurrent must be a number between 1 and 50' });
       }
       const actual = downloadQueue.setMaxConcurrent(value);
-      console.log(`[Zenius] Max concurrent downloads set to ${actual}`);
+      console.log(`[Zenius] Max concurrent pipelines set to ${actual}`);
       res.json({
         success: true,
         data: { maxConcurrent: actual, ...getZeniusStatusSnapshot() }
