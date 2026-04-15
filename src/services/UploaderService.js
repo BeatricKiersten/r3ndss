@@ -334,6 +334,55 @@ class UploaderService extends EventEmitter {
     };
   }
 
+  async waitForFileUploadCompletion(fileId, selectedProviders = null, options = {}) {
+    const defaultTimeoutMs = 30 * 60 * 1000;
+    const timeoutMs = Math.max(0, Number(options.timeoutMs) || defaultTimeoutMs);
+    const pollIntervalMs = Math.max(250, Number(options.pollIntervalMs) || 1000);
+    const abortSignal = options.abortSignal || null;
+    const startedAt = Date.now();
+
+    while (true) {
+      if (abortSignal?.aborted) {
+        throw new Error(`Upload wait aborted for file ${fileId}`);
+      }
+
+      if (Date.now() - startedAt >= timeoutMs) {
+        throw new Error(`Timed out waiting for upload completion for file ${fileId}`);
+      }
+
+      const pendingInfo = await this.getPendingUploadProviders(fileId, selectedProviders);
+      const jobs = await this.db.getJobsByFile(fileId);
+      const pendingProviders = new Set(pendingInfo.pendingProviders);
+
+      for (const job of jobs) {
+        if (job.type !== 'upload' || !['pending', 'processing'].includes(job.status)) {
+          continue;
+        }
+
+        const provider = String(job.metadata?.provider || '').trim();
+        if (provider) {
+          pendingProviders.add(provider);
+        }
+      }
+
+      if (pendingProviders.size === 0) {
+        const status = await this.getUploadStatus(fileId);
+        return {
+          fileId,
+          completed: true,
+          providers: status.providers,
+          jobs: status.jobs
+        };
+      }
+
+      if (abortSignal?.aborted) {
+        throw new Error(`Upload wait aborted for file ${fileId}`);
+      }
+
+      await this._sleep(pollIntervalMs);
+    }
+  }
+
   async getPendingUploadProviders(fileId, selectedProviders = null) {
     await this.db.refreshFileCompleteness(fileId, { updateFileStatus: false });
     const file = await this.db.getFile(fileId);
