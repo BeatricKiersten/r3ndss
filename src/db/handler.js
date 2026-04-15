@@ -259,6 +259,12 @@ class DatabaseHandler {
         }
       }
 
+      const providerStatus = String(row.status || '').trim().toLowerCase();
+      if (providerStatus !== 'completed') {
+        normalizedUrl = null;
+        normalizedEmbedUrl = null;
+      }
+
       providers[row.provider] = {
         status: row.status || 'pending',
         url: normalizedUrl,

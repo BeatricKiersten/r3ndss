@@ -1017,6 +1017,38 @@ class UploaderService extends EventEmitter {
     return `${normalizedBase}${safeExtension}`;
   }
 
+  _normalizeFolderPathForUpload(folderPath = '') {
+    const normalized = String(folderPath || '').replace(/\\/g, '/').trim();
+    if (!normalized || normalized === '/') {
+      return '';
+    }
+
+    const segments = normalized
+      .split('/')
+      .map((segment) => String(segment || '').trim())
+      .filter(Boolean);
+
+    if (segments[0]?.toLowerCase() === 'root') {
+      segments.shift();
+    }
+
+    return segments.join('/');
+  }
+
+  async _resolveFolderPathForUpload(folderId = 'root') {
+    const normalizedFolderId = String(folderId || 'root').trim() || 'root';
+    if (normalizedFolderId.toLowerCase() === 'root') {
+      return '';
+    }
+
+    try {
+      const folder = await this.db.getFolder(normalizedFolderId);
+      return this._normalizeFolderPathForUpload(folder?.path || '');
+    } catch (_) {
+      return '';
+    }
+  }
+
   async queueTransferJob({ sourceUrl, targetProvider = 'seekstreaming', folderId = 'root', filename = null }) {
     this._assertTransferSourceUrl(sourceUrl);
     const targetProviderId = await this._resolveProviderId(targetProvider, { allowDisabled: false });
@@ -1724,7 +1756,16 @@ class UploaderService extends EventEmitter {
     return providerLimit(async () => {
       const { filePath, metadata } = await this._ensureUploadSourceForJob(job);
       const normalizedFileName = this._normalizeUploadFileName(metadata?.fileName, filePath);
-      console.log(`[Uploader] Starting upload to ${provider}: ${normalizedFileName}`);
+      let providerUploadFileName = normalizedFileName;
+
+      if (provider === LEGACY_RCLONE_PROVIDER_ID || String(provider).startsWith('rclone:')) {
+        const folderPath = await this._resolveFolderPathForUpload(metadata?.folderId || 'root');
+        if (folderPath) {
+          providerUploadFileName = `${folderPath}/${normalizedFileName}`;
+        }
+      }
+
+      console.log(`[Uploader] Starting upload to ${provider}: ${providerUploadFileName}`);
 
       const currentAttempt = job.attempts + 1;
       const isLastAttempt = currentAttempt >= job.maxAttempts;
@@ -1746,7 +1787,7 @@ class UploaderService extends EventEmitter {
         const result = await this._uploadWithRetry(
           provider,
           filePath,
-          normalizedFileName,
+          providerUploadFileName,
           job.fileId,
           job.id
         );
@@ -1770,7 +1811,12 @@ class UploaderService extends EventEmitter {
         await this.db.updateJob(job.id, {
           status: 'completed',
           progress: 100,
-          metadata: { ...job.metadata, normalizedFileName, result }
+          metadata: {
+            ...job.metadata,
+            normalizedFileName,
+            providerUploadFileName,
+            result
+          }
         });
 
         this._stopJobHeartbeat(job.id);
