@@ -18,6 +18,31 @@ function formatDate(value) {
   return new Date(value).toLocaleString();
 }
 
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '-';
+
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+
+  return `${seconds}s`;
+}
+
+function getJobFileDetail(job) {
+  if (job.metadata?.fileName) return job.metadata.fileName;
+  if (job.metadata?.sourceUrl) return job.metadata.sourceUrl;
+  return null;
+}
+
 export default function JobsPage() {
   const [sourceUrl, setSourceUrl] = useState('');
   const [filename, setFilename] = useState('');
@@ -27,6 +52,7 @@ export default function JobsPage() {
   const [showCancelAllConfirm, setShowCancelAllConfirm] = useState(false);
   const [showClearLogsConfirm, setShowClearLogsConfirm] = useState(false);
   const [showWipeAllConfirm, setShowWipeAllConfirm] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
 
   const queueTransfer = useQueueTransferJob();
   const cancelJob = useCancelJob();
@@ -47,6 +73,14 @@ export default function JobsPage() {
       setTargetProvider(enabledProviders[0]);
     }
   }, [enabledProviders, targetProvider]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, []);
 
   const filters = useMemo(() => ({
     status: statusFilter || undefined,
@@ -226,6 +260,10 @@ export default function JobsPage() {
               const isActive = job.status === 'pending' || job.status === 'processing';
               const deleting = deleteJob.isLoading && deleteJob.variables === job.id;
               const cancelling = cancelJob.isLoading && cancelJob.variables === job.id;
+              const fileDetail = getJobFileDetail(job);
+              const runningFor = isActive && job.startedAt
+                ? formatDuration(now - new Date(job.startedAt).getTime())
+                : null;
 
               return (
                 <div key={job.id} className="p-3 rounded-lg bg-[#0d0d0d] border border-[#222]">
@@ -239,6 +277,11 @@ export default function JobsPage() {
                         </span>
                         <span className="text-[10px] text-[#666]">{job.progress || 0}%</span>
                       </div>
+                      {fileDetail && (
+                        <div className="mt-1 text-xs text-[#888] break-all">
+                          file: {fileDetail}
+                        </div>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-2">
@@ -266,8 +309,7 @@ export default function JobsPage() {
                     </div>
                   </div>
 
-                  <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-2 text-[11px] text-[#666]">
-                    <div>attempts: {job.attempts || 0}/{job.maxAttempts || 0}</div>
+                  <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px] text-[#666]">
                     <div>created: {formatDate(job.createdAt)}</div>
                     <div>updated: {formatDate(job.updatedAt)}</div>
                   </div>
@@ -286,7 +328,7 @@ export default function JobsPage() {
                     </div>
                   ) : isActive ? (
                     <div className="mt-2 flex items-center gap-1 text-[11px] text-blue-400">
-                      <Clock3 className="w-3 h-3" /> running
+                      <Clock3 className="w-3 h-3" /> running{runningFor ? ` ${runningFor}` : ''}
                     </div>
                   ) : null}
                 </div>
