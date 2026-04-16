@@ -404,6 +404,20 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitForDownloadQueueCapacity({ cancelled = () => false, maxQueued = null, pollMs = 250 } = {}) {
+  const normalizedMaxQueued = Number.isFinite(Number(maxQueued))
+    ? Math.max(0, Number(maxQueued))
+    : 0;
+
+  while (!cancelled()) {
+    const status = downloadQueue.getStatus();
+    if (!status.isProcessing && status.active < downloadQueue.maxConcurrent && status.queued <= normalizedMaxQueued) {
+      return;
+    }
+    await sleep(pollMs);
+  }
+}
+
 function bodyPreview(data) {
   if (typeof data === 'string') {
     return data.slice(0, 500);
@@ -537,6 +551,7 @@ function createBackgroundBatchRun({ rootCgId, targetCgSelector, baseFolderInput,
     skippedCount: 0,
     downloadCompletedCount: 0,
     downloadFailedCount: 0,
+    downloadPromises: new Set(),
     queued: [],
     queuedOverflow: 0,
     skipped: [],
@@ -1437,6 +1452,11 @@ async function queueBatchDownloadItem({
     return { counted: false, cancelled: true };
   }
 
+  await waitForDownloadQueueCapacity({ cancelled });
+  if (cancelled()) {
+    return { counted: false, cancelled: true };
+  }
+
   const metadata = instance.metadata && typeof instance.metadata === 'object'
     ? { ...instance.metadata }
     : {};
@@ -1519,7 +1539,7 @@ async function queueBatchDownloadItem({
     return { counted: false, cancelled: true };
   }
 
-  queueDownload({
+  const queuedDownloadPromise = queueDownload({
     urlShortId,
     folderId,
     outputName,
@@ -1528,7 +1548,22 @@ async function queueBatchDownloadItem({
     refererPath,
     fallbackRefererPath: container.containerPathUrl || '',
     requestedFilename: outputName
-  }).then((result) => {
+  });
+
+  if (runId && backgroundBatchRuns.has(runId)) {
+    const run = backgroundBatchRuns.get(runId);
+    run.downloadPromises.add(queuedDownloadPromise);
+    queuedDownloadPromise.finally(() => {
+      if (backgroundBatchRuns.has(runId)) {
+        const activeRun = backgroundBatchRuns.get(runId);
+        activeRun.downloadPromises?.delete(queuedDownloadPromise);
+        touchBackgroundBatchRun(activeRun);
+      }
+    });
+    touchBackgroundBatchRun(run);
+  }
+
+  queuedDownloadPromise.then((result) => {
     if (result.cancelled) {
       console.log(`[Zenius] Batch download ${urlShortId} was cancelled`);
     } else {
@@ -2028,6 +2063,11 @@ async function processBackgroundBatchRun(run, payload) {
     }
 
     if (run.status === 'running') {
+      const pendingDownloadPromises = Array.from(run.downloadPromises || []);
+      if (pendingDownloadPromises.length > 0) {
+        await Promise.allSettled(pendingDownloadPromises);
+      }
+
       run.status = 'completed';
       run.finishedAt = new Date().toISOString();
       touchBackgroundBatchRun(run);
