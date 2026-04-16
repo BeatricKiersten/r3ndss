@@ -172,7 +172,7 @@ class WebhookService {
         const instanceLabel = item.instanceName || item.instanceUrlShortId || '-';
         const stageLabel = item.stage || '-';
         const errorLabel = String(item.error || 'Unknown error').slice(0, 140);
-        lines.push(`  ${i + 1}. [${stageLabel}] ${containerLabel} > ${instanceLabel}: ${errorLabel}`);
+        lines.push(`  ${i + 1}. [${stageLabel}] ${containerLabel} > ${instanceLabel} | ${errorLabel}`);
       });
       if (itemErrors.length > 5) {
         lines.push(`  ... +${itemErrors.length - 5} lainnya`);

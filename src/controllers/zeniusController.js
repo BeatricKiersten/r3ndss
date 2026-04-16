@@ -1511,6 +1511,9 @@ async function queueBatchDownloadItem({
 
           if (hasLocalSource) {
             uploadQueueResult = await uploaderService.queueFileUpload(existingFile.id, existingFile.localPath, folderId, selectedProviders);
+            if (Array.isArray(uploadQueueResult?.jobs) && uploadQueueResult.jobs.length > 0) {
+              await uploaderService.waitForFileUploadCompletion(existingFile.id, selectedProviders);
+            }
             skipReason = 'File already exists locally; queued missing providers only';
           } else {
             console.log(`[Zenius] Existing file ${existingFile.id} is missing local source; re-downloading for providers: ${pendingProviderInfo.pendingProviders.join(', ')}`);
@@ -1785,6 +1788,13 @@ async function resolveQueuedDownloadTask(task) {
     'User-Agent': requestContext.userAgent,
     Referer: resolveReferer(urlShortId, task.refererPath, instanceValue['path-url'] || task.fallbackRefererPath || '')
   };
+
+  try {
+    const refererUrl = new URL(ffmpegHeaders.Referer);
+    ffmpegHeaders.Origin = `${refererUrl.protocol}//${refererUrl.host}`;
+  } catch {
+    ffmpegHeaders.Origin = 'https://www.zenius.net';
+  }
 
   if (requestContext.cookieHeader) {
     ffmpegHeaders.Cookie = requestContext.cookieHeader;

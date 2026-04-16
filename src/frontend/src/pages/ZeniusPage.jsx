@@ -997,7 +997,7 @@ export default function ZeniusPage() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Activity className="w-4 h-4 text-[#666]" />
-            <span className="text-sm font-medium text-[#aaa]">Download Queue</span>
+            <span className="text-sm font-medium text-[#aaa]">Pipeline Queue</span>
           </div>
           <div className="flex items-center gap-3">
             {queueStatus && (
@@ -1005,7 +1005,7 @@ export default function ZeniusPage() {
                 <span className="text-[#666]">Aktif: <span className="text-white">{queueStatus.active}/{queueStatus.max}</span></span>
                 <span className="text-[#666]">Menunggu: <span className="text-white">{queueStatus.queued}</span></span>
                 <span className="text-[#666]">Batch: <span className="text-white">{queueStatus.activeBackgroundBatchCount || 0}</span></span>
-                {queueStatus.isProcessing && <span className="text-emerald-400 text-xs">Memproses...</span>}
+                {queueStatus.isProcessing && <span className="text-emerald-400 text-xs">Pipeline berjalan...</span>}
               </div>
             )}
           </div>
@@ -1020,9 +1020,9 @@ export default function ZeniusPage() {
           </div>
         )}
 
-        {/* Max Concurrent Control */}
+        {/* Pipeline Concurrency Control */}
         <div className="flex items-center gap-3">
-          <span className="text-xs text-[#666]">Max Concurrent:</span>
+          <span className="text-xs text-[#666]">Pipeline Concurrent:</span>
           {editingMaxConcurrent ? (
             <div className="flex items-center gap-1.5">
               <input
@@ -1076,7 +1076,7 @@ export default function ZeniusPage() {
             >
               <Activity className="w-3 h-3 text-blue-400" />
               {queueStatus?.max || 10}
-              <span className="text-[#555]">threads</span>
+              <span className="text-[#555]">pipes</span>
             </button>
           )}
         </div>
@@ -1084,7 +1084,7 @@ export default function ZeniusPage() {
         {/* Active Tasks */}
         {queueStatus?.activeTasks?.length > 0 && (
           <div className="space-y-1.5">
-            <p className="text-[10px] text-[#555] uppercase tracking-wider">Active Downloads</p>
+            <p className="text-[10px] text-[#555] uppercase tracking-wider">Active Pipelines</p>
             <div className="space-y-1">
               {queueStatus.activeTasks.map((task) => (
                 <div key={task.id} className="flex items-center gap-2 px-2.5 py-1.5 rounded bg-[#0d0d0d] border border-[#1f1f1f]">
@@ -1103,7 +1103,7 @@ export default function ZeniusPage() {
         {/* Queued Tasks */}
         {queueStatus?.queuedTasks?.length > 0 && (
           <div className="space-y-1.5">
-            <p className="text-[10px] text-[#555] uppercase tracking-wider">Queued ({queueStatus.queuedTasks.length})</p>
+            <p className="text-[10px] text-[#555] uppercase tracking-wider">Queued Pipelines ({queueStatus.queuedTasks.length})</p>
             <div className="max-h-24 overflow-y-auto space-y-1">
               {queueStatus.queuedTasks.slice(0, 20).map((task, i) => (
                 <div key={i} className="flex items-center gap-2 px-2.5 py-1 rounded bg-[#0d0d0d]">

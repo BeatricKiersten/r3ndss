@@ -243,8 +243,9 @@ class DatabaseHandler {
         const rawFileId = row.remote_file_id ? String(row.remote_file_id).trim() : '';
         const separatorIndex = rawFileId.indexOf(':');
         const remotePath = separatorIndex >= 0 ? rawFileId.slice(separatorIndex + 1).replace(/^\/+/, '') : '';
+        const isGoogleDriveUrl = Boolean(publicId || /drive\.google\.com/i.test(rawUrl) || /drive\.google\.com/i.test(rawEmbedUrl));
 
-        if (rcloneProxyBase && remotePath) {
+        if (isGoogleDriveUrl && rcloneProxyBase && remotePath) {
           const proxiedUrl = `${rcloneProxyBase}/${remotePath.split('/').map(encodeURIComponent).join('/')}`;
           normalizedUrl = proxiedUrl;
           if (!isHttpUrl(rawEmbedUrl)) {
