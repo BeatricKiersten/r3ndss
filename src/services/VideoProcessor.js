@@ -33,14 +33,6 @@ const FFMPEG_IGNORED_WARNING_PATTERNS = [
   /error=End of file\.?/i
 ];
 
-const YT_DLP_ALLOWED_HEADERS = new Set([
-  'user-agent',
-  'referer',
-  'origin',
-  'accept',
-  'accept-language'
-]);
-
 class VideoProcessor {
   constructor(dbHandler, eventEmitter) {
     this.db = dbHandler;
@@ -249,11 +241,7 @@ class VideoProcessor {
   async _executeYtDlp(jobId, fileId, hlsUrl, outputPath, options) {
     return new Promise((resolve, reject) => {
       const { headers, cookies } = options;
-
-      const args = this._buildYtDlpArgs(hlsUrl, outputPath, {
-        headers,
-        cookies
-      });
+      const args = this._buildYtDlpArgs(hlsUrl, outputPath);
 
       console.log(`[yt-dlp] Starting job ${jobId} for ${hlsUrl}`);
       if (DEBUG_YTDLP_FULL) {
@@ -386,8 +374,7 @@ class VideoProcessor {
   /**
    * Build yt-dlp arguments
    */
-  _buildYtDlpArgs(hlsUrl, outputPath, options) {
-    const { headers, cookies } = options;
+  _buildYtDlpArgs(hlsUrl, outputPath) {
     const args = [
       '--no-playlist',
       '--newline',
@@ -399,30 +386,8 @@ class VideoProcessor {
       '-o', outputPath
     ];
 
-    if (headers && Object.keys(headers).length > 0) {
-      for (const [key, value] of Object.entries(headers)) {
-        if (value === undefined || value === null || String(value).trim().length === 0) continue;
-        if (!YT_DLP_ALLOWED_HEADERS.has(String(key).trim().toLowerCase())) continue;
-        args.push('--add-header', `${key}: ${value}`);
-      }
-    }
-
-    // yt-dlp expects --cookies to point to a cookies.txt/Netscape file, not a raw Cookie header.
-    if (cookies && this._isCookieFilePath(cookies)) {
-      args.push('--cookies', cookies);
-    }
-
     args.push(hlsUrl);
     return args;
-  }
-
-  _isCookieFilePath(cookies) {
-    const raw = String(cookies || '').trim();
-    if (!raw || raw.includes(';') || raw.includes('=') || raw.includes('\n')) {
-      return false;
-    }
-
-    return fs.existsSync(raw);
   }
 
   _resolveOutputDir(outputDir) {
