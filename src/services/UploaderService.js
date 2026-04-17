@@ -143,6 +143,25 @@ class UploaderService extends EventEmitter {
     return serialized;
   }
 
+  _normalizeTerminalError(error, context = {}) {
+    const message = String(error?.message || context.fallbackMessage || 'Upload failed').trim() || 'Upload failed';
+    const code = String(error?.code || context.code || 'UPLOAD_FAILED').trim() || 'UPLOAD_FAILED';
+
+    return {
+      code,
+      message,
+      details: {
+        provider: context.provider || null,
+        jobId: context.jobId || null,
+        fileId: context.fileId || null,
+        attempt: context.attempt || null,
+        maxAttempts: context.maxAttempts || null,
+        cause: error?.cause || null,
+        serialized: this._serializeError(error)
+      }
+    };
+  }
+
   _logUpload(level, event, context = {}) {
     const parts = [`[Uploader] event=${event}`];
     for (const [key, value] of Object.entries(context)) {
@@ -1739,7 +1758,37 @@ class UploaderService extends EventEmitter {
     const isLastAttempt = currentAttempt >= job.maxAttempts;
 
     if (!sourceUrl || !targetProvider || !filePath || !fileName) {
-      throw new Error('Invalid transfer job metadata');
+      const invalidError = this._normalizeTerminalError(new Error('Invalid transfer job metadata'), {
+        code: 'TRANSFER_METADATA_INVALID',
+        provider: resolvedTargetProvider,
+        jobId: job.id,
+        fileId: job.fileId,
+        attempt: currentAttempt,
+        maxAttempts: job.maxAttempts
+      });
+      await this.db.updateJob(job.id, {
+        status: 'failed',
+        attempts: currentAttempt,
+        error: invalidError.message,
+        metadata: {
+          ...(job.metadata || {}),
+          terminalError: invalidError
+        }
+      });
+      await this.db.updateProviderStatus(job.fileId, resolvedTargetProvider, 'failed', null, null, invalidError.message, { embedUrl: null });
+      this.emit('transfer:failed', {
+        jobId: job.id,
+        fileId: job.fileId,
+        sourceProvider: 'catbox',
+        sourceUrl,
+        targetProvider: resolvedTargetProvider,
+        error: invalidError.message,
+        details: invalidError,
+        attempt: currentAttempt,
+        maxAttempts: job.maxAttempts,
+        willRetry: false
+      });
+      return;
     }
 
     await this.db.updateJob(job.id, {
@@ -1811,6 +1860,14 @@ class UploaderService extends EventEmitter {
       await this._cleanupFilePathWhenUnused(job.fileId, filePath);
     } catch (error) {
       const finalStatus = isLastAttempt ? 'failed' : 'pending';
+      const normalizedError = this._normalizeTerminalError(error, {
+        code: 'TRANSFER_FAILED',
+        provider: resolvedTargetProvider,
+        jobId: job.id,
+        fileId: job.fileId,
+        attempt: currentAttempt,
+        maxAttempts: job.maxAttempts
+      });
 
       await this.db.updateProviderStatus(
         job.fileId,
@@ -1818,13 +1875,18 @@ class UploaderService extends EventEmitter {
         finalStatus,
         null,
         null,
-        error.message,
+        normalizedError.message,
         { embedUrl: null }
       );
 
       await this.db.updateJob(job.id, {
         status: finalStatus,
-        error: error.message
+        error: normalizedError.message,
+        metadata: {
+          ...(job.metadata || {}),
+          lastError: normalizedError,
+          ...(isLastAttempt ? { terminalError: normalizedError } : {})
+        }
       });
 
       this.emit('transfer:failed', {
@@ -1833,7 +1895,8 @@ class UploaderService extends EventEmitter {
         sourceProvider: 'catbox',
         sourceUrl,
         targetProvider: resolvedTargetProvider,
-        error: error.message,
+        error: normalizedError.message,
+        details: normalizedError,
         attempt: currentAttempt,
         maxAttempts: job.maxAttempts,
         willRetry: !isLastAttempt
@@ -1982,41 +2045,43 @@ class UploaderService extends EventEmitter {
     const providerLimit = this._ensureUploadLimit(provider);
 
     return providerLimit(async () => {
-      const { filePath, metadata } = await this._ensureUploadSourceForJob(job);
-      const normalizedFileName = this._normalizeUploadFileName(metadata?.fileName, filePath);
-      let providerUploadFileName = normalizedFileName;
-
-      if (provider === LEGACY_RCLONE_PROVIDER_ID || String(provider).startsWith('rclone:')) {
-        const folderPath = await this._resolveFolderPathForUpload(metadata?.folderId || 'root');
-        if (folderPath) {
-          providerUploadFileName = `${folderPath}/${normalizedFileName}`;
-        }
-      }
-
       const currentAttempt = job.attempts + 1;
       const isLastAttempt = currentAttempt >= job.maxAttempts;
-      this._logUpload('info', 'upload.started', this._buildUploadLogContext(job, {
-        provider,
-        attempt: currentAttempt,
-        maxAttempts: job.maxAttempts,
-        sourcePath: filePath,
-        targetName: providerUploadFileName
-      }));
-
-      // Update job status
-      await this.db.updateJob(job.id, {
-        status: 'processing',
-        attempts: currentAttempt
-      });
-
-      this._startJobHeartbeat(job.id);
-
-      // Update provider status to uploading
-      await this.db.updateProviderStatus(job.fileId, provider, 'uploading');
-      this.emit('upload:started', { jobId: job.id, fileId: job.fileId, provider, attempt: currentAttempt });
+      let filePath = null;
+      let normalizedFileName = null;
+      let providerUploadFileName = null;
 
       try {
-        // Execute upload with retry logic
+        const ensuredSource = await this._ensureUploadSourceForJob(job);
+        filePath = ensuredSource.filePath;
+        const metadata = ensuredSource.metadata;
+        normalizedFileName = this._normalizeUploadFileName(metadata?.fileName, filePath);
+        providerUploadFileName = normalizedFileName;
+
+        if (provider === LEGACY_RCLONE_PROVIDER_ID || String(provider).startsWith('rclone:')) {
+          const folderPath = await this._resolveFolderPathForUpload(metadata?.folderId || 'root');
+          if (folderPath) {
+            providerUploadFileName = `${folderPath}/${normalizedFileName}`;
+          }
+        }
+
+        this._logUpload('info', 'upload.started', this._buildUploadLogContext(job, {
+          provider,
+          attempt: currentAttempt,
+          maxAttempts: job.maxAttempts,
+        sourcePath: filePath,
+        targetName: providerUploadFileName
+        }));
+
+        await this.db.updateJob(job.id, {
+          status: 'processing',
+          attempts: currentAttempt
+        });
+
+        this._startJobHeartbeat(job.id);
+        await this.db.updateProviderStatus(job.fileId, provider, 'uploading');
+        this.emit('upload:started', { jobId: job.id, fileId: job.fileId, provider, attempt: currentAttempt });
+
         const result = await this._uploadWithRetry(
           provider,
           filePath,
@@ -2025,7 +2090,6 @@ class UploaderService extends EventEmitter {
           job.id
         );
 
-        // Update success status
         await this.db.updateProviderStatus(
           job.fileId,
           provider,
@@ -2068,60 +2132,72 @@ class UploaderService extends EventEmitter {
         if (job.metadata?.removeWhenUnused && filePath) {
           await this._cleanupFilePathWhenUnused(job.fileId, filePath);
         }
-
       } catch (error) {
         this.progressLogState.delete(`${job.id}-${provider}`);
+        this._stopJobHeartbeat(job.id);
+        const normalizedError = this._normalizeTerminalError(error, {
+          provider,
+          jobId: job.id,
+          fileId: job.fileId,
+          attempt: currentAttempt,
+          maxAttempts: job.maxAttempts
+        });
         this._logUpload('error', 'upload.failed', this._buildUploadLogContext(job, {
           provider,
           attempt: currentAttempt,
           maxAttempts: job.maxAttempts,
           willRetry: !isLastAttempt,
-          error: error.message,
-          errorDetails: this._serializeError(error)
+          error: normalizedError.message,
+          errorDetails: normalizedError.details?.serialized || null
         }));
-
-        this._stopJobHeartbeat(job.id);
 
         const finalStatus = isLastAttempt ? 'failed' : 'pending';
 
-        // Update failure status - mark as failed after max attempts
         await this.db.updateProviderStatus(
           job.fileId,
           provider,
           finalStatus,
           null,
           null,
-          error.message,
+          normalizedError.message,
           { embedUrl: null }
         );
 
         await this.db.updateJob(job.id, {
           status: finalStatus,
-          error: error.message
+          error: normalizedError.message,
+          metadata: {
+            ...(job.metadata || {}),
+            normalizedFileName,
+            providerUploadFileName,
+            lastError: normalizedError,
+            ...(isLastAttempt ? { terminalError: normalizedError } : {})
+          }
         });
 
         this.emit('upload:failed', {
           jobId: job.id,
           fileId: job.fileId,
           provider,
-          error: error.message,
+          error: normalizedError.message,
+          details: normalizedError,
           attempt: currentAttempt,
           maxAttempts: job.maxAttempts,
           willRetry: !isLastAttempt
         });
 
-        // Send notification if all attempts exhausted
         if (isLastAttempt) {
           this.emit('upload:failed:final', {
             jobId: job.id,
             fileId: job.fileId,
             provider,
-            error: error.message
+            error: normalizedError.message,
+            details: normalizedError
           });
           this._logUpload('error', 'upload.failed.final', this._buildUploadLogContext(job, {
             provider,
             maxAttempts: job.maxAttempts,
-            error: error.message
+            error: normalizedError.message
           }));
 
           if (job.metadata?.removeWhenUnused && filePath) {

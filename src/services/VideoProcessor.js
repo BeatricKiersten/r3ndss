@@ -41,6 +41,22 @@ class VideoProcessor {
     this._jobHeartbeats = new Map();
   }
 
+  _normalizeProcessingError(error, context = {}) {
+    const fallbackMessage = context.fallbackMessage || 'Video processing failed';
+    const code = String(error?.code || 'VIDEO_PROCESSING_FAILED').trim() || 'VIDEO_PROCESSING_FAILED';
+    const message = String(error?.message || fallbackMessage).trim() || fallbackMessage;
+
+    return {
+      code,
+      message,
+      details: {
+        signal: error?.signal || null,
+        outputPath: error?.outputPath || context.outputPath || null,
+        hlsUrl: error?.hlsUrl || context.hlsUrl || null
+      }
+    };
+  }
+
   /**
    * Main entry point: Process HLS URL to MP4
    * Checks for duplicate files before creating new ones
@@ -175,14 +191,22 @@ class VideoProcessor {
           break;
         } catch (error) {
           this._stopJobHeartbeat(job.id);
-          lastError = error;
-          console.error(`[VideoProcessor] Attempt ${attempt}/${MAX_RETRIES} failed for ${outputFileName}:`, error.message);
+          lastError = this._normalizeProcessingError(error, {
+            outputPath,
+            hlsUrl,
+            fallbackMessage: 'Video processing attempt failed'
+          });
+          console.error(`[VideoProcessor] Attempt ${attempt}/${MAX_RETRIES} failed for ${outputFileName}:`, lastError.message);
 
           if (attempt < MAX_RETRIES) {
             await this.db.updateJob(job.id, {
               status: 'pending',
               progress: 0,
-              error: `Attempt ${attempt} failed: ${error.message}`
+              error: `Attempt ${attempt} failed: ${lastError.message}`,
+              metadata: {
+                ...(job.metadata || {}),
+                lastError
+              }
             });
             await this.db.updateFileProgress(file.id, 'processing', 0);
 
@@ -202,11 +226,21 @@ class VideoProcessor {
       if (!succeeded) {
         await this.db.updateJob(createdJobId, {
           status: 'failed',
-          error: lastError?.message || 'All retry attempts exhausted'
+          error: lastError?.message || 'All retry attempts exhausted',
+          metadata: {
+            ...(job.metadata || {}),
+            lastError,
+            terminalError: lastError
+          }
         });
 
-        this.eventEmitter.emit('job:failed', { jobId: createdJobId, error: lastError?.message });
-        throw lastError || new Error('Processing failed after all retries');
+        await this.db.markFileProcessingCancelled(file.id).catch(() => {});
+
+        this.eventEmitter.emit('job:failed', { jobId: createdJobId, fileId: file.id, error: lastError?.message, details: lastError });
+        const terminalError = new Error(lastError?.message || 'Processing failed after all retries');
+        terminalError.code = lastError?.code || 'VIDEO_PROCESSING_FAILED';
+        terminalError.details = lastError?.details || null;
+        throw terminalError;
       }
 
       const finalFile = await this.db.getFile(file.id);
@@ -220,18 +254,33 @@ class VideoProcessor {
       };
 
     } catch (error) {
-      console.error('Video processing failed:', error);
+      const normalizedError = this._normalizeProcessingError(error, { hlsUrl: hlsUrl, fallbackMessage: 'Video processing failed' });
+      console.error('Video processing failed:', normalizedError);
       
       if (createdJobId) {
         this._stopJobHeartbeat(createdJobId);
         await this.db.updateJob(createdJobId, {
           status: 'failed',
-          error: error.message
+          error: normalizedError.message,
+          metadata: {
+            lastError: normalizedError,
+            terminalError: normalizedError
+          }
         });
-        this.eventEmitter.emit('job:failed', { jobId: createdJobId, error: error.message });
+        this.eventEmitter.emit('job:failed', { jobId: createdJobId, error: normalizedError.message, details: normalizedError });
       }
 
-      throw error;
+      if (createdJobId) {
+        const failedJob = await this.db.getJob(createdJobId).catch(() => null);
+        if (failedJob?.fileId) {
+          await this.db.markFileProcessingCancelled(failedJob.fileId).catch(() => {});
+        }
+      }
+
+      const surfacedError = new Error(normalizedError.message);
+      surfacedError.code = normalizedError.code;
+      surfacedError.details = normalizedError.details;
+      throw surfacedError;
     }
   }
 

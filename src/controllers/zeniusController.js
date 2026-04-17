@@ -7,7 +7,15 @@ const { EventEmitter } = require('events');
 const AppError = require('../errors/AppError');
 
 const config = require('../config');
-const { db, videoProcessor, uploaderService, eventEmitter, cleanupService } = require('../services/runtime');
+const {
+  db,
+  uploaderService,
+  eventEmitter,
+  cleanupService,
+  runProcessUploadPipeline,
+  finalizeExistingFilePipeline,
+  normalizePipelineError
+} = require('../services/runtime');
 const webhookService = require('../services/webhookService');
 const { buildRequestContext, stripWrappingQuotes } = require('../services/requestContext');
 const {
@@ -183,14 +191,17 @@ class DownloadQueue {
     });
 
     try {
-      const result = await videoProcessor.processHls(videoUrl, {
+      const pipelineResult = await runProcessUploadPipeline(videoUrl, {
         folderId,
         outputName,
         outputDir: config.uploadDir,
         headers: ffmpegHeaders,
-        skipIfExists: true
+        skipIfExists: true,
+        selectedProviders,
+        waitForUpload: true
       });
 
+      const result = pipelineResult.process;
       fileId = result.fileId;
       task.fileId = result.fileId || null;
       task.jobId = result.jobId || null;
@@ -205,11 +216,6 @@ class DownloadQueue {
       });
 
       if (result.skipped) {
-        let uploadQueueResult = null;
-        if (result.reason === 'File already exists') {
-          uploadQueueResult = await uploaderService.queueFileUpload(result.fileId, result.outputPath, folderId, selectedProviders);
-          await uploaderService.waitForFileUploadCompletion(result.fileId, selectedProviders);
-        }
         console.log(`[DownloadQueue] #${task.id} ${urlShortId} skipped: ${result.reason}`);
 
         broadcastDownloadComplete({
@@ -221,13 +227,19 @@ class DownloadQueue {
           durationMs: Date.now() - startTime
         });
 
-        return { success: true, id: task.id, fileId, urlShortId, skipped: true, reason: result.reason, uploadQueue: uploadQueueResult };
+        return {
+          success: true,
+          id: task.id,
+          fileId,
+          urlShortId,
+          skipped: true,
+          reason: result.reason,
+          uploadQueue: pipelineResult.uploadQueue,
+          pipeline: pipelineResult.pipeline
+        };
       }
 
-      console.log(`[DownloadQueue] #${task.id} ${urlShortId} downloaded, fileId=${fileId}, queuing upload`);
-
-      await uploaderService.queueFileUpload(result.fileId, result.outputPath, folderId, selectedProviders);
-      await uploaderService.waitForFileUploadCompletion(result.fileId, selectedProviders);
+      console.log(`[DownloadQueue] #${task.id} ${urlShortId} downloaded, fileId=${fileId}, upload completed`);
 
       broadcastDownloadComplete({
         urlShortId,
@@ -236,14 +248,21 @@ class DownloadQueue {
         durationMs: Date.now() - startTime
       });
 
-      return { success: true, id: task.id, fileId, urlShortId };
+      return {
+        success: true,
+        id: task.id,
+        fileId,
+        urlShortId,
+        pipeline: pipelineResult.pipeline
+      };
     } catch (error) {
-      console.error(`[DownloadQueue] #${task.id} ${urlShortId} failed:`, error.message);
+      const normalizedError = normalizePipelineError(error, 'DOWNLOAD_PIPELINE_FAILED');
+      console.error(`[DownloadQueue] #${task.id} ${urlShortId} failed:`, normalizedError.message);
 
       broadcastDownloadFailed({
         urlShortId,
         taskId: task.id,
-        error: error.message,
+        error: normalizedError.message,
         durationMs: Date.now() - startTime
       });
 
@@ -1517,10 +1536,10 @@ async function queueBatchDownloadItem({
           const hasLocalSource = Boolean(existingFile.localPath && await fs.pathExists(existingFile.localPath));
 
           if (hasLocalSource) {
-            uploadQueueResult = await uploaderService.queueFileUpload(existingFile.id, existingFile.localPath, folderId, selectedProviders);
-            if (Array.isArray(uploadQueueResult?.jobs) && uploadQueueResult.jobs.length > 0) {
-              await uploaderService.waitForFileUploadCompletion(existingFile.id, selectedProviders);
-            }
+            const existingPipeline = await finalizeExistingFilePipeline(existingFile.id, folderId, selectedProviders, {
+              waitForUpload: true
+            });
+            uploadQueueResult = existingPipeline.uploadQueue;
             skipReason = 'File already exists locally; queued missing providers only';
           } else {
             console.log(`[Zenius] Existing file ${existingFile.id} is missing local source; re-downloading for providers: ${pendingProviderInfo.pendingProviders.join(', ')}`);

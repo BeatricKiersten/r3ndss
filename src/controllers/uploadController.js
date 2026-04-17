@@ -1,5 +1,5 @@
 const path = require('path');
-const { videoProcessor, uploaderService, db } = require('../services/runtime');
+const { runProcessUploadPipeline, uploaderService, db, normalizePipelineError } = require('../services/runtime');
 const AppError = require('../errors/AppError');
 const { success } = require('../utils/apiResponse');
 
@@ -18,28 +18,30 @@ const uploadController = {
       throw new AppError('HLS URL is required', { statusCode: 400, code: 'HLS_URL_REQUIRED' });
     }
 
-    void videoProcessor.processHls(url, {
+    void runProcessUploadPipeline(url, {
       folderId,
       outputName: filename,
       decryptionKey,
-      headers
-    }).then(async (result) => {
-      await uploaderService.queueFileUpload(
-        result.fileId,
-        result.outputPath,
-        folderId,
-        providers
-      );
+      headers,
+      selectedProviders: providers,
+      waitForUpload: false
     }).catch((error) => {
+      const normalizedError = normalizePipelineError(error, 'PROCESS_UPLOAD_FAILED');
       console.error('[Process] Failed:', {
         url,
         folderId,
-        message: error.message,
+        message: normalizedError.message,
+        code: normalizedError.code,
         stack: error.stack || null
       });
     });
 
-    res.status(202).json(success({ url, folderId, providers }, {
+    res.status(202).json(success({
+      url,
+      folderId,
+      providers,
+      state: 'queued'
+    }, {
       message: 'HLS processing started'
     }));
   },
