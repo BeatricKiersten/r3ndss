@@ -2,7 +2,10 @@ const axios = require('axios');
 const { PASSTHROUGH_HEADER_MAP } = require('./requestContext');
 
 const ZENIUS_BASE_URL = 'https://www.zenius.net';
-const RETRYABLE_UPSTREAM_STATUS = new Set([429, 500, 502, 503, 504]);
+const RETRYABLE_UPSTREAM_STATUS = new Set([202, 429, 500, 502, 503, 504]);
+
+const INSTANCE_DETAIL_RETRY_DELAY_MS = 2000;
+const INSTANCE_DETAIL_MAX_RETRIES = 3;
 
 function clampPositiveInt(value, fallback) {
   const parsed = Number.parseInt(value, 10);
@@ -182,7 +185,7 @@ async function getJson(endpoint, {
   throw new Error(`Request failed after retries for ${endpoint}`);
 }
 
-async function getInstanceDetails({ urlShortId, refererPath, fallbackRefererPath, requestContext, timeoutMs = 30000 }) {
+async function getInstanceDetails({ urlShortId, refererPath, fallbackRefererPath, requestContext, timeoutMs = 30000, maxRetries = 3 }) {
   const endpoint = `${ZENIUS_BASE_URL}/api/instance-details?url-short-id=${encodeURIComponent(urlShortId)}`;
   const referer = resolveReferer(
     urlShortId,
@@ -191,19 +194,46 @@ async function getInstanceDetails({ urlShortId, refererPath, fallbackRefererPath
   );
   const headers = buildUpstreamHeaders({ requestContext, referer });
 
-  const response = await axios.get(endpoint, {
-    headers,
-    timeout: clampPositiveInt(timeoutMs, 30000),
-    validateStatus: () => true
-  });
+  const effectiveTimeout = clampPositiveInt(timeoutMs, 30000);
+  const maxAttempts = clampPositiveInt(maxRetries, 3);
 
-  return {
-    endpoint,
-    referer,
-    status: response.status,
-    headers: response.headers,
-    body: response.data
-  };
+  for (let attempt = 0; attempt <= maxAttempts; attempt += 1) {
+    const response = await axios.get(endpoint, {
+      headers,
+      timeout: effectiveTimeout,
+      validateStatus: () => true
+    });
+
+    if (response.status >= 200 && response.status < 300) {
+      const payload = response.data;
+      const isObjectPayload = payload && typeof payload === 'object' && !Array.isArray(payload);
+
+      if (isObjectPayload && payload.ok !== false && payload.value) {
+        return {
+          endpoint,
+          referer,
+          status: response.status,
+          headers: response.headers,
+          body: payload
+        };
+      }
+    }
+
+    if (response.status === 202) {
+      if (attempt < maxAttempts) {
+        const delayMs = INSTANCE_DETAIL_RETRY_DELAY_MS * (attempt + 1);
+        console.log(`[ZeniusUpstream] Instance details returned 202 for ${urlShortId}, retrying in ${delayMs}ms (attempt ${attempt + 1}/${maxAttempts})`);
+        await sleep(delayMs);
+        continue;
+      }
+
+      console.warn(`[ZeniusUpstream] Instance details 202 after ${maxAttempts} retries for ${urlShortId}, giving up`);
+    }
+
+    throw new Error(`Instance details request failed (HTTP ${response.status}) for ${endpoint}. Body: ${bodyPreview(response.data)}`);
+  }
+
+  throw new Error(`Instance details request failed after ${maxAttempts} retries for ${endpoint}`);
 }
 
 module.exports = {
