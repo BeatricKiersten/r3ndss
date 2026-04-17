@@ -32,6 +32,14 @@ const FFMPEG_IGNORED_WARNING_PATTERNS = [
   /error=End of file\.?/i
 ];
 
+const YT_DLP_ALLOWED_HEADERS = new Set([
+  'user-agent',
+  'referer',
+  'origin',
+  'accept',
+  'accept-language'
+]);
+
 class VideoProcessor {
   constructor(dbHandler, eventEmitter) {
     this.db = dbHandler;
@@ -246,7 +254,7 @@ class VideoProcessor {
         cookies
       });
 
-      console.log(`[yt-dlp] Starting: yt-dlp ${args.join(' ')}`);
+      console.log(`[yt-dlp] Starting job ${jobId} for ${hlsUrl}`);
 
       const ytDlp = spawn('yt-dlp', args, {
         stdio: ['ignore', 'pipe', 'pipe']
@@ -284,6 +292,9 @@ class VideoProcessor {
           console.log(`[yt-dlp] Process completed successfully`);
           resolve();
         } else {
+          if (stderrBuffer.trim()) {
+            console.error(`[yt-dlp] stderr for failed job ${jobId}:\n${stderrBuffer.trim()}`);
+          }
           const errorMessage = this._parseDownloadError(stderrBuffer, code);
           reject(new Error(errorMessage));
         }
@@ -314,6 +325,8 @@ class VideoProcessor {
       '--no-playlist',
       '--newline',
       '--no-warnings',
+      '--downloader', 'ffmpeg',
+      '--hls-use-mpegts',
       '-f', 'bestvideo*+bestaudio/best',
       '--merge-output-format', 'mp4',
       '-o', outputPath
@@ -322,16 +335,27 @@ class VideoProcessor {
     if (headers && Object.keys(headers).length > 0) {
       for (const [key, value] of Object.entries(headers)) {
         if (value === undefined || value === null || String(value).trim().length === 0) continue;
+        if (!YT_DLP_ALLOWED_HEADERS.has(String(key).trim().toLowerCase())) continue;
         args.push('--add-header', `${key}: ${value}`);
       }
     }
 
-    if (cookies) {
+    // yt-dlp expects --cookies to point to a cookies.txt/Netscape file, not a raw Cookie header.
+    if (cookies && this._isCookieFilePath(cookies)) {
       args.push('--cookies', cookies);
     }
 
     args.push(hlsUrl);
     return args;
+  }
+
+  _isCookieFilePath(cookies) {
+    const raw = String(cookies || '').trim();
+    if (!raw || raw.includes(';') || raw.includes('=') || raw.includes('\n')) {
+      return false;
+    }
+
+    return fs.existsSync(raw);
   }
 
   _resolveOutputDir(outputDir) {

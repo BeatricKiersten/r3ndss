@@ -88,6 +88,33 @@ class WebhookService {
     return { status: response.status, data: response.data };
   }
 
+  async sendCrashAlert(db, payload = {}) {
+    await this._ensureConfig(db);
+
+    if (!this._config.enabled || !this._config.url || !this._config.to) {
+      console.log('[Webhook] Crash alert skipped: disabled or incomplete config');
+      return null;
+    }
+
+    const text = this._formatCrashMessage(payload);
+
+    try {
+      const response = await axios.post(this._config.url, {
+        to: this._config.to,
+        text
+      }, {
+        timeout: 15000,
+        validateStatus: () => true
+      });
+
+      console.log(`[Webhook] Crash alert sent: ${response.status}`);
+      return { success: true, status: response.status };
+    } catch (error) {
+      console.error('[Webhook] Crash alert failed:', error.message);
+      return { success: false, error: error.message };
+    }
+  }
+
   _formatBatchMessage(data) {
     const {
       id,
@@ -177,6 +204,49 @@ class WebhookService {
       if (itemErrors.length > 5) {
         lines.push(`  ... +${itemErrors.length - 5} lainnya`);
       }
+    }
+
+    return lines.join('\n');
+  }
+
+  _formatCrashMessage(data) {
+    const {
+      type = 'process-error',
+      message = 'Unknown error',
+      stack = '',
+      timestamp,
+      pid,
+      uptime,
+      hostname,
+      nodeEnv,
+      extra = {}
+    } = data;
+
+    const lines = [];
+    lines.push('🚨 *SERVER CRASH ALERT*');
+    lines.push('');
+    lines.push(`• Type: ${String(type).slice(0, 80)}`);
+    lines.push(`• Message: ${String(message).slice(0, 500)}`);
+    if (timestamp) lines.push(`• Time: ${new Date(timestamp).toLocaleString('id-ID')}`);
+    if (pid) lines.push(`• PID: ${pid}`);
+    if (hostname) lines.push(`• Host: ${hostname}`);
+    if (nodeEnv) lines.push(`• Env: ${nodeEnv}`);
+    if (Number.isFinite(uptime)) lines.push(`• Uptime: ${Math.floor(uptime)}s`);
+
+    const extraEntries = Object.entries(extra || {}).filter(([, value]) => value !== undefined && value !== null && value !== '');
+    if (extraEntries.length > 0) {
+      lines.push('');
+      lines.push('📎 *Context:*');
+      for (const [key, value] of extraEntries.slice(0, 8)) {
+        lines.push(`• ${key}: ${String(value).slice(0, 200)}`);
+      }
+    }
+
+    if (stack) {
+      lines.push('');
+      lines.push('```');
+      lines.push(String(stack).slice(0, 1500));
+      lines.push('```');
     }
 
     return lines.join('\n');

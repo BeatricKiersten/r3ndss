@@ -19,6 +19,7 @@ const errorHandler = require('./middleware/errorHandler');
 const websocketHandler = require('./websocket/events');
 const mediaController = require('./controllers/mediaController');
 const { db, eventEmitter, uploaderService, cleanupService, rcloneServeService } = require('./services/runtime');
+const webhookService = require('./services/webhookService');
 // Lazy-import to avoid circular deps — zeniusController loads runtime which is already loaded
 let _zeniusController = null;
 function getZeniusController() {
@@ -322,6 +323,51 @@ async function startServer() {
 
 let weeklyCheckerInterval = null;
 
+async function shutdownGracefully(signal) {
+  console.log(`${signal} received, shutting down gracefully`);
+  cleanupService.stop();
+  try {
+    const ctrl = getZeniusController();
+    if (ctrl?.persistAllBatchRunsToDb) {
+      await ctrl.persistAllBatchRunsToDb();
+    }
+  } catch (e) {
+    console.error('[Server] Failed to persist batch runs on shutdown:', e.message);
+  }
+  await rcloneServeService.stop().catch(() => {});
+  await uploaderService.stop().catch(() => {});
+  if (weeklyCheckerInterval) clearInterval(weeklyCheckerInterval);
+
+  await new Promise((resolve) => {
+    server.close(() => {
+      console.log('Server closed');
+      resolve();
+    });
+  });
+}
+
+async function notifyProcessFailure(type, errorLike, extra = {}) {
+  try {
+    const error = errorLike instanceof Error
+      ? errorLike
+      : new Error(typeof errorLike === 'string' ? errorLike : JSON.stringify(errorLike));
+
+    await webhookService.sendCrashAlert(db, {
+      type,
+      message: error.message,
+      stack: error.stack || '',
+      timestamp: new Date().toISOString(),
+      pid: process.pid,
+      uptime: process.uptime(),
+      hostname: process.env.HOSTNAME || '',
+      nodeEnv: process.env.NODE_ENV || '',
+      extra
+    });
+  } catch (notifyError) {
+    console.error('[Process] Failed to send crash webhook:', notifyError.message);
+  }
+}
+
 async function startWeeklyChecker() {
   weeklyCheckerInterval = setInterval(async () => {
     try {
@@ -378,45 +424,26 @@ async function runSystemCheck() {
   }
 }
 
-process.on('SIGTERM', async () => {
-  console.log('SIGTERM received, shutting down gracefully');
-  cleanupService.stop();
-  // Persist any in-memory batch run state before exiting
-  try {
-    const ctrl = getZeniusController();
-    if (ctrl?.persistAllBatchRunsToDb) {
-      await ctrl.persistAllBatchRunsToDb();
-    }
-  } catch (e) {
-    console.error('[Server] Failed to persist batch runs on shutdown:', e.message);
-  }
-  await rcloneServeService.stop().catch(() => {});
-  await uploaderService.stop();
-  if (weeklyCheckerInterval) clearInterval(weeklyCheckerInterval);
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
+process.on('unhandledRejection', async (reason, promise) => {
+  console.error('[Process] Unhandled promise rejection:', reason, promise);
+  await notifyProcessFailure('unhandledRejection', reason, {
+    promise: Object.prototype.toString.call(promise)
   });
 });
 
+process.on('uncaughtException', async (error) => {
+  console.error('[Process] Uncaught exception:', error);
+  await notifyProcessFailure('uncaughtException', error);
+});
+
+process.on('SIGTERM', async () => {
+  await shutdownGracefully('SIGTERM');
+  process.exit(0);
+});
+
 process.on('SIGINT', async () => {
-  console.log('SIGINT received, shutting down gracefully');
-  cleanupService.stop();
-  try {
-    const ctrl = getZeniusController();
-    if (ctrl?.persistAllBatchRunsToDb) {
-      await ctrl.persistAllBatchRunsToDb();
-    }
-  } catch (e) {
-    console.error('[Server] Failed to persist batch runs on shutdown:', e.message);
-  }
-  await rcloneServeService.stop().catch(() => {});
-  await uploaderService.stop();
-  if (weeklyCheckerInterval) clearInterval(weeklyCheckerInterval);
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
-  });
+  await shutdownGracefully('SIGINT');
+  process.exit(0);
 });
 
 startServer();
