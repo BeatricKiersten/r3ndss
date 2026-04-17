@@ -1772,10 +1772,23 @@ class DatabaseHandler {
   async refreshFileCompleteness(fileId, options = {}) {
     await this._ready();
 
-    await this._withTransaction(async (connection) => {
-      await this._ensureFileProvidersForFile(connection, fileId);
-      await this._updateFileCompleteness(connection, fileId, options);
-    });
+    const isDeadlockError = (error) => String(error?.code || '').trim() === 'ER_LOCK_DEADLOCK';
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        await this._withTransaction(async (connection) => {
+          await this._ensureFileProvidersForFile(connection, fileId);
+          await this._updateFileCompleteness(connection, fileId, options);
+        });
+        break;
+      } catch (error) {
+        if (!isDeadlockError(error) || attempt === 3) {
+          throw error;
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
+      }
+    }
 
     const [fileRows] = await this.pool.query('SELECT * FROM files WHERE id = ? LIMIT 1', [fileId]);
     const [providerRows] = await this.pool.query('SELECT * FROM file_providers WHERE file_id = ?', [fileId]);

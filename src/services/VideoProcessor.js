@@ -76,6 +76,17 @@ class VideoProcessor {
     let createdJobId = null;
     
     try {
+      const normalizedUrl = String(hlsUrl || '').trim().toLowerCase();
+      if (normalizedUrl.includes('youtube.com')) {
+        console.log('[VideoProcessor] Skipping unsupported YouTube URL', { hlsUrl });
+        return {
+          success: true,
+          skipped: true,
+          reason: 'YouTube URLs are skipped',
+          status: 'skipped'
+        };
+      }
+
       const resolvedOutputDir = this._resolveOutputDir(outputDir);
       await fs.ensureDir(resolvedOutputDir);
       
