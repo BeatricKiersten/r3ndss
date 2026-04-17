@@ -352,17 +352,6 @@ async function notifyProcessFailure(type, errorLike, extra = {}) {
       ? errorLike
       : new Error(typeof errorLike === 'string' ? errorLike : JSON.stringify(errorLike));
 
-    const enrichedExtra = {
-      ...extra,
-      code: error.code ?? extra.code,
-      signal: error.signal ?? extra.signal,
-      hlsUrl: error.hlsUrl ?? extra.hlsUrl,
-      outputPath: error.outputPath ?? extra.outputPath,
-      args: Array.isArray(error.args) ? error.args.join(' ') : (extra.args ?? null),
-      stderr: error.stderr ?? extra.stderr,
-      stdout: error.stdout ?? extra.stdout
-    };
-
     await webhookService.sendCrashAlert(db, {
       type,
       message: error.message,
@@ -372,7 +361,7 @@ async function notifyProcessFailure(type, errorLike, extra = {}) {
       uptime: process.uptime(),
       hostname: process.env.HOSTNAME || '',
       nodeEnv: process.env.NODE_ENV || '',
-      extra: enrichedExtra
+      extra
     });
   } catch (notifyError) {
     console.error('[Process] Failed to send crash webhook:', notifyError.message);

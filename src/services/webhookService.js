@@ -238,7 +238,7 @@ class WebhookService {
       lines.push('');
       lines.push('📎 *Context:*');
       for (const [key, value] of extraEntries.slice(0, 8)) {
-        lines.push(`• ${key}: ${String(value).slice(0, 1200)}`);
+        lines.push(`• ${key}: ${String(value).slice(0, 200)}`);
       }
     }
 

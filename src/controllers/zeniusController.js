@@ -182,28 +182,7 @@ class DownloadQueue {
         outputName,
         outputDir: config.uploadDir,
         headers: ffmpegHeaders,
-        skipIfExists: true,
-        retrySourceResolver: async ({ attempt, previousError }) => {
-          const refreshedTask = await resolveQueuedDownloadTask({
-            ...task,
-            videoUrl: null,
-            ffmpegHeaders: null
-          });
-
-          console.warn('[DownloadQueue] Refetched instance details for retry', {
-            taskId: task.id,
-            urlShortId,
-            attempt,
-            previousError: previousError?.message || null,
-            previousVideoUrl: videoUrl,
-            nextVideoUrl: refreshedTask.videoUrl
-          });
-
-          return {
-            hlsUrl: refreshedTask.videoUrl,
-            headers: refreshedTask.ffmpegHeaders
-          };
-        }
+        skipIfExists: true
       });
 
       fileId = result.fileId;
