@@ -15,6 +15,7 @@ const config = require('../config');
 const UPLOAD_DIR = config.uploadDir;
 const MAX_RETRIES = config.ffmpeg.maxRetries;
 const RETRY_DELAY = config.ffmpeg.retryDelay;
+const DEBUG_YTDLP_FULL = String(process.env.DEBUG_YTDLP_FULL || 'true').toLowerCase() === 'true';
 
 // Download error codes and their meanings
 const DOWNLOAD_ERRORS = {
@@ -255,6 +256,17 @@ class VideoProcessor {
       });
 
       console.log(`[yt-dlp] Starting job ${jobId} for ${hlsUrl}`);
+      if (DEBUG_YTDLP_FULL) {
+        console.log('[yt-dlp] Spawn context', {
+          jobId,
+          fileId,
+          hlsUrl,
+          outputPath,
+          headers,
+          cookies,
+          args
+        });
+      }
 
       const ytDlp = spawn('yt-dlp', args, {
         stdio: ['ignore', 'pipe', 'pipe']
@@ -262,12 +274,32 @@ class VideoProcessor {
 
       this.activeProcesses.set(jobId, ytDlp);
 
+      let stdoutBuffer = '';
       let stderrBuffer = '';
       let lastProgress = 0;
+
+      ytDlp.stdout.on('data', (data) => {
+        const output = data.toString();
+        stdoutBuffer += output;
+
+        if (DEBUG_YTDLP_FULL) {
+          const lines = output.split(/\r?\n/).filter(Boolean);
+          for (const line of lines) {
+            console.log(`[yt-dlp][stdout][job:${jobId}] ${line}`);
+          }
+        }
+      });
 
       ytDlp.stderr.on('data', (data) => {
         const output = data.toString();
         stderrBuffer += output;
+
+        if (DEBUG_YTDLP_FULL) {
+          const lines = output.split(/\r?\n/).filter(Boolean);
+          for (const line of lines) {
+            console.error(`[yt-dlp][stderr][job:${jobId}] ${line}`);
+          }
+        }
 
         const progressMatch = output.match(/\[download\]\s+(\d{1,3}(?:\.\d+)?)%/);
         if (progressMatch) {
@@ -285,24 +317,59 @@ class VideoProcessor {
         });
       });
 
-      ytDlp.on('close', async (code) => {
+      ytDlp.on('close', async (code, signal) => {
         this.activeProcesses.delete(jobId);
 
         if (code === 0) {
-          console.log(`[yt-dlp] Process completed successfully`);
+          console.log(`[yt-dlp] Process completed successfully`, { jobId, code, signal });
           resolve();
         } else {
+          console.error('[yt-dlp] Process failed', {
+            jobId,
+            fileId,
+            code,
+            signal,
+            hlsUrl,
+            outputPath,
+            args,
+            stdout: stdoutBuffer.trim() || null,
+            stderr: stderrBuffer.trim() || null
+          });
           if (stderrBuffer.trim()) {
             console.error(`[yt-dlp] stderr for failed job ${jobId}:\n${stderrBuffer.trim()}`);
           }
+          if (stdoutBuffer.trim()) {
+            console.error(`[yt-dlp] stdout for failed job ${jobId}:\n${stdoutBuffer.trim()}`);
+          }
           const errorMessage = this._parseDownloadError(stderrBuffer, code);
-          reject(new Error(errorMessage));
+          const error = new Error(errorMessage);
+          error.code = code;
+          error.signal = signal;
+          error.stdout = stdoutBuffer;
+          error.stderr = stderrBuffer;
+          error.args = args;
+          error.hlsUrl = hlsUrl;
+          error.outputPath = outputPath;
+          reject(error);
         }
       });
 
       ytDlp.on('error', (error) => {
         this.activeProcesses.delete(jobId);
-        reject(new Error(`Failed to start yt-dlp: ${error.message}`));
+        console.error('[yt-dlp] Failed to start process', {
+          jobId,
+          fileId,
+          hlsUrl,
+          outputPath,
+          args,
+          error
+        });
+        const spawnError = new Error(`Failed to start yt-dlp: ${error.message}`);
+        spawnError.cause = error;
+        spawnError.args = args;
+        spawnError.hlsUrl = hlsUrl;
+        spawnError.outputPath = outputPath;
+        reject(spawnError);
       });
 
       const timeout = setTimeout(() => {
