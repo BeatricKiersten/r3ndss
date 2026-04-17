@@ -2823,7 +2823,12 @@ class DatabaseHandler {
       params
     );
 
-    return this.getBatchSession(sessionId);
+    return {
+      id: sessionId,
+      ...updates,
+      updatedAt: now,
+      finishedAt: updates.status && ['completed', 'failed', 'cancelled'].includes(updates.status) ? now : undefined
+    };
   }
 
   async getBatchSession(sessionId) {
