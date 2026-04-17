@@ -49,6 +49,7 @@ class UploaderService extends EventEmitter {
     this.activeUploads = new Map(); // Track active upload streams
     this.processingJobIds = new Set();
     this.localCleanupTimers = new Map();
+    this.progressLogState = new Map();
     this._currentMaxConcurrentUploads = MAX_CONCURRENT_UPLOADS;
     this._currentMaxConcurrentProviders = MAX_CONCURRENT_PROVIDERS;
     this.providerLimit = pLimit(MAX_CONCURRENT_PROVIDERS);
@@ -73,6 +74,55 @@ class UploaderService extends EventEmitter {
       this.uploadLimits[provider] = pLimit(MAX_CONCURRENT_UPLOADS);
     }
     return this.uploadLimits[provider];
+  }
+
+  _formatLogValue(value) {
+    if (value === undefined || value === null || value === '') return null;
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      return JSON.stringify(trimmed.length > 240 ? `${trimmed.slice(0, 240)}...` : trimmed);
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+    try {
+      const serialized = JSON.stringify(value);
+      return serialized.length > 240 ? `${serialized.slice(0, 240)}...` : serialized;
+    } catch {
+      return JSON.stringify(String(value));
+    }
+  }
+
+  _logUpload(level, event, context = {}) {
+    const parts = [`[Uploader] event=${event}`];
+    for (const [key, value] of Object.entries(context)) {
+      const formatted = this._formatLogValue(value);
+      if (formatted !== null) {
+        parts.push(`${key}=${formatted}`);
+      }
+    }
+
+    const line = parts.join(' ');
+    if (level === 'error') {
+      console.error(line);
+      return;
+    }
+    if (level === 'warn') {
+      console.warn(line);
+      return;
+    }
+    console.log(line);
+  }
+
+  _buildUploadLogContext(job, overrides = {}) {
+    return {
+      jobId: job?.id,
+      fileId: job?.fileId,
+      provider: job?.metadata?.provider || job?.metadata?.targetProvider,
+      attempt: typeof job?.attempts === 'number' ? job.attempts + 1 : undefined,
+      ...overrides
+    };
   }
 
   async _refreshProviderRuntime() {
@@ -215,6 +265,7 @@ class UploaderService extends EventEmitter {
       clearTimeout(timer);
     }
     this.localCleanupTimers.clear();
+    this.progressLogState.clear();
 
     this.processingJobIds.clear();
     console.log('[Uploader] Service stopped');
@@ -224,7 +275,12 @@ class UploaderService extends EventEmitter {
    * Queue a file for upload to all providers
    */
   async queueFileUpload(fileId, filePath, folderId = 'root', selectedProviders = null) {
-    console.log(`[Uploader] Queueing file ${fileId} for upload`);
+    this._logUpload('info', 'upload.queue.requested', {
+      fileId,
+      folderId,
+      filePath,
+      selectedProviders: Array.isArray(selectedProviders) ? selectedProviders : null
+    });
 
     const file = await this.db.getFile(fileId);
     const effectiveFolderId = file.folderId || folderId || 'root';
@@ -299,6 +355,10 @@ class UploaderService extends EventEmitter {
     }
 
     if (providersToQueue.length === 0) {
+      this._logUpload('info', 'upload.queue.skipped', {
+        fileId,
+        skippedProviders
+      });
       return { fileId, jobs: [], enabledProviders: [], skippedProviders };
     }
 
@@ -323,6 +383,13 @@ class UploaderService extends EventEmitter {
     }
 
     this.emit('upload:queued', { fileId, jobs, enabledProviders: providersToQueue });
+    this._logUpload('info', 'upload.queue.created', {
+      fileId,
+      fileName: effectiveFileName,
+      providers: providersToQueue,
+      skippedProviders,
+      jobs
+    });
 
     this._processQueue();
 
@@ -340,6 +407,12 @@ class UploaderService extends EventEmitter {
     const pollIntervalMs = Math.max(250, Number(options.pollIntervalMs) || 1000);
     const abortSignal = options.abortSignal || null;
     const startedAt = Date.now();
+    this._logUpload('info', 'upload.wait.started', {
+      fileId,
+      timeoutMs,
+      pollIntervalMs,
+      selectedProviders: Array.isArray(selectedProviders) ? selectedProviders : null
+    });
 
     while (true) {
       if (abortSignal?.aborted) {
@@ -347,6 +420,11 @@ class UploaderService extends EventEmitter {
       }
 
       if (Date.now() - startedAt >= timeoutMs) {
+        this._logUpload('warn', 'upload.wait.timeout', {
+          fileId,
+          timeoutMs,
+          elapsedMs: Date.now() - startedAt
+        });
         throw new Error(`Timed out waiting for upload completion for file ${fileId}`);
       }
 
@@ -367,6 +445,11 @@ class UploaderService extends EventEmitter {
 
       if (pendingProviders.size === 0) {
         const status = await this.getUploadStatus(fileId);
+        this._logUpload('info', 'upload.wait.completed', {
+          fileId,
+          elapsedMs: Date.now() - startedAt,
+          providers: Object.keys(status.providers || {})
+        });
         return {
           fileId,
           completed: true,
@@ -1410,7 +1493,10 @@ class UploaderService extends EventEmitter {
 
       if (uploadJobs.length === 0 && transferJobs.length === 0) return;
 
-      console.log(`[Uploader] Processing ${uploadJobs.length} upload jobs and ${transferJobs.length} transfer jobs`);
+      this._logUpload('info', 'queue.processing', {
+        uploadJobs: uploadJobs.length,
+        transferJobs: transferJobs.length
+      });
 
       // Group jobs by file for parallel processing
       const jobsByFile = this._groupJobsByFile(uploadJobs);
@@ -1528,9 +1614,13 @@ class UploaderService extends EventEmitter {
         }
 
         const nextCandidateUrl = uniqueCandidates[index + 1];
-        console.warn(`[Uploader] Source 404 on ${candidateUrl}, retrying with ${nextCandidateUrl}`);
+          this._logUpload('warn', 'transfer.source.retry', {
+            sourceUrl: candidateUrl,
+            nextSourceUrl: nextCandidateUrl,
+            reason: error.message
+          });
+        }
       }
-    }
 
     throw lastError || new Error('Source download failed');
   }
@@ -1729,7 +1819,9 @@ class UploaderService extends EventEmitter {
         try {
           const runnable = await this._isJobStillRunnable(job.id);
           if (!runnable) {
-            console.log(`[Uploader] Skipping job ${job.id} for file ${fileId}: status changed before execution`);
+            this._logUpload('info', 'upload.job.skipped', this._buildUploadLogContext(job, {
+              reason: 'status-changed-before-execution'
+            }));
             return;
           }
           await this._uploadToProvider(job);
@@ -1814,10 +1906,15 @@ class UploaderService extends EventEmitter {
         }
       }
 
-      console.log(`[Uploader] Starting upload to ${provider}: ${providerUploadFileName}`);
-
       const currentAttempt = job.attempts + 1;
       const isLastAttempt = currentAttempt >= job.maxAttempts;
+      this._logUpload('info', 'upload.started', this._buildUploadLogContext(job, {
+        provider,
+        attempt: currentAttempt,
+        maxAttempts: job.maxAttempts,
+        sourcePath: filePath,
+        targetName: providerUploadFileName
+      }));
 
       // Update job status
       await this.db.updateJob(job.id, {
@@ -1877,14 +1974,28 @@ class UploaderService extends EventEmitter {
           url: result.url
         });
 
-        console.log(`[Uploader] Upload to ${provider} completed: ${result.url}`);
+        this.progressLogState.delete(`${job.id}-${provider}`);
+        this._logUpload('info', 'upload.completed', this._buildUploadLogContext(job, {
+          provider,
+          attempt: currentAttempt,
+          url: result.url,
+          remoteFileId: result.fileId || null,
+          embedUrl: result.embedUrl || null
+        }));
 
         if (job.metadata?.removeWhenUnused && filePath) {
           await this._cleanupFilePathWhenUnused(job.fileId, filePath);
         }
 
       } catch (error) {
-        console.error(`[Uploader] Upload to ${provider} failed (attempt ${currentAttempt}/${job.maxAttempts}):`, error.message);
+        this.progressLogState.delete(`${job.id}-${provider}`);
+        this._logUpload('error', 'upload.failed', this._buildUploadLogContext(job, {
+          provider,
+          attempt: currentAttempt,
+          maxAttempts: job.maxAttempts,
+          willRetry: !isLastAttempt,
+          error: error.message
+        }));
 
         this._stopJobHeartbeat(job.id);
 
@@ -1924,7 +2035,11 @@ class UploaderService extends EventEmitter {
             provider,
             error: error.message
           });
-          console.log(`[Uploader] ${provider} upload failed permanently after ${job.maxAttempts} attempts. Manual retry required.`);
+          this._logUpload('error', 'upload.failed.final', this._buildUploadLogContext(job, {
+            provider,
+            maxAttempts: job.maxAttempts,
+            error: error.message
+          }));
 
           if (job.metadata?.removeWhenUnused && filePath) {
             await this._cleanupFilePathWhenUnused(job.fileId, filePath);
@@ -1973,9 +2088,23 @@ class UploaderService extends EventEmitter {
 
       } catch (error) {
         lastError = error;
-        console.log(`[Uploader] Attempt ${attempt} failed for ${provider}: ${error.message}`);
+        this._logUpload('warn', 'upload.retry.failed', {
+          jobId,
+          fileId,
+          provider,
+          attempt,
+          maxAttempts: UPLOAD_RETRY_ATTEMPTS,
+          error: error.message
+        });
 
         if (attempt < UPLOAD_RETRY_ATTEMPTS) {
+          this._logUpload('info', 'upload.retry.scheduled', {
+            jobId,
+            fileId,
+            provider,
+            nextAttempt: attempt + 1,
+            retryDelayMs: UPLOAD_RETRY_DELAY * attempt
+          });
           await this._sleep(UPLOAD_RETRY_DELAY * attempt);
         }
       }
@@ -2010,6 +2139,20 @@ class UploaderService extends EventEmitter {
   async _handleProgress(fileId, jobId, provider, progress) {
     try {
       await this.db.updateJob(jobId, { progress });
+
+      const progressKey = `${jobId}-${provider}`;
+      const normalizedProgress = Math.max(0, Math.min(100, Math.round(Number(progress) || 0)));
+      const progressBucket = normalizedProgress >= 100 ? 100 : Math.floor(normalizedProgress / 10) * 10;
+      const lastLoggedBucket = this.progressLogState.get(progressKey);
+      if (progressBucket > 0 && progressBucket !== lastLoggedBucket) {
+        this.progressLogState.set(progressKey, progressBucket);
+        this._logUpload('info', 'upload.progress', {
+          jobId,
+          fileId,
+          provider,
+          progress: normalizedProgress
+        });
+      }
       
       this.emit('upload:progress', {
         fileId,
