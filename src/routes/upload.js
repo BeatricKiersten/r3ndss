@@ -3,6 +3,7 @@ const path = require('path');
 const multer = require('multer');
 const router = express.Router();
 const uploadController = require('../controllers/uploadController');
+const asyncHandler = require('../middleware/asyncHandler');
 const config = require('../config');
 
 const storage = multer.diskStorage({
@@ -31,8 +32,8 @@ const upload = multer({
   }
 });
 
-router.post('/hls', uploadController.processHls);
-router.post('/file', upload.single('file'), uploadController.uploadFile);
-router.post('/transfer', uploadController.transfer);
+router.post('/hls', asyncHandler(uploadController.processHls));
+router.post('/file', upload.single('file'), asyncHandler(uploadController.uploadFile));
+router.post('/transfer', asyncHandler(uploadController.transfer));
 
 module.exports = router;

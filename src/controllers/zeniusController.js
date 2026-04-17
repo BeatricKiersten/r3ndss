@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs-extra');
 const pLimit = require('p-limit');
 const { EventEmitter } = require('events');
+const AppError = require('../errors/AppError');
 
 const config = require('../config');
 const { db, videoProcessor, uploaderService, eventEmitter, cleanupService } = require('../services/runtime');
@@ -87,6 +88,7 @@ class DownloadQueue {
     this._active = new Map();
     this._queue = [];
     this._processing = false;
+    this._drainScheduled = false;
     this._nextTaskId = 0;
     this._drainResolvers = [];
   }
@@ -121,8 +123,12 @@ class DownloadQueue {
   }
 
   _scheduleNext() {
-    if (this._processing) return;
-    setImmediate(() => this._drain());
+    if (this._processing || this._drainScheduled) return;
+    this._drainScheduled = true;
+    setImmediate(() => {
+      this._drainScheduled = false;
+      this._drain();
+    });
   }
 
   async _drain() {
@@ -268,6 +274,7 @@ class DownloadQueue {
       max: this._maxConcurrent,
       queued: this._queue.length,
       isProcessing: this._processing,
+      isDrainScheduled: this._drainScheduled,
       activeTasks: this.activeTasks,
       queuedTasks: this.queuedTasks
     };
@@ -1738,11 +1745,17 @@ function getActiveDownloadCount() {
 }
 
 function canStartNewDownload() {
-  return downloadQueue.activeCount < downloadQueue.maxConcurrent;
+  return downloadQueue.activeCount < downloadQueue.maxConcurrent && downloadQueue.queuedCount === 0;
 }
 
 function getQueueStatus() {
-  return downloadQueue.getStatus();
+  const status = downloadQueue.getStatus();
+  return {
+    ...status,
+    availableSlots: Math.max(0, status.max - status.active),
+    canAcceptImmediately: status.active < status.max && status.queued === 0,
+    workerState: status.isProcessing ? 'draining' : (status.active > 0 ? 'running' : 'idle')
+  };
 }
 
 function getZeniusStatusSnapshot() {
@@ -2314,31 +2327,27 @@ async function resetAllZeniusFiles() {
 
 const zeniusController = {
   async getInstanceDetails(req, res) {
-    try {
-      const urlShortId = normalizeShortId(req.body?.urlShortId ?? req.body?.instanceId ?? req.query?.urlShortId);
-      const requestContext = buildRequestContext(req.body || {}, req);
-      const details = await getInstanceDetails({
-        urlShortId,
-        refererPath: req.body?.refererPath,
-        requestContext
-      });
+    const urlShortId = normalizeShortId(req.body?.urlShortId ?? req.body?.instanceId ?? req.query?.urlShortId);
+    const requestContext = buildRequestContext(req.body || {}, req);
+    const details = await getInstanceDetails({
+      urlShortId,
+      refererPath: req.body?.refererPath,
+      requestContext
+    });
 
-      res.json({
-        success: true,
-        data: {
-          urlShortId,
-          endpoint: details.endpoint,
-          referer: details.referer,
-          upstreamStatus: details.status,
-          ok: Boolean(details.body?.ok),
-          value: details.body?.value || null,
-          error: details.body?.error || null,
-          body: details.body
-        }
-      });
-    } catch (error) {
-      res.status(400).json({ success: false, error: error.message });
-    }
+    res.json({
+      success: true,
+      data: {
+        urlShortId,
+        endpoint: details.endpoint,
+        referer: details.referer,
+        upstreamStatus: details.status,
+        ok: Boolean(details.body?.ok),
+        value: details.body?.value || null,
+        error: details.body?.error || null,
+        body: details.body
+      }
+    });
   },
 
   async download(req, res) {
@@ -2537,63 +2546,64 @@ const zeniusController = {
     }
   },
 
-  getQueueStatus(req, res) {
+  async getQueueStatus(req, res) {
     res.json({
       success: true,
       data: getZeniusStatusSnapshot()
     });
   },
 
-  setMaxConcurrent(req, res) {
-    try {
-      const value = req.body?.maxConcurrent;
-      if (typeof value !== 'number' || value < 1 || value > 50) {
-        return res.status(400).json({ success: false, error: 'maxConcurrent must be a number between 1 and 50' });
-      }
-      const actual = downloadQueue.setMaxConcurrent(value);
-      console.log(`[Zenius] Max concurrent pipelines set to ${actual}`);
-      res.json({
-        success: true,
-        data: { maxConcurrent: actual, ...getZeniusStatusSnapshot() }
+  async setMaxConcurrent(req, res) {
+    const value = req.body?.maxConcurrent;
+    if (typeof value !== 'number' || value < 1 || value > 50) {
+      throw new AppError('maxConcurrent must be a number between 1 and 50', {
+        statusCode: 400,
+        code: 'INVALID_MAX_CONCURRENT'
       });
-    } catch (error) {
-      res.status(400).json({ success: false, error: error.message });
     }
+    const actual = downloadQueue.setMaxConcurrent(value);
+    console.log(`[Zenius] Max concurrent pipelines set to ${actual}`);
+    res.json({
+      success: true,
+      data: { maxConcurrent: actual, ...getZeniusStatusSnapshot() }
+    });
   },
 
-  getUploadConcurrency(req, res) {
+  async getUploadConcurrency(req, res) {
     res.json({
       success: true,
       data: uploaderService.getConcurrencyConfig()
     });
   },
 
-  setUploadConcurrency(req, res) {
-    try {
-      const result = {};
-      if (req.body?.maxConcurrentUploads !== undefined) {
-        const v = req.body.maxConcurrentUploads;
-        if (typeof v !== 'number' || v < 1 || v > 20) {
-          return res.status(400).json({ success: false, error: 'maxConcurrentUploads must be a number between 1 and 20' });
-        }
-        result.maxConcurrentUploads = uploaderService.setMaxConcurrentUploads(v);
-        console.log(`[Zenius] Max concurrent uploads set to ${result.maxConcurrentUploads}`);
+  async setUploadConcurrency(req, res) {
+    const result = {};
+    if (req.body?.maxConcurrentUploads !== undefined) {
+      const v = req.body.maxConcurrentUploads;
+      if (typeof v !== 'number' || v < 1 || v > 20) {
+        throw new AppError('maxConcurrentUploads must be a number between 1 and 20', {
+          statusCode: 400,
+          code: 'INVALID_MAX_CONCURRENT_UPLOADS'
+        });
       }
-      if (req.body?.maxConcurrentProviders !== undefined) {
-        const v = req.body.maxConcurrentProviders;
-        if (typeof v !== 'number' || v < 1 || v > 20) {
-          return res.status(400).json({ success: false, error: 'maxConcurrentProviders must be a number between 1 and 20' });
-        }
-        result.maxConcurrentProviders = uploaderService.setMaxConcurrentProviders(v);
-        console.log(`[Zenius] Max concurrent providers set to ${result.maxConcurrentProviders}`);
-      }
-      res.json({
-        success: true,
-        data: { ...result, ...uploaderService.getConcurrencyConfig() }
-      });
-    } catch (error) {
-      res.status(400).json({ success: false, error: error.message });
+      result.maxConcurrentUploads = uploaderService.setMaxConcurrentUploads(v);
+      console.log(`[Zenius] Max concurrent uploads set to ${result.maxConcurrentUploads}`);
     }
+    if (req.body?.maxConcurrentProviders !== undefined) {
+      const v = req.body.maxConcurrentProviders;
+      if (typeof v !== 'number' || v < 1 || v > 20) {
+        throw new AppError('maxConcurrentProviders must be a number between 1 and 20', {
+          statusCode: 400,
+          code: 'INVALID_MAX_CONCURRENT_PROVIDERS'
+        });
+      }
+      result.maxConcurrentProviders = uploaderService.setMaxConcurrentProviders(v);
+      console.log(`[Zenius] Max concurrent providers set to ${result.maxConcurrentProviders}`);
+    }
+    res.json({
+      success: true,
+      data: { ...result, ...uploaderService.getConcurrencyConfig() }
+    });
   },
 
   async getWebhookConfig(req, res) {
