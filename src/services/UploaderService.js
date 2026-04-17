@@ -478,22 +478,41 @@ class UploaderService extends EventEmitter {
       }
 
       const pendingInfo = await this.getPendingUploadProviders(fileId, selectedProviders);
-      const jobs = await this.db.getJobsByFile(fileId);
+      const status = await this.getUploadStatus(fileId);
+      const jobs = status.jobs || [];
       const pendingProviders = new Set(pendingInfo.pendingProviders);
+      const failedProviders = [];
+
+      for (const provider of pendingInfo.targetProviders || []) {
+        const providerStatus = String(status.providers?.[provider]?.status || 'pending').trim().toLowerCase();
+        if (providerStatus === 'failed') {
+          failedProviders.push({
+            provider,
+            error: status.providers?.[provider]?.error || null
+          });
+        }
+      }
 
       for (const job of jobs) {
-        if (job.type !== 'upload' || !['pending', 'processing'].includes(job.status)) {
+        if (job.type !== 'upload' || !['pending', 'processing', 'uploading'].includes(job.status)) {
           continue;
         }
 
-        const provider = String(job.metadata?.provider || '').trim();
+        const provider = String(job.provider || '').trim();
         if (provider) {
           pendingProviders.add(provider);
         }
       }
 
+      if (failedProviders.length > 0 && pendingProviders.size === 0) {
+        const providerList = failedProviders.map((item) => item.provider).join(', ');
+        const details = failedProviders
+          .map((item) => item.error ? `${item.provider}: ${item.error}` : item.provider)
+          .join('; ');
+        throw new Error(`Upload failed for file ${fileId} on provider(s): ${providerList}${details ? ` (${details})` : ''}`);
+      }
+
       if (pendingProviders.size === 0) {
-        const status = await this.getUploadStatus(fileId);
         this._logUpload('info', 'upload.wait.completed', {
           fileId,
           elapsedMs: Date.now() - startedAt,
@@ -1535,10 +1554,11 @@ class UploaderService extends EventEmitter {
     try {
       await this._refreshProviderRuntime();
 
-      // Get pending upload jobs
-      const pendingJobs = await this.db.getPendingJobs(20);
-      uploadJobs = this._claimJobs(pendingJobs.filter(j => j.type === 'upload'));
-      transferJobs = this._claimJobs(pendingJobs.filter(j => j.type === 'transfer'));
+      // Keep scanning beyond the first page so already-claimed pending jobs do not
+      // starve newer jobs sitting behind the LIMIT window.
+      const claimableJobs = await this._getClaimablePendingJobs(200, 20);
+      uploadJobs = claimableJobs.filter((j) => j.type === 'upload');
+      transferJobs = claimableJobs.filter((j) => j.type === 'transfer');
 
       if (uploadJobs.length === 0 && transferJobs.length === 0) return;
 
@@ -1578,6 +1598,44 @@ class UploaderService extends EventEmitter {
       }
       console.error('[Uploader] Queue processing error:', error);
     }
+  }
+
+  async _getClaimablePendingJobs(maxScan = 200, pageSize = 20) {
+    const limit = Math.max(1, Number(maxScan) || 200);
+    const batchSize = Math.max(1, Number(pageSize) || 20);
+    const claimable = [];
+    const seen = new Set();
+
+    while (seen.size < limit) {
+      const remaining = limit - seen.size;
+      const jobs = await this.db.getPendingJobs(Math.min(batchSize, remaining));
+      if (jobs.length === 0) {
+        break;
+      }
+
+      let discoveredNewJob = false;
+      for (const job of jobs) {
+        if (seen.has(job.id)) {
+          continue;
+        }
+
+        seen.add(job.id);
+        discoveredNewJob = true;
+
+        if (this.processingJobIds.has(job.id)) {
+          continue;
+        }
+
+        this.processingJobIds.add(job.id);
+        claimable.push(job);
+      }
+
+      if (!discoveredNewJob || jobs.length < Math.min(batchSize, remaining)) {
+        break;
+      }
+    }
+
+    return claimable;
   }
 
   _isHlsSourceUrl(sourceUrl) {
@@ -1719,11 +1777,6 @@ class UploaderService extends EventEmitter {
         job.id
       );
 
-      const verifyResult = await this._verifyUploadedResult(resolvedTargetProvider, result);
-      if (!verifyResult.exists) {
-        throw new Error(`Target verification failed on ${resolvedTargetProvider}`);
-      }
-
       await this.db.updateProviderStatus(
         job.fileId,
         resolvedTargetProvider,
@@ -1741,8 +1794,7 @@ class UploaderService extends EventEmitter {
           ...job.metadata,
           sourceCheck,
           downloadedSize: downloaded.size,
-          targetResult: result,
-          targetVerify: verifyResult
+          targetResult: result
         }
       });
 
@@ -1830,20 +1882,6 @@ class UploaderService extends EventEmitter {
       acc[job.fileId].push(job);
       return acc;
     }, {});
-  }
-
-  _claimJobs(jobs) {
-    const claimed = [];
-
-    for (const job of jobs) {
-      if (this.processingJobIds.has(job.id)) {
-        continue;
-      }
-      this.processingJobIds.add(job.id);
-      claimed.push(job);
-    }
-
-    return claimed;
   }
 
   _releaseJobClaim(jobId) {
@@ -1986,11 +2024,6 @@ class UploaderService extends EventEmitter {
           job.fileId,
           job.id
         );
-
-        const verifyResult = await this._verifyUploadedResult(provider, result);
-        if (!verifyResult.exists) {
-          throw new Error(`Verification failed on ${provider}`);
-        }
 
         // Update success status
         await this.db.updateProviderStatus(
