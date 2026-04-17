@@ -53,7 +53,8 @@ class VideoProcessor {
       decryptionKey = null,
       headers = {},
       cookies = null,
-      skipIfExists = true
+      skipIfExists = true,
+      retrySourceResolver = null
     } = options;
 
     const processId = uuidv4();
@@ -121,9 +122,50 @@ class VideoProcessor {
 
       let lastError = null;
       let succeeded = false;
+      let currentHlsUrl = hlsUrl;
+      let currentHeaders = headers;
+      let currentCookies = cookies;
 
       for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
+          if (attempt > 1 && typeof retrySourceResolver === 'function') {
+            try {
+              const refreshedSource = await retrySourceResolver({
+                attempt,
+                previousError: lastError,
+                hlsUrl: currentHlsUrl,
+                headers: currentHeaders,
+                cookies: currentCookies,
+                fileId: file.id,
+                jobId: job.id
+              });
+
+              if (refreshedSource?.hlsUrl) {
+                currentHlsUrl = String(refreshedSource.hlsUrl).trim();
+              }
+              if (refreshedSource?.headers && typeof refreshedSource.headers === 'object') {
+                currentHeaders = refreshedSource.headers;
+              }
+              if (Object.prototype.hasOwnProperty.call(refreshedSource || {}, 'cookies')) {
+                currentCookies = refreshedSource.cookies;
+              }
+
+              console.log('[VideoProcessor] Refreshed download source before retry', {
+                fileId: file.id,
+                jobId: job.id,
+                attempt,
+                hlsUrl: currentHlsUrl
+              });
+            } catch (refreshError) {
+              console.warn('[VideoProcessor] Failed to refresh download source before retry', {
+                fileId: file.id,
+                jobId: job.id,
+                attempt,
+                error: refreshError.message
+              });
+            }
+          }
+
           console.log(`[VideoProcessor] Attempt ${attempt}/${MAX_RETRIES} for ${outputFileName}`);
 
           await this.db.updateJob(job.id, {
@@ -136,9 +178,9 @@ class VideoProcessor {
 
           this._startJobHeartbeat(job.id);
 
-          await this._executeYtDlp(job.id, file.id, hlsUrl, outputPath, {
-            headers,
-            cookies
+          await this._executeYtDlp(job.id, file.id, currentHlsUrl, outputPath, {
+            headers: currentHeaders,
+            cookies: currentCookies
           });
 
           this._stopJobHeartbeat(job.id);
@@ -176,7 +218,17 @@ class VideoProcessor {
         } catch (error) {
           this._stopJobHeartbeat(job.id);
           lastError = error;
-          console.error(`[VideoProcessor] Attempt ${attempt}/${MAX_RETRIES} failed for ${outputFileName}:`, error.message);
+          console.error(`[VideoProcessor] Attempt ${attempt}/${MAX_RETRIES} failed for ${outputFileName}:`, {
+            message: error.message,
+            code: error.code,
+            signal: error.signal,
+            hlsUrl: error.hlsUrl || currentHlsUrl,
+            outputPath: error.outputPath || outputPath,
+            args: error.args || null,
+            stderr: error.stderr || null,
+            stdout: error.stdout || null,
+            stack: error.stack
+          });
 
           if (attempt < MAX_RETRIES) {
             await this.db.updateJob(job.id, {
@@ -329,7 +381,15 @@ class VideoProcessor {
           if (stdoutBuffer.trim()) {
             console.error(`[yt-dlp] stdout for failed job ${jobId}:\n${stdoutBuffer.trim()}`);
           }
-          const errorMessage = this._parseDownloadError(stderrBuffer, code);
+          const errorMessage = this._buildYtDlpFailureMessage({
+            code,
+            signal,
+            stderr: stderrBuffer,
+            stdout: stdoutBuffer,
+            args,
+            hlsUrl,
+            outputPath
+          });
           const error = new Error(errorMessage);
           error.code = code;
           error.signal = signal;
@@ -492,6 +552,22 @@ class VideoProcessor {
     }
 
     return `yt-dlp process exited with code ${code}`;
+  }
+
+  _buildYtDlpFailureMessage({ code, signal, stderr, stdout, args, hlsUrl, outputPath }) {
+    const parsedError = this._parseDownloadError(stderr || '', code);
+    const sections = [
+      parsedError,
+      `exit_code=${code}`,
+      `signal=${signal || 'none'}`,
+      `hls_url=${hlsUrl || '-'}`,
+      `output_path=${outputPath || '-'}`,
+      `args=${Array.isArray(args) ? args.join(' ') : '-'}`,
+      `stderr=${String(stderr || '').trim() || '-'}`,
+      `stdout=${String(stdout || '').trim() || '-'}`
+    ];
+
+    return sections.join('\n');
   }
 
   _startJobHeartbeat(jobId) {
