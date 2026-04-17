@@ -133,12 +133,12 @@ const fileController = {
     try {
       const fileId = String(req.params.id || '').trim();
       if (fileId) {
-        const result = await db.refreshFileCompleteness(fileId);
+        const result = await db.refreshFileCompleteness(fileId, { updateFileStatus: true });
         res.json({ success: true, data: result });
         return;
       }
 
-      const result = await db.refreshAllFilesCompleteness();
+      const result = await db.refreshAllFilesCompleteness({ updateFileStatus: true });
       res.json({ success: true, data: result });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });

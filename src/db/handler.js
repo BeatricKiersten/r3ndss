@@ -340,11 +340,12 @@ class DatabaseHandler {
     const syncStatus = Math.round((completedCount / targetCount) * 100);
 
     let fileStatus = 'uploading';
-    if (completedCount === targetCount) {
+    if (completedCount > 0) {
+      // Treat the file as completed as soon as at least one provider has a finished upload.
       fileStatus = 'completed';
     } else if (failedCount > 0 && completedCount + failedCount === targetCount) {
       fileStatus = failedCount === targetCount ? 'failed' : 'partial';
-    } else if (completedCount > 0 || failedCount > 0) {
+    } else if (failedCount > 0) {
       fileStatus = 'partial';
     }
 

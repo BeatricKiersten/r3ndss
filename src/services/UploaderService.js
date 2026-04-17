@@ -35,6 +35,7 @@ const SOURCE_DOWNLOAD_TIMEOUT = downloadTimeout;
 const UPLOAD_DIR = config.uploadDir;
 const DEBUG_UPLOAD_CLEANUP = String(process.env.DEBUG_UPLOAD_CLEANUP || 'false').toLowerCase() === 'true';
 const LOCAL_FILE_CLEANUP_DELAY_MS = Number(process.env.UPLOAD_LOCAL_CLEANUP_DELAY_MS || 300000);
+const DEBUG_UPLOAD_FULL = String(process.env.DEBUG_UPLOAD_FULL || 'true').toLowerCase() === 'true';
 const ALLOWED_TRANSFER_SOURCE_HOSTS = new Set([
   'catbox.moe',
   'files.catbox.moe',
@@ -81,17 +82,65 @@ class UploaderService extends EventEmitter {
     if (typeof value === 'string') {
       const trimmed = value.trim();
       if (!trimmed) return null;
-      return JSON.stringify(trimmed.length > 240 ? `${trimmed.slice(0, 240)}...` : trimmed);
+      return JSON.stringify(DEBUG_UPLOAD_FULL ? trimmed : (trimmed.length > 240 ? `${trimmed.slice(0, 240)}...` : trimmed));
     }
     if (typeof value === 'number' || typeof value === 'boolean') {
       return String(value);
     }
     try {
       const serialized = JSON.stringify(value);
-      return serialized.length > 240 ? `${serialized.slice(0, 240)}...` : serialized;
+      return DEBUG_UPLOAD_FULL ? serialized : (serialized.length > 240 ? `${serialized.slice(0, 240)}...` : serialized);
     } catch {
       return JSON.stringify(String(value));
     }
+  }
+
+  _serializeError(error) {
+    if (!error) return null;
+
+    const serialized = {
+      name: error.name,
+      message: error.message,
+      code: error.code,
+      stack: error.stack,
+      cause: error.cause
+    };
+
+    if (error.config) {
+      serialized.request = {
+        method: error.config.method,
+        baseURL: error.config.baseURL,
+        url: error.config.url,
+        headers: error.config.headers,
+        params: error.config.params,
+        timeout: error.config.timeout,
+        data: error.config.responseType === 'stream' ? '[stream]' : error.config.data
+      };
+    }
+
+    if (error.response) {
+      serialized.response = {
+        status: error.response.status,
+        statusText: error.response.statusText,
+        headers: error.response.headers,
+        data: error.config?.responseType === 'stream' ? '[stream]' : error.response.data
+      };
+    }
+
+    if (error.stdout !== undefined || error.stderr !== undefined) {
+      serialized.process = {
+        stdout: error.stdout,
+        stderr: error.stderr
+      };
+    }
+
+    for (const key of Object.keys(error)) {
+      if (serialized[key] === undefined) {
+        serialized[key] = error[key];
+      }
+    }
+
+    return serialized;
   }
 
   _logUpload(level, event, context = {}) {
@@ -1994,7 +2043,8 @@ class UploaderService extends EventEmitter {
           attempt: currentAttempt,
           maxAttempts: job.maxAttempts,
           willRetry: !isLastAttempt,
-          error: error.message
+          error: error.message,
+          errorDetails: this._serializeError(error)
         }));
 
         this._stopJobHeartbeat(job.id);
@@ -2094,7 +2144,8 @@ class UploaderService extends EventEmitter {
           provider,
           attempt,
           maxAttempts: UPLOAD_RETRY_ATTEMPTS,
-          error: error.message
+          error: error.message,
+          errorDetails: this._serializeError(error)
         });
 
         if (attempt < UPLOAD_RETRY_ATTEMPTS) {

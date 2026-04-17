@@ -7,12 +7,13 @@ function formatBody(body) {
   if (body === undefined || body === null) return body;
 
   if (typeof body === 'string') {
-    return body.length > 1200 ? `${body.slice(0, 1200)}...<truncated>` : body;
+    return isVerboseHttpLog ? body : (body.length > 1200 ? `${body.slice(0, 1200)}...<truncated>` : body);
   }
 
   return util.inspect(body, {
     depth: 4,
-    maxArrayLength: 20,
+    maxArrayLength: isVerboseHttpLog ? null : 20,
+    maxStringLength: isVerboseHttpLog ? null : 1200,
     breakLength: 120
   });
 }
@@ -58,12 +59,17 @@ function createHttpLogger(name) {
       if (!isDevelopment) throw error;
 
       console.error(`[HTTP:${name}] Error`, error.message);
+      if (isVerboseHttpLog && error.stack) {
+        console.error(`[HTTP:${name}] Error Stack`, error.stack);
+      }
       if (isVerboseHttpLog && error.config) {
         console.error(`[HTTP:${name}] Failed Request`, {
           method: String(error.config.method || 'GET').toUpperCase(),
           url: error.config.baseURL ? `${error.config.baseURL}${error.config.url || ''}` : (error.config.url || ''),
           params: error.config.params,
-          headers: error.config.headers
+          headers: error.config.headers,
+          timeout: error.config.timeout,
+          data: error.config.responseType === 'stream' ? '[stream]' : formatBody(error.config.data)
         });
       }
 
