@@ -1543,7 +1543,7 @@ class DatabaseHandler {
         [reason, stringifyJson(history), now, fileId, provider]
       );
 
-      await this._updateFileCompleteness(connection, fileId);
+      await this._updateFileCompleteness(connection, fileId, { updateFileStatus: true });
 
       return { fileId, provider, cleared: true, reason };
     });
@@ -1613,7 +1613,7 @@ class DatabaseHandler {
         ]
       );
 
-      await this._updateFileCompleteness(connection, fileId);
+      await this._updateFileCompleteness(connection, fileId, { updateFileStatus: true });
     });
 
     return this.getFile(fileId);
