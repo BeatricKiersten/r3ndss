@@ -214,8 +214,9 @@ class DatabaseHandler {
     };
   }
 
-  _buildProviders(providerRows = []) {
+  _buildProviders(providerRows = [], providerCatalog = []) {
     const providers = {};
+    const providerNames = new Map((providerCatalog || []).map((item) => [item.id, item.name]));
 
     for (const row of providerRows) {
       const publicId = row.public_file_id || null;
@@ -267,6 +268,7 @@ class DatabaseHandler {
       }
 
       providers[row.provider] = {
+        providerName: providerNames.get(row.provider) || row.provider,
         status: row.status || 'pending',
         url: normalizedUrl,
         fileId: row.remote_file_id || null,
@@ -281,7 +283,7 @@ class DatabaseHandler {
     return providers;
   }
 
-  _mapFileRow(row, providerRows = []) {
+  _mapFileRow(row, providerRows = [], providerCatalog = []) {
     const extraProgress = parseJson(row.progress_extra, {}) || {};
 
     return {
@@ -299,7 +301,7 @@ class DatabaseHandler {
         upload: toInt(row.progress_upload),
         ...extraProgress
       },
-      providers: this._buildProviders(providerRows),
+      providers: this._buildProviders(providerRows, providerCatalog),
       syncStatus: toInt(row.sync_status),
       canDelete: toBool(row.can_delete),
       createdAt: row.created_at,
@@ -913,6 +915,7 @@ class DatabaseHandler {
     const fileIds = fileRows.map((row) => row.id);
     const providerMap = await this._getProviderRowsByFileIds(fileIds);
     const providerIds = STATIC_PROVIDER_IDS;
+    const providerCatalog = await this.getProviderCatalog({ includeDisabled: true });
 
     return fileRows.map((row) => {
       const rows = Array.isArray(providerMap.get(row.id)) ? [...providerMap.get(row.id)] : [];
@@ -934,7 +937,7 @@ class DatabaseHandler {
         }
       }
 
-      return this._mapFileRow(row, rows);
+      return this._mapFileRow(row, rows, providerCatalog);
     });
   }
 

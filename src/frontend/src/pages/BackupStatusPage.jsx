@@ -17,13 +17,17 @@ export default function BackupStatusPage() {
 
   const recentEvents = events?.slice(0, 8) || [];
 
+  function getProviderLabel(provider, status = null) {
+    return status?.providerName || providers?.[provider]?.name || getProviderConfig(provider)?.name || provider;
+  }
+
   function handleCopyToProvider(fileId, targetProvider) {
     copyToProvider.mutate({ fileId, targetProvider });
     setShowCopyDropdown(null);
   }
 
   function handleClearProviderLink(fileId, provider) {
-    const confirmed = window.confirm(`Hapus link tersimpan untuk provider ${getProviderConfig(provider)?.label || provider}? Status provider akan direset agar bisa di-upload ulang.`);
+    const confirmed = window.confirm(`Hapus link tersimpan untuk provider ${getProviderLabel(provider)}? Status provider akan direset agar bisa di-upload ulang.`);
     if (!confirmed) return;
     clearFileProviderLink.mutate({ fileId, provider, reason: 'Provider link removed by user from backup status' });
   }
@@ -169,7 +173,7 @@ export default function BackupStatusPage() {
                                 s.status === 'failed' ? 'bg-red-400/10 text-red-400' :
                                 'bg-[#222] text-[#666]'
                               }`}
-                              title={`${getProviderConfig(p)?.name || p}: ${s.status}`}
+                              title={`${getProviderLabel(p, s)}: ${s.status}`}
                             >
                               {getProviderConfig(p)?.short?.[0] || p[0].toUpperCase()}
                             </span>
@@ -199,7 +203,7 @@ export default function BackupStatusPage() {
                             <div key={p} className="space-y-1.5">
                               <div className="flex items-center justify-between">
                                 <div className="flex items-center gap-2">
-                                  <span className="text-xs font-medium text-[#ccc]">{cfg?.label || p}</span>
+                                  <span className="text-xs font-medium text-[#ccc]">{getProviderLabel(p, s)}</span>
                                   <span className={`text-[10px] px-1.5 py-0.5 rounded ${
                                     s.status === 'completed' ? 'bg-green-400/10 text-green-400' :
                                     s.status === 'uploading' || s.status === 'processing' ? 'bg-yellow-400/10 text-yellow-400' :
@@ -227,7 +231,7 @@ export default function BackupStatusPage() {
                                       onClick={e => { e.stopPropagation(); handleClearProviderLink(file.id, p); }}
                                       disabled={isClearing}
                                       className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-red-500/10 text-red-300 hover:bg-red-500/20 hover:text-red-200 disabled:opacity-50 transition-colors"
-                                      title={`Remove stored link for ${cfg?.label || p}`}
+                                      title={`Remove stored link for ${getProviderLabel(p, s)}`}
                                     >
                                       {isClearing
                                         ? <Loader2 className="w-2.5 h-2.5 animate-spin" />
@@ -241,7 +245,7 @@ export default function BackupStatusPage() {
                                       onClick={e => { e.stopPropagation(); handleCopyToProvider(file.id, p); }}
                                       disabled={isCopying}
                                       className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-[#222] text-[#aaa] hover:bg-[#333] hover:text-white disabled:opacity-50 transition-colors"
-                                      title={`Copy to ${cfg?.label || p}`}
+                                      title={`Copy to ${getProviderLabel(p, s)}`}
                                     >
                                       {isCopying
                                         ? <Loader2 className="w-2.5 h-2.5 animate-spin" />

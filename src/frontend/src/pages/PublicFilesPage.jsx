@@ -63,7 +63,7 @@ function getSources(file) {
     .filter(([, info]) => info?.status === 'completed')
     .map(([provider, info]) => ({
       id: provider,
-      name: getProviderConfig(provider).name,
+      name: info?.providerName || getProviderConfig(provider).name,
       url: getPlayableUrl(provider, info),
       status: info.status
     }))

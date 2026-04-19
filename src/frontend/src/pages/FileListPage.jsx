@@ -355,6 +355,7 @@ function FileDetailModal({ file, onClose }) {
             <div className="space-y-2">
               {Object.entries(file.providers).map(([key, ps]) => {
                 const config = getProviderConfig(key);
+                const providerLabel = ps?.providerName || config.name;
                 const ProviderIcon = providerIconMap[config?.icon] || Cloud;
                 const remoteStatus = providerStatus?.[key];
                 const availableSources = Object.entries(file.providers || {})
@@ -370,7 +371,7 @@ function FileDetailModal({ file, onClose }) {
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
                         <ProviderIcon className={`w-4 h-4 ${config.color}`} />
-                        <span className={`text-sm font-medium ${config.color}`}>{config.name}</span>
+                          <span className={`text-sm font-medium ${config.color}`}>{providerLabel}</span>
                       </div>
                       {ps.status === 'completed' ? (
                         <span className="flex items-center gap-1 text-xs text-green-400">
@@ -456,11 +457,11 @@ function FileDetailModal({ file, onClose }) {
                             {availableSources.map(([sourceKey, sourcePs]) => {
                               const config = getProviderConfig(sourceKey);
                               return (
-                                <option key={sourceKey} value={sourceKey}>
-                                  {config.name} ({sourceKey})
-                                </option>
-                              );
-                            })}
+                            <option key={sourceKey} value={sourceKey}>
+                              {(sourcePs?.providerName || config.name)} ({sourceKey})
+                            </option>
+                          );
+                        })}
                           </select>
                         </div>
                         <div className="flex gap-2">
@@ -474,7 +475,7 @@ function FileDetailModal({ file, onClose }) {
                             ) : (
                               <Upload className="w-3 h-3" />
                             )}
-                            Re-upload from {selectedSource ? getProviderConfig(selectedSource)?.name : 'source'}
+                            Re-upload from {selectedSource ? (file.providers?.[selectedSource]?.providerName || getProviderConfig(selectedSource)?.name) : 'source'}
                           </button>
                           <button
                             onClick={cancelSourceSelect}
@@ -513,7 +514,7 @@ function FileDetailModal({ file, onClose }) {
                 return (
                   <div key={`rclone-info-${providerKey}`} className="mt-3 p-3 rounded-lg bg-red-400/10 border border-red-400/20">
                     <div className="flex items-center justify-between mb-2">
-                      <p className="text-xs uppercase tracking-wide text-red-300">{getProviderConfig(providerKey).name}</p>
+                      <p className="text-xs uppercase tracking-wide text-red-300">{rcloneStatus?.providerName || getProviderConfig(providerKey).name}</p>
                       <span className="text-[11px] text-red-200">{rcloneStatus.status || 'pending'}</span>
                     </div>
                     <div className="space-y-1 text-xs text-[#ddd]">

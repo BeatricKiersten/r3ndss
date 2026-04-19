@@ -319,14 +319,6 @@ export const usePlayerStore = create((set, get) => ({
     if (!file) return [];
     
     const sources = [];
-    
-    // Provider sources
-    const providerNames = {
-      rclone: 'Rclone Storage',
-      voesx: 'Voe.sx',
-      catbox: 'Catbox',
-      seekstreaming: 'SeekStreaming'
-    };
 
     Object.entries(file.providers || {}).forEach(([provider, info]) => {
       let providerUrl = info.url;
@@ -345,7 +337,7 @@ export const usePlayerStore = create((set, get) => ({
       if (info.status === 'completed' && providerUrl) {
         sources.push({
           id: provider,
-          name: providerNames[provider] || provider,
+          name: info.providerName || provider,
           url: getPlayableUrl(provider, providerUrl),
           originalUrl: info.url || providerUrl,
           mimeType: inferMimeTypeFromUrl(providerUrl),

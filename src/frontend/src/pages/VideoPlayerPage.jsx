@@ -295,7 +295,7 @@ export default function VideoPlayerPage() {
                     <div className="w-7 h-7 rounded bg-[#222] flex items-center justify-center">
                       <Icon className="w-3.5 h-3.5 text-[#888]" />
                     </div>
-                    <span className="flex-1">{config.name}</span>
+                    <span className="flex-1">{source.name || config.name}</span>
                     {isActive && <span className="w-1.5 h-1.5 rounded-full bg-green-400" />}
                   </button>
                 );
@@ -321,7 +321,7 @@ export default function VideoPlayerPage() {
                 {status.status === 'failed' && <AlertCircle className="w-3 h-3" />}
                 {status.status === 'uploading' && <Clock className="w-3 h-3 animate-pulse" />}
                 {status.status === 'pending' && <Clock className="w-3 h-3" />}
-                <span>{getProviderConfig(provider)?.name || provider}</span>
+                <span>{status?.providerName || getProviderConfig(provider)?.name || provider}</span>
                 {status.status === 'failed' && (
                   reuploadProvider === provider ? (
                     <div className="ml-1 flex items-center gap-1">
@@ -338,7 +338,7 @@ export default function VideoPlayerPage() {
                             .filter(([key]) => key !== provider);
                           return availableSources.map(([key, sourcePs]) => (
                             <option key={key} value={key}>
-                              {getProviderConfig(key)?.name}
+                              {sourcePs?.providerName || getProviderConfig(key)?.name}
                             </option>
                           ));
                         })()}
