@@ -1468,6 +1468,49 @@ async function resolveFolderIdWithCache(folderCache, folderInput) {
   return pendingFolderId;
 }
 
+async function getFolderFileCacheEntry(folderFileCache, folderId) {
+  const cacheKey = String(folderId || 'root');
+  if (folderFileCache.has(cacheKey)) {
+    return folderFileCache.get(cacheKey);
+  }
+
+  const pendingEntry = db.listFiles(cacheKey).then((files) => {
+    const filesByName = new Map();
+    for (const file of files || []) {
+      const nameKey = String(file?.name || '').trim();
+      if (!nameKey || filesByName.has(nameKey)) {
+        continue;
+      }
+      filesByName.set(nameKey, file);
+    }
+
+    return {
+      folderId: cacheKey,
+      filesByName
+    };
+  }).catch((error) => {
+    folderFileCache.delete(cacheKey);
+    throw error;
+  });
+
+  folderFileCache.set(cacheKey, pendingEntry);
+  return pendingEntry;
+}
+
+async function getCachedFileByNameInFolder(folderFileCache, folderId, fileName) {
+  const entry = await getFolderFileCacheEntry(folderFileCache, folderId);
+  return entry.filesByName.get(String(fileName || '').trim()) || null;
+}
+
+async function rememberCachedFileInFolder(folderFileCache, folderId, file) {
+  if (!file || !file.name) {
+    return;
+  }
+
+  const entry = await getFolderFileCacheEntry(folderFileCache, folderId);
+  entry.filesByName.set(String(file.name).trim(), file);
+}
+
 async function queueBatchDownloadItem({
   chain,
   container,
@@ -1479,6 +1522,7 @@ async function queueBatchDownloadItem({
   runId,
   session,
   folderCache,
+  folderFileCache,
   cancelled = () => false
 }) {
   if (cancelled()) {
@@ -1520,7 +1564,7 @@ async function queueBatchDownloadItem({
   const finalFolderInput = joinFolderPaths(baseFolderInput, chainPath) || 'root';
   const folderId = await resolveFolderIdWithCache(folderCache, finalFolderInput);
   const outputFileName = `${outputName}.mp4`;
-  const existingFile = await db.findFileByNameInFolder(folderId, outputFileName);
+  const existingFile = await getCachedFileByNameInFolder(folderFileCache, folderId, outputFileName);
 
   if (existingFile) {
     const existingStatus = String(existingFile.status || '').trim().toLowerCase();
@@ -1584,6 +1628,17 @@ async function queueBatchDownloadItem({
     refererPath,
     fallbackRefererPath: container.containerPathUrl || '',
     requestedFilename: outputName
+  });
+
+  await rememberCachedFileInFolder(folderFileCache, folderId, {
+    id: `queued-${urlShortId}`,
+    folderId,
+    name: outputFileName,
+    status: 'processing',
+    localPath: null,
+    size: 0,
+    duration: 0,
+    providers: {}
   });
 
   if (runId && backgroundBatchRuns.has(runId)) {
@@ -1865,6 +1920,7 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
   let totalInstances = 0;
   const session = chain.sessionId ? batchChainSessions.get(chain.sessionId) || null : null;
   const folderCache = new Map();
+  const folderFileCache = new Map();
 
   for (const container of chain.containerDetails || []) {
     if (cancelled()) {
@@ -1888,6 +1944,7 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
         runId,
         session,
         folderCache,
+        folderFileCache,
         cancelled
       }));
     }

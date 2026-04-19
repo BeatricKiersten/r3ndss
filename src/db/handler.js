@@ -476,6 +476,7 @@ class DatabaseHandler {
         created_at VARCHAR(40) NOT NULL,
         updated_at VARCHAR(40) NOT NULL,
         INDEX idx_files_folder (folder_id),
+        INDEX idx_files_folder_name (folder_id, name(255)),
         INDEX idx_files_status (status),
         INDEX idx_files_created (created_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
@@ -725,6 +726,16 @@ class DatabaseHandler {
           return columns.length === 0;
         },
         sql: "ALTER TABLE file_providers ADD COLUMN public_file_id TEXT NULL AFTER remote_file_id"
+      },
+      {
+        name: 'add_files_folder_name_index',
+        check: async () => {
+          const [indexes] = await this.pool.query(
+            "SHOW INDEX FROM files WHERE Key_name = 'idx_files_folder_name'"
+          );
+          return indexes.length === 0;
+        },
+        sql: 'ALTER TABLE files ADD INDEX idx_files_folder_name (folder_id, name(255))'
       }
     ];
 
