@@ -5,7 +5,7 @@ const ZENIUS_BASE_URL = 'https://www.zenius.net';
 const RETRYABLE_UPSTREAM_STATUS = new Set([202, 429, 500, 502, 503, 504]);
 
 const INSTANCE_DETAIL_RETRY_DELAY_MS = 2000;
-const INSTANCE_DETAIL_MAX_RETRIES = 3;
+const INSTANCE_DETAIL_MAX_RETRIES = 5;
 
 function clampPositiveInt(value, fallback) {
   const parsed = Number.parseInt(value, 10);
@@ -185,7 +185,7 @@ async function getJson(endpoint, {
   throw new Error(`Request failed after retries for ${endpoint}`);
 }
 
-async function getInstanceDetails({ urlShortId, refererPath, fallbackRefererPath, requestContext, timeoutMs = 30000, maxRetries = 3 }) {
+async function getInstanceDetails({ urlShortId, refererPath, fallbackRefererPath, requestContext, timeoutMs = 30000, maxRetries = INSTANCE_DETAIL_MAX_RETRIES }) {
   const endpoint = `${ZENIUS_BASE_URL}/api/instance-details?url-short-id=${encodeURIComponent(urlShortId)}`;
   const referer = resolveReferer(
     urlShortId,
@@ -195,7 +195,7 @@ async function getInstanceDetails({ urlShortId, refererPath, fallbackRefererPath
   const headers = buildUpstreamHeaders({ requestContext, referer });
 
   const effectiveTimeout = clampPositiveInt(timeoutMs, 30000);
-  const maxAttempts = clampPositiveInt(maxRetries, 3);
+  const maxAttempts = clampPositiveInt(maxRetries, INSTANCE_DETAIL_MAX_RETRIES);
 
   for (let attempt = 0; attempt <= maxAttempts; attempt += 1) {
     const response = await axios.get(endpoint, {

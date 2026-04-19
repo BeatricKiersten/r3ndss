@@ -175,6 +175,13 @@ class DownloadQueue {
 
   async _runDownload(task) {
     const resolvedTask = await resolveQueuedDownloadTask(task);
+    if (!resolvedTask) {
+      return {
+        skipped: true,
+        reason: 'instance-details-unavailable'
+      };
+    }
+
     const { urlShortId, videoUrl, folderId, outputName, ffmpegHeaders, selectedProviders } = resolvedTask;
 
     console.log(`[DownloadQueue] Starting #${task.id} ${urlShortId} (active: ${this._active.size}/${this._maxConcurrent}, queued: ${this._queue.length})`);
@@ -1793,12 +1800,18 @@ async function resolveQueuedDownloadTask(task) {
 
   const urlShortId = normalizeShortId(task.urlShortId);
   const requestContext = task.requestContext || buildRequestContext({});
-  const details = await getInstanceDetails({
-    urlShortId,
-    refererPath: task.refererPath,
-    fallbackRefererPath: task.fallbackRefererPath,
-    requestContext
-  });
+  let details;
+  try {
+    details = await getInstanceDetails({
+      urlShortId,
+      refererPath: task.refererPath,
+      fallbackRefererPath: task.fallbackRefererPath,
+      requestContext
+    });
+  } catch (error) {
+    console.warn(`[Zenius] Skipping ${urlShortId}: failed to fetch instance details after retries (${error.message})`);
+    return null;
+  }
 
   const isSuccessStatus = details.status >= 200 && details.status < 300;
   if (!isSuccessStatus || !details.body?.ok || !details.body?.value) {
@@ -2151,33 +2164,37 @@ async function processBackgroundBatchRun(run, payload) {
         message: run.status === 'completed' ? 'Batch completed' : 'Batch failed'
       });
 
-      webhookService.sendBatchComplete(db, {
-        id: run.id,
-        rootCgId: run.rootCgId,
-        rootCgName: run.rootCgName,
-        targetCgSelector: run.targetCgSelector,
-        parentContainerName: run.parentContainerName,
-        sessionId: run.sessionId,
-        status: run.status,
-        totalContainers: run.totalContainers,
-        processedContainers: run.processedContainers,
-        queuedCount: run.queuedCount,
-        skippedCount: run.skippedCount,
-        scannedContainerCount: run.scannedContainerCount,
-        discoveredVideoCount: run.discoveredVideoCount,
-        downloadCompletedCount: run.downloadCompletedCount || 0,
-        downloadFailedCount: run.downloadFailedCount || 0,
-        itemErrors: run.itemErrors || [],
-        itemErrorsOverflow: Number(run._itemErrorsOverflow || 0),
-        queuedItemsTracked: Array.isArray(run.queued) ? run.queued.length : 0,
-        skippedItemsTracked: Array.isArray(run.skipped) ? run.skipped.length : 0,
-        queuedItemsOverflow: Number(run.queuedOverflow || 0),
-        skippedItemsOverflow: Number(run.skippedOverflow || 0),
-        error: run.error,
-        chainErrors: run.chainErrors,
-        startedAt: run.startedAt,
-        finishedAt: run.finishedAt
-      }).catch((e) => console.error('[Webhook] Notification error:', e.message));
+      if (run.status === 'completed' && Number(run.downloadFailedCount || 0) === 0) {
+        webhookService.sendBatchComplete(db, {
+          id: run.id,
+          rootCgId: run.rootCgId,
+          rootCgName: run.rootCgName,
+          targetCgSelector: run.targetCgSelector,
+          parentContainerName: run.parentContainerName,
+          sessionId: run.sessionId,
+          status: run.status,
+          totalContainers: run.totalContainers,
+          processedContainers: run.processedContainers,
+          queuedCount: run.queuedCount,
+          skippedCount: run.skippedCount,
+          scannedContainerCount: run.scannedContainerCount,
+          discoveredVideoCount: run.discoveredVideoCount,
+          downloadCompletedCount: run.downloadCompletedCount || 0,
+          downloadFailedCount: run.downloadFailedCount || 0,
+          itemErrors: run.itemErrors || [],
+          itemErrorsOverflow: Number(run._itemErrorsOverflow || 0),
+          queuedItemsTracked: Array.isArray(run.queued) ? run.queued.length : 0,
+          skippedItemsTracked: Array.isArray(run.skipped) ? run.skipped.length : 0,
+          queuedItemsOverflow: Number(run.queuedOverflow || 0),
+          skippedItemsOverflow: Number(run.skippedOverflow || 0),
+          error: run.error,
+          chainErrors: run.chainErrors,
+          startedAt: run.startedAt,
+          finishedAt: run.finishedAt
+        }).catch((e) => console.error('[Webhook] Notification error:', e.message));
+      } else {
+        console.log(`[Webhook] Skipped batch notification for run ${run.id}: status=${run.status}, failed=${run.downloadFailedCount || 0}`);
+      }
     }
     if (!hasActiveBackgroundBatchRuns()) {
       stopBackgroundBatchKeepalive();
@@ -2391,7 +2408,9 @@ const zeniusController = {
         refererPath: req.body?.refererPath,
         requestedFilename: req.body?.filename
       }).then((result) => {
-        if (result.cancelled) {
+        if (result.skipped) {
+          console.warn(`[Zenius] Download ${urlShortId} skipped: ${result.reason || 'unknown'}`);
+        } else if (result.cancelled) {
           console.log(`[Zenius] Download ${urlShortId} was cancelled`);
         } else {
           console.log(`[Zenius] Download ${urlShortId} completed successfully`);
