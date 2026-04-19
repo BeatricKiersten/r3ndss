@@ -3,6 +3,38 @@ const axios = require('axios');
 class WebhookService {
   constructor() {
     this._config = null;
+    this._crashBuffer = [];
+    this._crashFlushTimer = null;
+    this._crashFlushInFlight = null;
+    this._crashFlushIntervalMs = 10 * 60 * 1000;
+    this._maxBufferedCrashEvents = 200;
+  }
+
+  startCrashBuffering() {
+    if (this._crashFlushTimer) {
+      return;
+    }
+
+    this._crashFlushTimer = setInterval(() => {
+      this.flushCrashAlerts().catch((error) => {
+        console.error('[Webhook] Scheduled crash alert flush failed:', error.message);
+      });
+    }, this._crashFlushIntervalMs);
+
+    if (typeof this._crashFlushTimer.unref === 'function') {
+      this._crashFlushTimer.unref();
+    }
+
+    console.log(`[Webhook] Crash alert buffering enabled (${Math.floor(this._crashFlushIntervalMs / 60000)} minute window)`);
+  }
+
+  stopCrashBuffering() {
+    if (!this._crashFlushTimer) {
+      return;
+    }
+
+    clearInterval(this._crashFlushTimer);
+    this._crashFlushTimer = null;
   }
 
   async _ensureConfig(db) {
@@ -89,15 +121,70 @@ class WebhookService {
   }
 
   async sendCrashAlert(db, payload = {}) {
+    this.startCrashBuffering();
+    this._crashBufferEvent(payload);
+
+    return {
+      success: true,
+      buffered: true,
+      queued: this._crashBuffer.length
+    };
+  }
+
+  async flushCrashAlerts(db, { force = false } = {}) {
     await this._ensureConfig(db);
 
     if (!this._config.enabled || !this._config.url || !this._config.to) {
-      console.log('[Webhook] Crash alert skipped: disabled or incomplete config');
+      if (force && this._crashBuffer.length > 0) {
+        console.log('[Webhook] Crash alert flush skipped: disabled or incomplete config');
+      }
       return null;
     }
 
-    const text = this._formatCrashMessage(payload);
+    if (this._crashFlushInFlight) {
+      return this._crashFlushInFlight;
+    }
 
+    if (this._crashBuffer.length === 0) {
+      return { success: true, flushed: 0 };
+    }
+
+    const events = this._crashBuffer.splice(0, this._crashBuffer.length);
+    const text = this._formatCrashSummaryMessage(events);
+
+    this._crashFlushInFlight = this._postMessage(text, 'Crash alert summary', async () => {
+      return { success: true, flushed: events.length };
+    }, async (error) => {
+      this._crashBuffer.unshift(...events.slice(0, this._maxBufferedCrashEvents));
+      return { success: false, error: error.message, flushed: 0 };
+    });
+
+    try {
+      return await this._crashFlushInFlight;
+    } finally {
+      this._crashFlushInFlight = null;
+    }
+  }
+
+  _crashBufferEvent(payload) {
+    if (this._crashBuffer.length >= this._maxBufferedCrashEvents) {
+      this._crashBuffer.shift();
+    }
+
+    this._crashBuffer.push({
+      type: String(payload?.type || 'process-error'),
+      message: String(payload?.message || 'Unknown error'),
+      stack: String(payload?.stack || ''),
+      timestamp: payload?.timestamp || new Date().toISOString(),
+      pid: payload?.pid,
+      uptime: payload?.uptime,
+      hostname: payload?.hostname,
+      nodeEnv: payload?.nodeEnv,
+      extra: payload?.extra && typeof payload.extra === 'object' ? payload.extra : {}
+    });
+  }
+
+  async _postMessage(text, logLabel, onSuccess, onError) {
     try {
       const response = await axios.post(this._config.url, {
         to: this._config.to,
@@ -107,11 +194,11 @@ class WebhookService {
         validateStatus: () => true
       });
 
-      console.log(`[Webhook] Crash alert sent: ${response.status}`);
-      return { success: true, status: response.status };
+      console.log(`[Webhook] ${logLabel} sent: ${response.status}`);
+      return onSuccess ? await onSuccess(response) : { success: true, status: response.status };
     } catch (error) {
-      console.error('[Webhook] Crash alert failed:', error.message);
-      return { success: false, error: error.message };
+      console.error(`[Webhook] ${logLabel} failed:`, error.message);
+      return onError ? await onError(error) : { success: false, error: error.message };
     }
   }
 
@@ -246,6 +333,54 @@ class WebhookService {
       lines.push('');
       lines.push('```');
       lines.push(String(stack).slice(0, 1500));
+      lines.push('```');
+    }
+
+    return lines.join('\n');
+  }
+
+  _formatCrashSummaryMessage(events) {
+    const lines = [];
+    const firstEvent = events[0] || {};
+    const lastEvent = events[events.length - 1] || {};
+    const countsByType = new Map();
+
+    for (const event of events) {
+      const type = String(event?.type || 'process-error');
+      countsByType.set(type, Number(countsByType.get(type) || 0) + 1);
+    }
+
+    lines.push('🚨 *SERVER ERROR SUMMARY*');
+    lines.push('');
+    lines.push(`• Total Errors: ${events.length}`);
+    if (firstEvent.timestamp) lines.push(`• First Error: ${new Date(firstEvent.timestamp).toLocaleString('id-ID')}`);
+    if (lastEvent.timestamp) lines.push(`• Last Error: ${new Date(lastEvent.timestamp).toLocaleString('id-ID')}`);
+    if (lastEvent.hostname) lines.push(`• Host: ${lastEvent.hostname}`);
+    if (lastEvent.nodeEnv) lines.push(`• Env: ${lastEvent.nodeEnv}`);
+    lines.push('');
+    lines.push('📊 *By Type:*');
+
+    for (const [type, count] of countsByType.entries()) {
+      lines.push(`• ${type}: ${count}`);
+    }
+
+    lines.push('');
+    lines.push('📋 *Recent Errors:*');
+
+    events.slice(0, 10).forEach((event, index) => {
+      const when = event?.timestamp ? new Date(event.timestamp).toLocaleTimeString('id-ID') : '-';
+      lines.push(`${index + 1}. [${String(event?.type || 'process-error').slice(0, 40)}] ${when} | ${String(event?.message || 'Unknown error').slice(0, 180)}`);
+    });
+
+    if (events.length > 10) {
+      lines.push(`... +${events.length - 10} error lainnya`);
+    }
+
+    const stackSource = events.find((event) => event?.stack);
+    if (stackSource?.stack) {
+      lines.push('');
+      lines.push('```');
+      lines.push(String(stackSource.stack).slice(0, 1500));
       lines.push('```');
     }
 

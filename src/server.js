@@ -325,6 +325,7 @@ let weeklyCheckerInterval = null;
 
 async function shutdownGracefully(signal) {
   console.log(`${signal} received, shutting down gracefully`);
+  webhookService.stopCrashBuffering();
   cleanupService.stop();
   try {
     const ctrl = getZeniusController();
@@ -333,6 +334,11 @@ async function shutdownGracefully(signal) {
     }
   } catch (e) {
     console.error('[Server] Failed to persist batch runs on shutdown:', e.message);
+  }
+  try {
+    await webhookService.flushCrashAlerts(db, { force: true });
+  } catch (error) {
+    console.error('[Server] Failed to flush crash alerts on shutdown:', error.message);
   }
   await rcloneServeService.stop().catch(() => {});
   await uploaderService.stop().catch(() => {});
@@ -423,6 +429,8 @@ async function runSystemCheck() {
     console.error('[WeeklyChecker] Check failed:', error);
   }
 }
+
+webhookService.startCrashBuffering();
 
 process.on('unhandledRejection', async (reason, promise) => {
   console.error('[Process] Unhandled promise rejection:', reason, promise);
