@@ -1575,15 +1575,12 @@ async function advanceBatchChainSessionDiscovery(session, options, deadlineAt) {
     return;
   }
 
-  const branchConcurrency = clampPositiveInt(BATCH_CG_FETCH_CONCURRENCY, 4);
-  const branchLimit = pLimit(branchConcurrency);
-  const branchResults = await Promise.all(
-    initialBranchCgIds.map((branchCgId) => branchLimit(async () => {
-      const branchSession = createBatchChainBranchSession(session, branchCgId);
-      await advanceBatchChainBranchDiscovery(branchSession, options, deadlineAt);
-      return branchSession;
-    }))
-  );
+  const branchResults = [];
+  for (const branchCgId of initialBranchCgIds) {
+    const branchSession = createBatchChainBranchSession(session, branchCgId);
+    await advanceBatchChainBranchDiscovery(branchSession, options, deadlineAt);
+    branchResults.push(branchSession);
+  }
 
   for (const branchSession of branchResults) {
     mergeBatchChainBranchSession(session, branchSession);
