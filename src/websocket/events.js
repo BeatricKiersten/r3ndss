@@ -3,6 +3,31 @@ const { getInstance: getDb } = require('../db/handler');
 let clients = new Set();
 let eventEmitter = null;
 let sendDashboardData = null;
+let dashboardSnapshotPromise = null;
+let dashboardRefreshTimer = null;
+
+function getDashboardSnapshot() {
+  if (!dashboardSnapshotPromise) {
+    const db = getDb();
+    dashboardSnapshotPromise = db.getDashboardData()
+      .finally(() => {
+        dashboardSnapshotPromise = null;
+      });
+  }
+
+  return dashboardSnapshotPromise;
+}
+
+function scheduleDashboardBroadcast(delayMs = 500) {
+  if (dashboardRefreshTimer) {
+    return;
+  }
+
+  dashboardRefreshTimer = setTimeout(() => {
+    dashboardRefreshTimer = null;
+    clients.forEach(client => sendDashboardData(client));
+  }, delayMs);
+}
 
 const websocketHandler = {
   initialize(emitter) {
@@ -65,15 +90,13 @@ const websocketHandler = {
         this.broadcast(event, data);
 
         if (['job:completed', 'job:failed', 'upload:completed', 'upload:failed', 'download:completed', 'download:failed'].includes(event)) {
-          setTimeout(() => {
-            clients.forEach(client => sendDashboardData(client));
-          }, 500);
+          scheduleDashboardBroadcast(500);
         }
       });
     });
 
     setInterval(() => {
-      clients.forEach(client => sendDashboardData(client));
+      scheduleDashboardBroadcast(0);
     }, 15000);
   },
 
@@ -84,14 +107,13 @@ const websocketHandler = {
 
 async function getDashboardData(ws) {
   try {
-    const db = getDb();
-    const data = await db.getDashboardData();
+    const data = await getDashboardSnapshot();
     if (ws.readyState === 1) {
       ws.send(JSON.stringify({ event: 'dashboard:update', data }));
     }
   } catch (error) {
     const code = String(error?.code || '').trim().toUpperCase();
-    if (['ECONNRESET', 'PROTOCOL_CONNECTION_LOST', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE'].includes(code)) {
+    if (['ECONNRESET', 'PROTOCOL_CONNECTION_LOST', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'ER_CON_COUNT_ERROR'].includes(code)) {
       console.warn(`Failed to send dashboard data: ${code || error.message}`);
       return;
     }

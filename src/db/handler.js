@@ -1022,11 +1022,13 @@ class DatabaseHandler {
     return grouped;
   }
 
-  async _hydrateFiles(fileRows) {
+  async _hydrateFiles(fileRows, options = {}) {
     const fileIds = fileRows.map((row) => row.id);
     const providerMap = await this._getProviderRowsByFileIds(fileIds);
     const providerIds = STATIC_PROVIDER_IDS;
-    const providerCatalog = await this.getProviderCatalog({ includeDisabled: true });
+    const providerCatalog = Array.isArray(options.providerCatalog)
+      ? options.providerCatalog
+      : await this.getProviderCatalog({ includeDisabled: true });
 
     return fileRows.map((row) => {
       const rows = Array.isArray(providerMap.get(row.id)) ? [...providerMap.get(row.id)] : [];
@@ -2440,10 +2442,14 @@ class DatabaseHandler {
   async getDashboardData() {
     await this._ready();
 
+    const system = await this._getSystemPayload();
+
     const [recentFileRows] = await this.pool.query(
       'SELECT * FROM files ORDER BY created_at DESC LIMIT 20'
     );
-    const recentFiles = await this._hydrateFiles(recentFileRows);
+    const recentFiles = await this._hydrateFiles(recentFileRows, {
+      providerCatalog: system.providerCatalog
+    });
 
     const [activeJobRows] = await this.pool.query(
       `SELECT id, type, file_id, progress, attempts
@@ -2477,7 +2483,7 @@ class DatabaseHandler {
         processing: toInt(processingRows[0]?.count)
       },
       batchSessions: await this._getBatchSessionSummary(),
-      system: await this._getSystemPayload()
+      system
     };
   }
 
