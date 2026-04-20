@@ -7,12 +7,29 @@ let dashboardSnapshotPromise = null;
 let dashboardRefreshTimer = null;
 let dashboardSnapshotCache = null;
 let dashboardSnapshotCacheAt = 0;
+let dashboardBackoffUntil = 0;
 const DASHBOARD_CACHE_TTL_MS = Math.max(1000, Number(process.env.DASHBOARD_CACHE_TTL_MS || 5000));
+const DASHBOARD_PRESSURE_BACKOFF_MS = Math.max(5000, Number(process.env.DASHBOARD_PRESSURE_BACKOFF_MS || 15000));
+
+function isDashboardDbPressureError(error) {
+  const code = String(error?.code || '').trim().toUpperCase();
+  return ['ECONNRESET', 'PROTOCOL_CONNECTION_LOST', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'ER_CON_COUNT_ERROR'].includes(code);
+}
 
 function getDashboardSnapshot() {
   const now = Date.now();
   if (dashboardSnapshotCache && (now - dashboardSnapshotCacheAt) < DASHBOARD_CACHE_TTL_MS) {
     return Promise.resolve(dashboardSnapshotCache);
+  }
+
+  if (dashboardSnapshotCache && dashboardBackoffUntil > now) {
+    return Promise.resolve(dashboardSnapshotCache);
+  }
+
+  if (!dashboardSnapshotCache && dashboardBackoffUntil > now) {
+    return Promise.reject(Object.assign(new Error('Dashboard refresh backing off due to DB pressure'), {
+      code: 'ER_CON_COUNT_ERROR'
+    }));
   }
 
   if (!dashboardSnapshotPromise) {
@@ -21,7 +38,14 @@ function getDashboardSnapshot() {
       .then((snapshot) => {
         dashboardSnapshotCache = snapshot;
         dashboardSnapshotCacheAt = Date.now();
+        dashboardBackoffUntil = 0;
         return snapshot;
+      })
+      .catch((error) => {
+        if (isDashboardDbPressureError(error)) {
+          dashboardBackoffUntil = Date.now() + DASHBOARD_PRESSURE_BACKOFF_MS;
+        }
+        throw error;
       })
       .finally(() => {
         dashboardSnapshotPromise = null;
@@ -33,6 +57,11 @@ function getDashboardSnapshot() {
 
 function scheduleDashboardBroadcast(delayMs = 500) {
   if (clients.size === 0) {
+    return;
+  }
+
+  if (dashboardBackoffUntil > Date.now() && dashboardSnapshotCache) {
+    clients.forEach(client => sendDashboardData(client));
     return;
   }
 
@@ -133,7 +162,7 @@ async function getDashboardData(ws) {
     }
   } catch (error) {
     const code = String(error?.code || '').trim().toUpperCase();
-    if (['ECONNRESET', 'PROTOCOL_CONNECTION_LOST', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'ER_CON_COUNT_ERROR'].includes(code)) {
+    if (isDashboardDbPressureError(error)) {
       console.warn(`Failed to send dashboard data: ${code || error.message}`);
       return;
     }

@@ -128,14 +128,8 @@ class CleanupService {
   async _resetStuckUploadingJobs() {
     // Jobs stuck in 'uploading' for > threshold shouldn't exist – they're
     // a transient in-memory state. If they survived a restart they're orphaned.
-    const thresholdMs = STUCK_JOB_THRESHOLD_MINUTES * 60 * 1000;
-    const cutoffIso = new Date(Date.now() - thresholdMs).toISOString();
-
     let resetCount = 0;
     try {
-      const pendingJobs = await this.db.getPendingJobs(200);
-      // getPendingJobs returns pending+processing; we need all uploading too
-      // Fall back to direct query if method exists, otherwise skip gracefully
       if (typeof this.db.getStaleUploadingJobs === 'function') {
         const staleJobs = await this.db.getStaleUploadingJobs(STUCK_JOB_THRESHOLD_MINUTES);
         for (const job of staleJobs) {

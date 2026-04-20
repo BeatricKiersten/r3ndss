@@ -36,6 +36,7 @@ const UPLOAD_DIR = config.uploadDir;
 const DEBUG_UPLOAD_CLEANUP = String(process.env.DEBUG_UPLOAD_CLEANUP || 'false').toLowerCase() === 'true';
 const LOCAL_FILE_CLEANUP_DELAY_MS = Number(process.env.UPLOAD_LOCAL_CLEANUP_DELAY_MS || 300000);
 const DEBUG_UPLOAD_FULL = String(process.env.DEBUG_UPLOAD_FULL || 'true').toLowerCase() === 'true';
+const PROVIDER_RUNTIME_CACHE_TTL_MS = Math.max(1000, Number(process.env.UPLOADER_PROVIDER_RUNTIME_CACHE_TTL_MS || 10000));
 const ALLOWED_TRANSFER_SOURCE_HOSTS = new Set([
   'catbox.moe',
   'files.catbox.moe',
@@ -58,6 +59,8 @@ class UploaderService extends EventEmitter {
     this.providerLimit = pLimit(MAX_CONCURRENT_PROVIDERS);
     this._emptyQueueStreak = 0;
     this._nextIdlePollAt = 0;
+    this._providerRuntimeCache = null;
+    this._providerRuntimeCacheAt = 0;
 
     this.staticAdapters = {
       voesx: new VoeSxAdapter(),
@@ -203,6 +206,11 @@ class UploaderService extends EventEmitter {
   }
 
   async _refreshProviderRuntime() {
+    const now = Date.now();
+    if (this._providerRuntimeCache && (now - this._providerRuntimeCacheAt) < PROVIDER_RUNTIME_CACHE_TTL_MS) {
+      return this._providerRuntimeCache;
+    }
+
     const providerCatalog = await this.db.getProviderCatalog();
     const nextAdapters = { ...this.staticAdapters };
     const nextCatalogById = new Map(providerCatalog.map((item) => [item.id, item]));
@@ -222,6 +230,8 @@ class UploaderService extends EventEmitter {
     this.adapters = nextAdapters;
     this.providerCatalogById = nextCatalogById;
     this.providerNames = Object.keys(nextAdapters);
+    this._providerRuntimeCache = providerCatalog;
+    this._providerRuntimeCacheAt = now;
 
     for (const provider of this.providerNames) {
       this._ensureUploadLimit(provider);
@@ -255,6 +265,11 @@ class UploaderService extends EventEmitter {
 
   async _resolveProviderId(provider, options = {}) {
     const allowDisabled = options.allowDisabled !== false;
+
+    if (options.refreshRuntime === true) {
+      this._providerRuntimeCache = null;
+      this._providerRuntimeCacheAt = 0;
+    }
 
     await this._refreshProviderRuntime();
 
