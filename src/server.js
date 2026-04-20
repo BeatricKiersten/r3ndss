@@ -265,8 +265,11 @@ async function startServer() {
       setTimeout(() => reject(new Error(`Database initialization timeout (${dbTimeoutSeconds}s)`)), DB_TIMEOUT_MS)
     );
     
+    let isDatabaseReady = false;
     try {
       await Promise.race([dbCheckPromise, timeoutPromise]);
+      await db._ready();
+      isDatabaseReady = true;
       console.log('[Server] Database initialized successfully');
     } catch (dbError) {
       console.error('[Server] Database initialization failed:', dbError.message);
@@ -274,46 +277,57 @@ async function startServer() {
       // Don't crash - let the server run but APIs will fail
     }
 
-    await uploaderService.start();
-    await rcloneServeService.ensureDefaultGoogleDriveRemote().catch((error) => {
-      console.warn('[Server] Failed to start rclone serve:', error.message);
-    });
+    if (isDatabaseReady) {
+      await uploaderService.start();
+      await rcloneServeService.ensureDefaultGoogleDriveRemote().catch((error) => {
+        console.warn('[Server] Failed to start rclone serve:', error.message);
+      });
+    } else {
+      console.warn('[Server] Skipping uploader and rclone startup because database is not ready');
+    }
 
     // Start periodic cleanup scheduler (orphaned files, stuck jobs, expired sessions)
-    cleanupService.start();
+    if (isDatabaseReady) {
+      cleanupService.start();
+    }
 
-    try {
-      const staleResult = await db.resetStaleProcessingJobs(10);
-      if (staleResult.resetCount > 0) {
-        console.log(`[Server] Recovered ${staleResult.resetCount} stale jobs from previous session`);
-      }
-    } catch (_) {}
-
-    try {
-      const expiredSessions = await db.cleanupExpiredBatchSessions();
-      if (expiredSessions.deletedCount > 0) {
-        console.log(`[Server] Cleaned up ${expiredSessions.deletedCount} expired batch sessions`);
-      }
-    } catch (_) {}
-
-    try {
-      const activeSessions = await db.getActiveBatchSessions();
-      for (const session of activeSessions) {
-        if (session.status === 'running') {
-          console.log(`[Server] Marking orphaned batch session ${session.id} as failed (server restarted)`);
-          await db.updateBatchSession(session.id, {
-            status: 'failed',
-            error: 'Server restarted during batch processing',
-            hasMore: false
-          });
+    if (isDatabaseReady) {
+      try {
+        const staleResult = await db.resetStaleProcessingJobs(10);
+        if (staleResult.resetCount > 0) {
+          console.log(`[Server] Recovered ${staleResult.resetCount} stale jobs from previous session`);
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
 
-    startWeeklyChecker();
-    
-    console.log('[Server] All services initialized successfully');
-    console.log('[Server] Server is fully ready');
+      try {
+        const expiredSessions = await db.cleanupExpiredBatchSessions();
+        if (expiredSessions.deletedCount > 0) {
+          console.log(`[Server] Cleaned up ${expiredSessions.deletedCount} expired batch sessions`);
+        }
+      } catch (_) {}
+
+      try {
+        const activeSessions = await db.getActiveBatchSessions();
+        for (const session of activeSessions) {
+          if (session.status === 'running') {
+            console.log(`[Server] Marking orphaned batch session ${session.id} as failed (server restarted)`);
+            await db.updateBatchSession(session.id, {
+              status: 'failed',
+              error: 'Server restarted during batch processing',
+              hasMore: false
+            });
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (isDatabaseReady) {
+      startWeeklyChecker();
+      console.log('[Server] All services initialized successfully');
+      console.log('[Server] Server is fully ready');
+    } else {
+      console.warn('[Server] Server started in degraded mode without database-backed services');
+    }
   } catch (error) {
     console.error('Failed to start server:', error);
     // Keep server running even if some services fail

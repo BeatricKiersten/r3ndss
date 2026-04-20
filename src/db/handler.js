@@ -24,6 +24,8 @@ const {
 
 const STATIC_PROVIDER_IDS = getStaticProviderIds();
 const FILE_PROVIDER_EMPTY_HISTORY = stringifyJson([]);
+const DB_INIT_RETRY_ATTEMPTS = Math.max(1, Number(process.env.DB_INIT_RETRY_ATTEMPTS || 3));
+const DB_INIT_RETRY_DELAY_MS = Math.max(250, Number(process.env.DB_INIT_RETRY_DELAY_MS || 1500));
 
 function toInt(value, fallback = 0) {
   const parsed = Number(value);
@@ -115,6 +117,36 @@ class DatabaseHandler {
     this.pool = null;
     this.startupMaintenancePromise = null;
     this.initPromise = this._initialize();
+  }
+
+  _isRetryableInitError(error) {
+    const code = String(error?.code || '').trim().toUpperCase();
+    return [
+      'PROTOCOL_CONNECTION_LOST',
+      'ECONNRESET',
+      'ECONNREFUSED',
+      'ETIMEDOUT',
+      'EPIPE',
+      'ER_CON_COUNT_ERROR'
+    ].includes(code);
+  }
+
+  async _disposePool() {
+    if (!this.pool) {
+      return;
+    }
+
+    const pool = this.pool;
+    this.pool = null;
+    try {
+      await pool.end();
+    } catch (_) {
+      // Ignore pool shutdown errors during reconnect.
+    }
+  }
+
+  async _sleep(ms) {
+    await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   _now() {
@@ -398,29 +430,49 @@ class DatabaseHandler {
   }
 
   async _initialize() {
-    if (this.mysql.autoCreateDatabase) {
-      await this._createDatabaseIfNeeded();
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= DB_INIT_RETRY_ATTEMPTS; attempt += 1) {
+      try {
+        if (this.mysql.autoCreateDatabase) {
+          await this._createDatabaseIfNeeded();
+        }
+
+        const poolConfig = {
+          host: this.mysql.host,
+          port: this.mysql.port,
+          user: this.mysql.user,
+          password: this.mysql.password,
+          database: this.mysql.database,
+          waitForConnections: true,
+          connectionLimit: this.mysql.connectionLimit,
+          queueLimit: 0,
+          charset: 'utf8mb4'
+        };
+
+        if (this.mysql.ssl) {
+          poolConfig.ssl = { rejectUnauthorized: this.mysql.sslRejectUnauthorized };
+        }
+
+        this.pool = mysql.createPool(poolConfig);
+        await this._createSchema();
+        await this._seedDefaults();
+        return;
+      } catch (error) {
+        lastError = error;
+        await this._disposePool();
+
+        if (!this._isRetryableInitError(error) || attempt >= DB_INIT_RETRY_ATTEMPTS) {
+          throw error;
+        }
+
+        const delayMs = DB_INIT_RETRY_DELAY_MS * attempt;
+        console.warn(`[DB] Initialization attempt ${attempt} failed (${error.code || error.message}); retrying in ${delayMs}ms`);
+        await this._sleep(delayMs);
+      }
     }
 
-    const poolConfig = {
-      host: this.mysql.host,
-      port: this.mysql.port,
-      user: this.mysql.user,
-      password: this.mysql.password,
-      database: this.mysql.database,
-      waitForConnections: true,
-      connectionLimit: this.mysql.connectionLimit,
-      queueLimit: 0,
-      charset: 'utf8mb4'
-    };
-
-    if (this.mysql.ssl) {
-      poolConfig.ssl = { rejectUnauthorized: this.mysql.sslRejectUnauthorized };
-    }
-
-    this.pool = mysql.createPool(poolConfig);
-    await this._createSchema();
-    await this._seedDefaults();
+    throw lastError;
   }
 
   async _createDatabaseIfNeeded() {
