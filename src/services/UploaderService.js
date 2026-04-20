@@ -56,6 +56,8 @@ class UploaderService extends EventEmitter {
     this._currentMaxConcurrentUploads = MAX_CONCURRENT_UPLOADS;
     this._currentMaxConcurrentProviders = MAX_CONCURRENT_PROVIDERS;
     this.providerLimit = pLimit(MAX_CONCURRENT_PROVIDERS);
+    this._emptyQueueStreak = 0;
+    this._nextIdlePollAt = 0;
 
     this.staticAdapters = {
       voesx: new VoeSxAdapter(),
@@ -343,6 +345,8 @@ class UploaderService extends EventEmitter {
     this.progressLogState.clear();
 
     this.processingJobIds.clear();
+    this._emptyQueueStreak = 0;
+    this._nextIdlePollAt = 0;
     console.log('[Uploader] Service stopped');
   }
 
@@ -1617,6 +1621,10 @@ class UploaderService extends EventEmitter {
   async _processQueueCycle() {
     if (!this.isRunning) return;
 
+    if (this._nextIdlePollAt && Date.now() < this._nextIdlePollAt) {
+      return;
+    }
+
     let uploadJobs = [];
     let transferJobs = [];
 
@@ -1628,6 +1636,9 @@ class UploaderService extends EventEmitter {
       transferJobs = claimableJobs.filter((j) => j.type === 'transfer');
 
       if (uploadJobs.length === 0 && transferJobs.length === 0) return;
+
+      this._emptyQueueStreak = 0;
+      this._nextIdlePollAt = 0;
 
       this._logUpload('info', 'queue.processing', {
         uploadJobs: uploadJobs.length,
@@ -1664,6 +1675,12 @@ class UploaderService extends EventEmitter {
         this._releaseJobClaim(job.id);
       }
       console.error('[Uploader] Queue processing error:', error);
+      if (String(error?.code || '') === 'ER_CON_COUNT_ERROR') {
+        this._emptyQueueStreak = Math.min(this._emptyQueueStreak + 1, 6);
+        const backoffMs = Math.min(30000, 2000 * (2 ** this._emptyQueueStreak));
+        this._nextIdlePollAt = Date.now() + backoffMs;
+        console.warn(`[Uploader] DB pressure detected, backing off queue polling for ${backoffMs}ms`);
+      }
     }
   }
 

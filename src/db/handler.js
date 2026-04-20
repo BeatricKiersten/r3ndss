@@ -65,8 +65,8 @@ function buildMysqlConfigFromEnv() {
     user: process.env.MYSQL_USER || 'root',
     password: process.env.MYSQL_PASSWORD || '',
     database: process.env.MYSQL_DATABASE || 'zenius',
-    connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 10),
-    maxIdle: Number(process.env.MYSQL_MAX_IDLE || process.env.MYSQL_CONNECTION_LIMIT || 10),
+    connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 5),
+    maxIdle: Number(process.env.MYSQL_MAX_IDLE || process.env.MYSQL_CONNECTION_LIMIT || 5),
     idleTimeout: Number(process.env.MYSQL_IDLE_TIMEOUT || 60000),
     queueLimit: Number(process.env.MYSQL_QUEUE_LIMIT || 0),
     connectTimeout: Number(process.env.MYSQL_CONNECT_TIMEOUT || 10000),
@@ -2380,6 +2380,7 @@ class DatabaseHandler {
 
   async _getProviderConfigRowsMap() {
     return this._getCachedMetadata('provider-config-rows', async () => {
+      await this._ready();
       const [rows] = await this._getPoolOrThrow().query('SELECT * FROM provider_configs');
       const configs = {};
 
