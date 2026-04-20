@@ -152,7 +152,6 @@ export const useWebSocketStore = create((set, get) => ({
       case 'job:failed':
       case 'job:cancelled':
         if (queryClient) {
-          queryClient.invalidateQueries('jobs');
           queryClient.invalidateQueries('dashboard');
           queryClient.invalidateQueries('files');
         }
@@ -172,7 +171,6 @@ export const useWebSocketStore = create((set, get) => ({
       case 'transfer:completed':
       case 'transfer:failed':
         if (queryClient) {
-          queryClient.invalidateQueries('jobs');
           queryClient.invalidateQueries('dashboard');
         }
         break;
@@ -196,7 +194,6 @@ export const useWebSocketStore = create((set, get) => ({
       case 'zenius:batch:started':
         if (queryClient) {
           queryClient.invalidateQueries('zenius-queue-status');
-          queryClient.invalidateQueries('jobs');
         }
         toast.info('Batch Started', data?.message || 'Zenius batch download started');
         break;
@@ -217,7 +214,6 @@ export const useWebSocketStore = create((set, get) => ({
         if (queryClient) {
           queryClient.invalidateQueries('zenius-queue-status');
           queryClient.invalidateQueries('files');
-          queryClient.invalidateQueries('jobs');
           queryClient.invalidateQueries('dashboard');
         }
         toast.success('Batch Completed', data?.message || 'All videos in batch processed');
@@ -240,7 +236,6 @@ export const useWebSocketStore = create((set, get) => ({
       case 'zenius:download:failed':
         if (queryClient) {
           queryClient.invalidateQueries('zenius-queue-status');
-          queryClient.invalidateQueries('jobs');
         }
         break;
 

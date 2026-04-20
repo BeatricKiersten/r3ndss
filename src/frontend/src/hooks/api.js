@@ -349,7 +349,6 @@ export const useZeniusResetFiles = () => {
     {
       onSuccess: () => {
         queryClient.invalidateQueries('files');
-        queryClient.invalidateQueries('jobs');
         queryClient.invalidateQueries('dashboard');
       }
     }
@@ -873,7 +872,12 @@ export const useJobs = (filters = {}) => {
       const response = await api.get('/api/jobs', { params });
       return response.data.data;
     },
-    { refetchInterval: 2000 }
+    {
+      refetchInterval: false,
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+      staleTime: Infinity
+    }
   );
 };
 
@@ -887,7 +891,6 @@ export const useCancelJob = () => {
     },
     {
       onSuccess: () => {
-        queryClient.invalidateQueries('jobs');
         queryClient.invalidateQueries('files');
         queryClient.invalidateQueries('dashboard');
       }
@@ -905,7 +908,6 @@ export const useDeleteJob = () => {
     },
     {
       onSuccess: () => {
-        queryClient.invalidateQueries('jobs');
         queryClient.invalidateQueries('dashboard');
       }
     }
@@ -922,7 +924,6 @@ export const useCancelAllJobs = () => {
     },
     {
       onSuccess: () => {
-        queryClient.invalidateQueries('jobs');
         queryClient.invalidateQueries('files');
         queryClient.invalidateQueries('dashboard');
       }
@@ -940,7 +941,6 @@ export const useClearJobLogs = () => {
     },
     {
       onSuccess: () => {
-        queryClient.invalidateQueries('jobs');
         queryClient.invalidateQueries('dashboard');
       }
     }
@@ -957,7 +957,6 @@ export const useWipeAllJobs = () => {
     },
     {
       onSuccess: () => {
-        queryClient.invalidateQueries('jobs');
         queryClient.invalidateQueries('files');
         queryClient.invalidateQueries('dashboard');
       }
