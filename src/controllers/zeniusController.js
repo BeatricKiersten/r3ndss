@@ -30,10 +30,10 @@ const DEFAULT_BATCH_PARENT_CONTAINER_NAME = '';
 const UPSTREAM_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_TIMEOUT_MS || '12000', 10);
 const UPSTREAM_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_UPSTREAM_MAX_RETRIES || '3', 10);
 const UPSTREAM_RETRY_BASE_DELAY_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_RETRY_BASE_DELAY_MS || '500', 10);
-const BATCH_CG_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CG_FETCH_CONCURRENCY || '4', 10);
-const BATCH_CONTAINER_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CONTAINER_FETCH_CONCURRENCY || '4', 10);
-const BATCH_DETAIL_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_DETAIL_FETCH_CONCURRENCY || '4', 10);
-const BATCH_INSTANCE_METADATA_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_INSTANCE_METADATA_CONCURRENCY || '6', 10);
+const BATCH_CG_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CG_FETCH_CONCURRENCY || '2', 10);
+const BATCH_CONTAINER_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CONTAINER_FETCH_CONCURRENCY || '2', 10);
+const BATCH_DETAIL_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_DETAIL_FETCH_CONCURRENCY || '2', 10);
+const BATCH_INSTANCE_METADATA_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_INSTANCE_METADATA_CONCURRENCY || '3', 10);
 const MAX_BATCH_ERRORS = Number.parseInt(process.env.ZENIUS_MAX_BATCH_ERRORS || '100', 10);
 const DEFAULT_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_CHUNK_SIZE || '8', 10);
 const MAX_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_MAX_CHUNK_SIZE || '20', 10);
@@ -88,7 +88,7 @@ async function withDbRetry(fn, label = 'db-write') {
 }
 
 // Download concurrency control
-const DEFAULT_MAX_CONCURRENT_DOWNLOADS = Number.parseInt(process.env.ZENIUS_MAX_CONCURRENT_DOWNLOADS || '10', 10);
+const DEFAULT_MAX_CONCURRENT_DOWNLOADS = Number.parseInt(process.env.ZENIUS_MAX_CONCURRENT_DOWNLOADS || '4', 10);
 
 class DownloadQueue {
   constructor(maxConcurrent) {
@@ -1665,6 +1665,7 @@ async function getFolderFileCacheEntry(folderFileCache, folderId) {
     return folderFileCache.get(cacheKey);
   }
 
+  // Keep one in-flight lookup per folder to avoid duplicate listFiles() calls.
   const pendingEntry = db.listFiles(cacheKey).then((files) => {
     const filesByName = new Map();
     for (const file of files || []) {
@@ -1700,6 +1701,15 @@ async function rememberCachedFileInFolder(folderFileCache, folderId, file) {
 
   const entry = await getFolderFileCacheEntry(folderFileCache, folderId);
   entry.filesByName.set(String(file.name).trim(), file);
+}
+
+async function prefetchFolderFileCaches(folderFileCache, folderIds = []) {
+  const uniqueFolderIds = [...new Set((folderIds || []).map((value) => String(value || '').trim()).filter(Boolean))];
+  if (uniqueFolderIds.length === 0) {
+    return;
+  }
+
+  await Promise.all(uniqueFolderIds.map((folderId) => getFolderFileCacheEntry(folderFileCache, folderId)));
 }
 
 async function buildPlannedBatchItem({
@@ -2152,6 +2162,11 @@ async function buildBatchChain({
     pendingContainers.push(mergedContainers[cursor]);
     cursor += 1;
   }
+
+  await prefetchFolderFileCaches(
+    session.planFolderFileCache,
+    pendingContainers.map((container) => joinFolderPaths(planningContext.baseFolderInput, container?.path || '') || 'root')
+  );
 
   const resolvedDetails = await Promise.all(
     pendingContainers.map((container) => detailLimit(() => buildBatchPlanForContainer({
