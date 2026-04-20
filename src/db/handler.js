@@ -27,6 +27,7 @@ const FILE_PROVIDER_EMPTY_HISTORY = stringifyJson([]);
 const DB_INIT_RETRY_ATTEMPTS = Math.max(1, Number(process.env.DB_INIT_RETRY_ATTEMPTS || 3));
 const DB_INIT_RETRY_DELAY_MS = Math.max(250, Number(process.env.DB_INIT_RETRY_DELAY_MS || 1500));
 const DB_METADATA_CACHE_TTL_MS = Math.max(250, Number(process.env.DB_METADATA_CACHE_TTL_MS || 1000));
+const DB_JOB_LIST_LIMIT = Math.max(1, Number(process.env.DB_JOB_LIST_LIMIT || 1000));
 
 function toInt(value, fallback = 0) {
   const parsed = Number(value);
@@ -64,7 +65,13 @@ function buildMysqlConfigFromEnv() {
     user: process.env.MYSQL_USER || 'root',
     password: process.env.MYSQL_PASSWORD || '',
     database: process.env.MYSQL_DATABASE || 'zenius',
-    connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 25),
+    connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 50),
+    maxIdle: Number(process.env.MYSQL_MAX_IDLE || process.env.MYSQL_CONNECTION_LIMIT || 50),
+    idleTimeout: Number(process.env.MYSQL_IDLE_TIMEOUT || 60000),
+    queueLimit: Number(process.env.MYSQL_QUEUE_LIMIT || 0),
+    connectTimeout: Number(process.env.MYSQL_CONNECT_TIMEOUT || 10000),
+    enableKeepAlive: String(process.env.MYSQL_ENABLE_KEEP_ALIVE || 'true').toLowerCase() !== 'false',
+    keepAliveInitialDelay: Number(process.env.MYSQL_KEEP_ALIVE_INITIAL_DELAY || 0),
     autoCreateDatabase: String(process.env.MYSQL_AUTO_CREATE_DATABASE || 'true').toLowerCase() !== 'false',
     ssl: String(process.env.MYSQL_SSL || 'false').toLowerCase() === 'true',
     sslRejectUnauthorized: String(process.env.MYSQL_SSL_REJECT_UNAUTHORIZED || 'true').toLowerCase() !== 'false'
@@ -106,6 +113,22 @@ function buildMysqlConfigFromEnv() {
 
   if (parsed.searchParams.get('connectionLimit')) {
     config.connectionLimit = Number(parsed.searchParams.get('connectionLimit')) || config.connectionLimit;
+  }
+
+  if (parsed.searchParams.get('maxIdle')) {
+    config.maxIdle = Number(parsed.searchParams.get('maxIdle')) || config.maxIdle;
+  }
+
+  if (parsed.searchParams.get('idleTimeout')) {
+    config.idleTimeout = Number(parsed.searchParams.get('idleTimeout')) || config.idleTimeout;
+  }
+
+  if (parsed.searchParams.get('queueLimit')) {
+    config.queueLimit = Number(parsed.searchParams.get('queueLimit')) || config.queueLimit;
+  }
+
+  if (parsed.searchParams.get('connectTimeout')) {
+    config.connectTimeout = Number(parsed.searchParams.get('connectTimeout')) || config.connectTimeout;
   }
 
   return config;
@@ -532,7 +555,12 @@ class DatabaseHandler {
           database: this.mysql.database,
           waitForConnections: true,
           connectionLimit: this.mysql.connectionLimit,
-          queueLimit: 0,
+          maxIdle: Math.min(this.mysql.maxIdle, this.mysql.connectionLimit),
+          idleTimeout: this.mysql.idleTimeout,
+          queueLimit: this.mysql.queueLimit,
+          connectTimeout: this.mysql.connectTimeout,
+          enableKeepAlive: this.mysql.enableKeepAlive,
+          keepAliveInitialDelay: this.mysql.keepAliveInitialDelay,
           charset: 'utf8mb4'
         };
 
@@ -2259,7 +2287,7 @@ class DatabaseHandler {
       sql += ` WHERE ${where.join(' AND ')}`;
     }
     sql += ' ORDER BY created_at DESC LIMIT ?';
-    params.push(Math.max(1, toInt(limit, 200)));
+    params.push(Math.min(DB_JOB_LIST_LIMIT, Math.max(1, toInt(limit, 200))));
 
     const [rows] = await this.pool.query(sql, params);
     return rows.map((row) => this._mapJobRow(row));

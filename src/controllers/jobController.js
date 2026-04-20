@@ -1,6 +1,18 @@
 const { db, uploaderService, videoProcessor } = require('../services/runtime');
 const AppError = require('../errors/AppError');
 const { success } = require('../utils/apiResponse');
+const config = require('../config');
+
+const JOB_LIST_MAX_LIMIT = Math.max(1, Number(config.jobs?.maxListLimit || 100));
+
+function normalizeListLimit(value, fallback = JOB_LIST_MAX_LIMIT) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(JOB_LIST_MAX_LIMIT, Math.max(1, Math.trunc(parsed)));
+}
 
 const jobController = {
   async list(req, res) {
@@ -9,7 +21,7 @@ const jobController = {
       status: status || null,
       type: type || null,
       fileId: fileId || null,
-      limit: limit ? Number(limit) : 200
+      limit: normalizeListLimit(limit)
     });
     res.json(success(jobs));
   },

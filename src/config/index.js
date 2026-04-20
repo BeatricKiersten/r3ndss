@@ -6,6 +6,9 @@ module.exports = {
   port: Number(process.env.PORT || process.env.API_PORT || 3001),
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
   uploadDir: process.env.UPLOAD_DIR || './uploads',
+  jobs: {
+    maxListLimit: Math.max(1, Number(process.env.JOBS_MAX_LIST_LIMIT || 100))
+  },
   mysql: {
     url: process.env.MYSQL_URL || process.env.DATABASE_URL || null,
     host: process.env.MYSQL_HOST || '127.0.0.1',
@@ -13,7 +16,13 @@ module.exports = {
     user: process.env.MYSQL_USER || 'root',
     password: process.env.MYSQL_PASSWORD || '',
     database: process.env.MYSQL_DATABASE || 'zenius',
-    connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 25),
+    connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 50),
+    maxIdle: Number(process.env.MYSQL_MAX_IDLE || process.env.MYSQL_CONNECTION_LIMIT || 50),
+    idleTimeout: Number(process.env.MYSQL_IDLE_TIMEOUT || 60000),
+    queueLimit: Number(process.env.MYSQL_QUEUE_LIMIT || 0),
+    connectTimeout: Number(process.env.MYSQL_CONNECT_TIMEOUT || 10000),
+    enableKeepAlive: String(process.env.MYSQL_ENABLE_KEEP_ALIVE || 'true').toLowerCase() !== 'false',
+    keepAliveInitialDelay: Number(process.env.MYSQL_KEEP_ALIVE_INITIAL_DELAY || 0),
     autoCreateDatabase: String(process.env.MYSQL_AUTO_CREATE_DATABASE || 'true').toLowerCase() !== 'false',
     ssl: String(process.env.MYSQL_SSL || 'false').toLowerCase() === 'true',
     sslRejectUnauthorized: String(process.env.MYSQL_SSL_REJECT_UNAUTHORIZED || 'true').toLowerCase() !== 'false'
