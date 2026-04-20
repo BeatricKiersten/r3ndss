@@ -160,6 +160,11 @@ class DatabaseHandler {
     ].includes(code);
   }
 
+  _isMissingDatabaseError(error) {
+    const code = String(error?.code || '').trim().toUpperCase();
+    return code === 'ER_BAD_DB_ERROR';
+  }
+
   async _disposePool() {
     if (!this.pool) {
       return;
@@ -513,15 +518,12 @@ class DatabaseHandler {
 
   async _initialize() {
     let lastError = null;
+    let attemptedDatabaseCreate = false;
 
     for (let attempt = 1; attempt <= DB_INIT_RETRY_ATTEMPTS; attempt += 1) {
       let pool = null;
 
       try {
-        if (this.mysql.autoCreateDatabase) {
-          await this._createDatabaseIfNeeded();
-        }
-
         const poolConfig = {
           host: this.mysql.host,
           port: this.mysql.port,
@@ -557,6 +559,12 @@ class DatabaseHandler {
 
         if (this.pool === pool) {
           this.pool = null;
+        }
+
+        if (this.mysql.autoCreateDatabase && !attemptedDatabaseCreate && this._isMissingDatabaseError(error)) {
+          attemptedDatabaseCreate = true;
+          await this._createDatabaseIfNeeded();
+          continue;
         }
 
         if (!this._isRetryableInitError(error) || attempt >= DB_INIT_RETRY_ATTEMPTS) {
