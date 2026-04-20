@@ -26,6 +26,7 @@ const STATIC_PROVIDER_IDS = getStaticProviderIds();
 const FILE_PROVIDER_EMPTY_HISTORY = stringifyJson([]);
 const DB_INIT_RETRY_ATTEMPTS = Math.max(1, Number(process.env.DB_INIT_RETRY_ATTEMPTS || 3));
 const DB_INIT_RETRY_DELAY_MS = Math.max(250, Number(process.env.DB_INIT_RETRY_DELAY_MS || 1500));
+const DB_INIT_COOLDOWN_ON_CONN_ERROR_MS = Math.max(DB_INIT_RETRY_DELAY_MS, Number(process.env.DB_INIT_COOLDOWN_ON_CONN_ERROR_MS || 15000));
 const DB_METADATA_CACHE_TTL_MS = Math.max(250, Number(process.env.DB_METADATA_CACHE_TTL_MS || 1000));
 const DB_JOB_LIST_LIMIT = Math.max(1, Number(process.env.DB_JOB_LIST_LIMIT || 1000));
 
@@ -160,7 +161,10 @@ class DatabaseHandler {
       .catch((error) => {
         this.initError = error;
         if (this._isRetryableInitError(error)) {
-          this.nextInitAttemptAt = Date.now() + DB_INIT_RETRY_DELAY_MS;
+          const cooldownMs = String(error?.code || '') === 'ER_CON_COUNT_ERROR'
+            ? DB_INIT_COOLDOWN_ON_CONN_ERROR_MS
+            : DB_INIT_RETRY_DELAY_MS;
+          this.nextInitAttemptAt = Date.now() + cooldownMs;
         }
         throw error;
       })
@@ -950,6 +954,11 @@ class DatabaseHandler {
   }
 
   async _ready() {
+    const cooldownMs = Math.max(0, this.nextInitAttemptAt - Date.now());
+    if (!this.pool && !this.initPromise && cooldownMs > 0) {
+      await this._sleep(cooldownMs);
+    }
+
     if (!this.pool && !this.initPromise) {
       this.initError = null;
       this._beginInitialization();
@@ -2302,6 +2311,31 @@ class DatabaseHandler {
     );
 
     return rows.map((row) => this._mapJobRow(row));
+  }
+
+  async getJobActivityByFileIds(fileIds = []) {
+    await this._ready();
+
+    const uniqueFileIds = [...new Set((Array.isArray(fileIds) ? fileIds : []).filter(Boolean))];
+    if (uniqueFileIds.length === 0) {
+      return new Map();
+    }
+
+    const placeholders = uniqueFileIds.map(() => '?').join(', ');
+    const [rows] = await this.pool.query(
+      `SELECT file_id,
+              COUNT(*) AS total_count,
+              SUM(CASE WHEN status IN ('pending', 'processing', 'uploading') THEN 1 ELSE 0 END) AS active_count
+         FROM jobs
+        WHERE file_id IN (${placeholders})
+        GROUP BY file_id`,
+      uniqueFileIds
+    );
+
+    return new Map(rows.map((row) => [String(row.file_id), {
+      totalCount: toInt(row.total_count),
+      activeCount: toInt(row.active_count)
+    }]));
   }
 
   async deleteJob(jobId) {

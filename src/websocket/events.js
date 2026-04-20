@@ -5,11 +5,24 @@ let eventEmitter = null;
 let sendDashboardData = null;
 let dashboardSnapshotPromise = null;
 let dashboardRefreshTimer = null;
+let dashboardSnapshotCache = null;
+let dashboardSnapshotCacheAt = 0;
+const DASHBOARD_CACHE_TTL_MS = Math.max(1000, Number(process.env.DASHBOARD_CACHE_TTL_MS || 5000));
 
 function getDashboardSnapshot() {
+  const now = Date.now();
+  if (dashboardSnapshotCache && (now - dashboardSnapshotCacheAt) < DASHBOARD_CACHE_TTL_MS) {
+    return Promise.resolve(dashboardSnapshotCache);
+  }
+
   if (!dashboardSnapshotPromise) {
     const db = getDb();
     dashboardSnapshotPromise = db.getDashboardData()
+      .then((snapshot) => {
+        dashboardSnapshotCache = snapshot;
+        dashboardSnapshotCacheAt = Date.now();
+        return snapshot;
+      })
       .finally(() => {
         dashboardSnapshotPromise = null;
       });
@@ -19,6 +32,10 @@ function getDashboardSnapshot() {
 }
 
 function scheduleDashboardBroadcast(delayMs = 500) {
+  if (clients.size === 0) {
+    return;
+  }
+
   if (dashboardRefreshTimer) {
     return;
   }
@@ -96,6 +113,9 @@ const websocketHandler = {
     });
 
     setInterval(() => {
+      if (clients.size === 0) {
+        return;
+      }
       scheduleDashboardBroadcast(0);
     }, 15000);
   },

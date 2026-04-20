@@ -70,12 +70,14 @@ class CleanupService {
     const cycleId = this._cycleCount;
     console.log(`[Cleanup] Cycle #${cycleId} (${label}) started`);
     const summary = { cycleId, label, startedAt: new Date().toISOString() };
+    let filesSnapshot = [];
 
     try {
+      filesSnapshot = await this.db.listFiles().catch(() => []);
       summary.stuckJobs = await this._fixStuckJobs();
       summary.expiredSessions = await this._cleanupExpiredBatchSessions();
-      summary.orphanedFiles = await this._cleanupOrphanedLocalFiles();
-      summary.localFileCleanup = await this._forceLocalFileCleanupForFinishedFiles();
+      summary.orphanedFiles = await this._cleanupOrphanedLocalFiles(filesSnapshot);
+      summary.localFileCleanup = await this._forceLocalFileCleanupForFinishedFiles(filesSnapshot);
     } catch (error) {
       console.error(`[Cleanup] Cycle #${cycleId} encountered an error: ${error.message}`);
       summary.error = error.message;
@@ -181,7 +183,7 @@ class CleanupService {
    * Scans UPLOAD_DIR for .mp4 files that have no DB record (or whose DB
    * record is deleted) and deletes them after the grace period.
    */
-  async _cleanupOrphanedLocalFiles() {
+  async _cleanupOrphanedLocalFiles(filesSnapshot = null) {
     const result = { scanned: 0, deleted: 0, skipped: 0, errors: [] };
 
     try {
@@ -189,7 +191,7 @@ class CleanupService {
       if (!exists) return result;
 
       // Build a set of all known local paths from DB
-      const knownPaths = await this._getKnownLocalPaths();
+      const knownPaths = await this._getKnownLocalPaths(filesSnapshot);
 
       // Walk the upload dir (one level only – flat structure)
       const entries = await fs.readdir(this.uploadDir).catch(() => []);
@@ -244,11 +246,11 @@ class CleanupService {
     return result;
   }
 
-  async _getKnownLocalPaths() {
+  async _getKnownLocalPaths(filesSnapshot = null) {
     const paths = new Set();
 
     try {
-      const files = await this.db.listFiles();
+      const files = Array.isArray(filesSnapshot) ? filesSnapshot : await this.db.listFiles();
       for (const file of files) {
         if (file.localPath) {
           paths.add(path.resolve(file.localPath));
@@ -270,14 +272,15 @@ class CleanupService {
    * completed/failed/cancelled. These files should have been deleted already
    * but weren't (e.g. the scheduled cleanup timer was lost on restart).
    */
-  async _forceLocalFileCleanupForFinishedFiles() {
+  async _forceLocalFileCleanupForFinishedFiles(filesSnapshot = null) {
     const result = { checked: 0, cleaned: 0, skipped: 0, errors: [] };
 
     try {
-      const files = await this.db.listFiles();
+      const files = Array.isArray(filesSnapshot) ? filesSnapshot : await this.db.listFiles();
+      const filesWithLocalPath = files.filter((file) => file?.localPath);
+      const jobActivityByFileId = await this.db.getJobActivityByFileIds(filesWithLocalPath.map((file) => file.id));
 
-      for (const file of files) {
-        if (!file.localPath) continue;
+      for (const file of filesWithLocalPath) {
 
         result.checked += 1;
 
@@ -292,17 +295,13 @@ class CleanupService {
           }
 
           // Get all jobs for this file
-          const jobs = await this.db.getJobsByFile(file.id);
-          if (jobs.length === 0) {
+          const jobActivity = jobActivityByFileId.get(String(file.id));
+          if (!jobActivity || jobActivity.totalCount === 0) {
             result.skipped += 1;
             continue;
           }
 
-          const hasActiveJob = jobs.some((j) =>
-            j.status === 'pending' || j.status === 'processing' || j.status === 'uploading'
-          );
-
-          if (hasActiveJob) {
+          if (jobActivity.activeCount > 0) {
             result.skipped += 1;
             continue;
           }
