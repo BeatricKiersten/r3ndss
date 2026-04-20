@@ -14,6 +14,10 @@ function normalizeListLimit(value, fallback = JOB_LIST_MAX_LIMIT) {
   return Math.min(JOB_LIST_MAX_LIMIT, Math.max(1, Math.trunc(parsed)));
 }
 
+function isActiveJob(job) {
+  return job.status === 'pending' || job.status === 'processing';
+}
+
 const jobController = {
   async list(req, res) {
     const { status, type, fileId, limit } = req.query;
@@ -102,6 +106,7 @@ const jobController = {
 
   async wipeAll(req, res) {
     const jobs = await db.getAllJobs();
+    const restartUploaderAfterWipe = uploaderService.isRunning;
     const results = {
       totalJobs: jobs.length,
       abortedProcesses: 0,
@@ -110,34 +115,44 @@ const jobController = {
       errors: []
     };
 
-    for (const job of jobs) {
-      try {
-        if (job.status !== 'pending' && job.status !== 'processing') {
-          continue;
-        }
+    try {
+      if (restartUploaderAfterWipe) {
+        await uploaderService.stop();
+      }
 
-        if (job.type === 'process') {
-          const aborted = await videoProcessor.cancelJob(job.id);
-          if (aborted) {
-            results.abortedProcesses += 1;
+      for (const job of jobs) {
+        try {
+          if (!isActiveJob(job)) {
+            continue;
           }
-          continue;
-        }
 
-        const provider = job.metadata?.provider || job.metadata?.targetProvider;
-        if (provider) {
-          const aborted = await uploaderService.cancelUpload(job.id, provider);
-          if (aborted) {
-            results.abortedUploads += 1;
+          if (job.type === 'process') {
+            const aborted = await videoProcessor.cancelJobSnapshot(job);
+            if (aborted) {
+              results.abortedProcesses += 1;
+            }
+            continue;
           }
+
+          const provider = job.metadata?.provider || job.metadata?.targetProvider;
+          if (provider) {
+            const aborted = await uploaderService.cancelUpload(job.id, provider);
+            if (aborted) {
+              results.abortedUploads += 1;
+            }
+          }
+        } catch (error) {
+          results.errors.push({ jobId: job.id, error: error.message });
         }
-      } catch (error) {
-        results.errors.push({ jobId: job.id, error: error.message });
+      }
+
+      const deleted = await db.deleteAllJobs();
+      results.deletedCount = deleted.deletedCount;
+    } finally {
+      if (restartUploaderAfterWipe) {
+        await uploaderService.start();
       }
     }
-
-    const deleted = await db.deleteAllJobs();
-    results.deletedCount = deleted.deletedCount;
 
     res.json(success(results, {
       message: `Deleted ${results.deletedCount} jobs and cleared all logs`

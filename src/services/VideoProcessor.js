@@ -581,6 +581,15 @@ class VideoProcessor {
       job = await this.db.getJob(jobId);
     } catch (_) {}
 
+    return this.cancelJobSnapshot(job || { id: jobId, fileId: null, metadata: null });
+  }
+
+  async cancelJobSnapshot(job) {
+    const jobId = job?.id;
+    if (!jobId) {
+      return false;
+    }
+
     this._stopJobHeartbeat(jobId);
     const childProcess = this.activeProcesses.get(jobId);
     if (childProcess) {
