@@ -116,7 +116,29 @@ class DatabaseHandler {
 
     this.pool = null;
     this.startupMaintenancePromise = null;
-    this.initPromise = this._initialize();
+    this.initPromise = null;
+    this.initError = null;
+    this._beginInitialization();
+  }
+
+  _beginInitialization() {
+    if (this.initPromise) {
+      return this.initPromise;
+    }
+
+    this.initPromise = this._initialize()
+      .then(() => {
+        this.initError = null;
+      })
+      .catch((error) => {
+        this.initError = error;
+        throw error;
+      })
+      .finally(() => {
+        this.initPromise = null;
+      });
+
+    return this.initPromise;
   }
 
   _isRetryableInitError(error) {
@@ -806,6 +828,15 @@ class DatabaseHandler {
   }
 
   async _ready() {
+    if (this.initError && this._isRetryableInitError(this.initError)) {
+      this.initError = null;
+      this._beginInitialization();
+    }
+
+    if (!this.initPromise) {
+      this._beginInitialization();
+    }
+
     await this.initPromise;
   }
 

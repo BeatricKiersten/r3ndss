@@ -90,6 +90,12 @@ async function getDashboardData(ws) {
       ws.send(JSON.stringify({ event: 'dashboard:update', data }));
     }
   } catch (error) {
+    const code = String(error?.code || '').trim().toUpperCase();
+    if (['ECONNRESET', 'PROTOCOL_CONNECTION_LOST', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE'].includes(code)) {
+      console.warn(`Failed to send dashboard data: ${code || error.message}`);
+      return;
+    }
+
     console.error('Failed to send dashboard data:', error);
   }
 }
