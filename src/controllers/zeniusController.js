@@ -526,11 +526,171 @@ function createBatchChainSession({ rootCgId, targetCgSelector, parentContainerNa
     traversal: [],
     containerByShortId: new Map(),
     containerVideoInstancesByShortId: new Map(),
+    containerDetailsByShortId: new Map(),
+    plannedContainers: [],
+    plannedItems: [],
+    plannedItemByKey: new Map(),
+    planCursor: 0,
+    planReady: false,
+    planContextKey: null,
+    planBaseFolderInput: '',
+    planSelectedProviders: null,
+    planFolderCache: new Map(),
+    planFolderFileCache: new Map(),
     instanceMetadataByShortId: new Map(),
     instanceMetadataPromisesByShortId: new Map(),
     cgPathById: new Map([[rootCgId, []]]),
     errors: []
   };
+}
+
+function createBatchChainBranchSession(parentSession, branchCgId) {
+  const branchPath = sanitizePathSegments(parentSession.cgPathById.get(branchCgId) || []);
+
+  return {
+    id: `${parentSession.id}:${branchCgId}`,
+    createdAt: parentSession.createdAt,
+    updatedAt: Date.now(),
+    expiresAt: parentSession.expiresAt,
+    rootCgId: parentSession.rootCgId,
+    rootCgName: parentSession.rootCgName,
+    targetCgSelector: parentSession.targetCgSelector,
+    targetCgId: parentSession.targetCgId,
+    parentContainerName: parentSession.parentContainerName,
+    discoveryInitialized: true,
+    discoveryDone: false,
+    visitedCgIds: new Set([parentSession.rootCgId]),
+    queueCgIds: [branchCgId],
+    leafCgIds: [],
+    leafCgIdSet: new Set(),
+    leafCursor: 0,
+    traversal: [],
+    containerByShortId: new Map(),
+    containerVideoInstancesByShortId: new Map(),
+    containerDetailsByShortId: new Map(),
+    plannedContainers: [],
+    plannedItems: [],
+    plannedItemByKey: new Map(),
+    planCursor: 0,
+    planReady: false,
+    planContextKey: parentSession.planContextKey,
+    planBaseFolderInput: parentSession.planBaseFolderInput,
+    planSelectedProviders: Array.isArray(parentSession.planSelectedProviders)
+      ? [...parentSession.planSelectedProviders]
+      : parentSession.planSelectedProviders,
+    planFolderCache: new Map(),
+    planFolderFileCache: new Map(),
+    instanceMetadataByShortId: new Map(),
+    instanceMetadataPromisesByShortId: new Map(),
+    cgPathById: new Map([
+      [parentSession.rootCgId, sanitizePathSegments(parentSession.cgPathById.get(parentSession.rootCgId) || [])],
+      [branchCgId, branchPath]
+    ]),
+    errors: []
+  };
+}
+
+function mergeBatchChainBranchSession(targetSession, branchSession) {
+  if (!branchSession) {
+    return;
+  }
+
+  for (const visitedCgId of branchSession.visitedCgIds || []) {
+    targetSession.visitedCgIds.add(visitedCgId);
+  }
+
+  for (const [cgId, pathSegments] of branchSession.cgPathById || []) {
+    rememberCgPath(targetSession, cgId, pathSegments);
+  }
+
+  for (const traversalItem of branchSession.traversal || []) {
+    targetSession.traversal.push(traversalItem);
+  }
+
+  for (const leafCgId of branchSession.leafCgIds || []) {
+    addLeafCgId(targetSession, leafCgId);
+  }
+
+  for (const container of branchSession.containerByShortId?.values() || []) {
+    addDiscoveredContainer(
+      targetSession,
+      container?.['url-short-id'],
+      container,
+      container?.sourceLeafCgId || null,
+      container?.parentPathSegments || []
+    );
+  }
+
+  for (const [containerShortId, containerDetail] of branchSession.containerDetailsByShortId || []) {
+    if (!targetSession.containerDetailsByShortId.has(containerShortId)) {
+      targetSession.containerDetailsByShortId.set(containerShortId, containerDetail);
+    }
+  }
+
+  for (const plannedContainer of branchSession.plannedContainers || []) {
+    const containerShortId = String(plannedContainer?.containerUrlShortId || '').trim();
+    if (!containerShortId) {
+      continue;
+    }
+
+    if (!targetSession.containerDetailsByShortId.has(containerShortId) && plannedContainer) {
+      targetSession.containerDetailsByShortId.set(containerShortId, plannedContainer);
+    }
+  }
+
+  for (const plannedItem of branchSession.plannedItems || []) {
+    const planKey = String(plannedItem?.planKey || '').trim();
+    if (!planKey || targetSession.plannedItemByKey.has(planKey)) {
+      continue;
+    }
+
+    targetSession.plannedItemByKey.set(planKey, plannedItem);
+    targetSession.plannedItems.push(plannedItem);
+  }
+
+  for (const error of branchSession.errors || []) {
+    pushBatchError(targetSession.errors, error);
+  }
+}
+
+function normalizePlanningContext(baseFolderInput, selectedProviders) {
+  const normalizedBaseFolderInput = stripWrappingQuotes(baseFolderInput || '').trim();
+  const normalizedSelectedProviders = Array.isArray(selectedProviders) && selectedProviders.length > 0
+    ? [...selectedProviders].sort()
+    : null;
+
+  return {
+    baseFolderInput: normalizedBaseFolderInput,
+    selectedProviders: normalizedSelectedProviders,
+    key: JSON.stringify({
+      baseFolderInput: normalizedBaseFolderInput,
+      selectedProviders: normalizedSelectedProviders
+    })
+  };
+}
+
+function resetBatchPlanState(session, planningContext) {
+  session.planContextKey = planningContext.key;
+  session.planBaseFolderInput = planningContext.baseFolderInput;
+  session.planSelectedProviders = planningContext.selectedProviders;
+  session.containerDetailsByShortId = new Map();
+  session.plannedContainers = [];
+  session.plannedItems = [];
+  session.plannedItemByKey = new Map();
+  session.planCursor = 0;
+  session.planReady = false;
+  session.planFolderCache = new Map();
+  session.planFolderFileCache = new Map();
+}
+
+function ensureBatchPlanContext(session, planningContext) {
+  if (session.planContextKey !== planningContext.key) {
+    resetBatchPlanState(session, planningContext);
+  }
+}
+
+function createPlannedItemKey(containerShortId, instanceShortId, outputFileName, folderId) {
+  return [containerShortId, instanceShortId, outputFileName, folderId].map((part) => String(part || '').trim()).join('::');
 }
 
 function touchBatchChainSession(session) {
@@ -1260,9 +1420,15 @@ async function initializeBatchChainSessionDiscovery(session, options) {
   session.discoveryInitialized = true;
 }
 
-async function advanceBatchChainSessionDiscovery(session, options, deadlineAt) {
+async function initializeBatchChainRootDiscovery(session, options) {
   await initializeBatchChainSessionDiscovery(session, options);
 
+  const initialBranchCgIds = unique(session.queueCgIds);
+  session.queueCgIds = [];
+  return initialBranchCgIds;
+}
+
+async function advanceBatchChainBranchDiscovery(session, options, deadlineAt) {
   const cgConcurrency = clampPositiveInt(BATCH_CG_FETCH_CONCURRENCY, 4);
   const cgFetchLimit = pLimit(cgConcurrency);
 
@@ -1401,6 +1567,31 @@ async function advanceBatchChainSessionDiscovery(session, options, deadlineAt) {
   session.discoveryDone = session.queueCgIds.length === 0 && session.leafCursor >= session.leafCgIds.length;
 }
 
+async function advanceBatchChainSessionDiscovery(session, options, deadlineAt) {
+  const initialBranchCgIds = await initializeBatchChainRootDiscovery(session, options);
+
+  if (initialBranchCgIds.length === 0) {
+    await advanceBatchChainBranchDiscovery(session, options, deadlineAt);
+    return;
+  }
+
+  const branchConcurrency = clampPositiveInt(BATCH_CG_FETCH_CONCURRENCY, 4);
+  const branchLimit = pLimit(branchConcurrency);
+  const branchResults = await Promise.all(
+    initialBranchCgIds.map((branchCgId) => branchLimit(async () => {
+      const branchSession = createBatchChainBranchSession(session, branchCgId);
+      await advanceBatchChainBranchDiscovery(branchSession, options, deadlineAt);
+      return branchSession;
+    }))
+  );
+
+  for (const branchSession of branchResults) {
+    mergeBatchChainBranchSession(session, branchSession);
+  }
+
+  session.discoveryDone = true;
+}
+
 async function buildBatchContainerDetail({ container, options, session, deadlineAt }) {
   const containerName = container.name || container['url-short-id'];
   const containerPath = buildContainerPath(resolveContainerParentSegments(session, container), containerName);
@@ -1511,6 +1702,196 @@ async function rememberCachedFileInFolder(folderFileCache, folderId, file) {
   entry.filesByName.set(String(file.name).trim(), file);
 }
 
+async function buildPlannedBatchItem({
+  container,
+  instance,
+  baseFolderInput,
+  selectedProviders,
+  folderCache,
+  folderFileCache
+}) {
+  const metadata = instance.metadata && typeof instance.metadata === 'object'
+    ? { ...instance.metadata }
+    : {};
+  const rawUrlShortId = instance.urlShortId || metadata.urlShortId;
+
+  if (!rawUrlShortId || !/^\d+$/.test(String(rawUrlShortId).trim())) {
+    return {
+      counted: true,
+      skipped: {
+        urlShortId: rawUrlShortId || null,
+        reason: 'Invalid or missing urlShortId',
+        path: instance.path || container.path || ''
+      }
+    };
+  }
+
+  const urlShortId = normalizeShortId(rawUrlShortId);
+  const outputName = sanitizeOutputName(
+    instance.outputName || instance.name || `zenius-${urlShortId}`,
+    `zenius-${urlShortId}`
+  );
+  const outputFileName = `${outputName}.mp4`;
+  const chainPath = String(instance.path || container.path || '').trim();
+  const finalFolderInput = joinFolderPaths(baseFolderInput, chainPath) || 'root';
+  const folderId = await resolveFolderIdWithCache(folderCache, finalFolderInput);
+  const existingFile = await getCachedFileByNameInFolder(folderFileCache, folderId, outputFileName);
+  const planKey = createPlannedItemKey(container.containerUrlShortId, urlShortId, outputFileName, folderId);
+
+  const plannedItem = {
+    planKey,
+    urlShortId,
+    containerUrlShortId: container.containerUrlShortId,
+    containerName: container.containerName || null,
+    folderId,
+    folderInput: finalFolderInput,
+    outputName: outputFileName,
+    path: chainPath,
+    refererPath: container.containerPathUrl || null,
+    selectedProviders: Array.isArray(selectedProviders) ? [...selectedProviders] : null,
+    action: 'download',
+    reason: 'Ready to download',
+    fileId: existingFile?.id || null,
+    existingStatus: existingFile?.status || null,
+    pendingProviders: [],
+    uploadQueue: null,
+    instance: {
+      ...instance,
+      urlShortId,
+      outputName
+    }
+  };
+
+  if (!existingFile) {
+    return {
+      counted: true,
+      planned: plannedItem
+    };
+  }
+
+  const existingStatus = String(existingFile.status || '').trim().toLowerCase();
+  plannedItem.fileId = existingFile.id;
+  plannedItem.existingStatus = existingStatus || null;
+
+  if (existingStatus === 'failed') {
+    plannedItem.action = 'retry';
+    plannedItem.reason = 'Retrying failed file';
+    return {
+      counted: true,
+      planned: plannedItem
+    };
+  }
+
+  if (existingStatus === 'processing' || existingStatus === 'uploading') {
+    plannedItem.action = 'skip';
+    plannedItem.reason = 'File is already being processed';
+    return {
+      counted: true,
+      planned: plannedItem,
+      skipped: {
+        urlShortId,
+        reason: plannedItem.reason,
+        path: chainPath,
+        fileId: existingFile.id,
+        outputName: outputFileName,
+        uploadQueue: null,
+        pendingProviders: []
+      }
+    };
+  }
+
+  const pendingProviderInfo = await uploaderService.getPendingUploadProviders(existingFile.id, selectedProviders, {
+    verifyRemote: false
+  });
+
+  plannedItem.pendingProviders = pendingProviderInfo?.pendingProviders || [];
+
+  if (!pendingProviderInfo?.hasPendingProviders) {
+    plannedItem.action = 'skip';
+    plannedItem.reason = 'File already exists on selected providers';
+    return {
+      counted: true,
+      planned: plannedItem,
+      skipped: {
+        urlShortId,
+        reason: plannedItem.reason,
+        path: chainPath,
+        fileId: existingFile.id,
+        outputName: outputFileName,
+        uploadQueue: null,
+        pendingProviders: []
+      }
+    };
+  }
+
+  const hasLocalSource = Boolean(existingFile.localPath && await fs.pathExists(existingFile.localPath));
+  if (hasLocalSource) {
+    plannedItem.action = 'finalize';
+    plannedItem.reason = 'File already exists locally; queued missing providers only';
+    return {
+      counted: true,
+      planned: plannedItem
+    };
+  }
+
+  plannedItem.action = 'download';
+  plannedItem.reason = `Existing file ${existingFile.id} is missing local source; re-downloading missing providers`;
+  return {
+    counted: true,
+    planned: plannedItem
+  };
+}
+
+async function buildBatchPlanForContainer({
+  container,
+  options,
+  session,
+  deadlineAt,
+  baseFolderInput,
+  selectedProviders,
+  folderCache,
+  folderFileCache
+}) {
+  const containerDetail = await buildBatchContainerDetail({
+    container,
+    options,
+    session,
+    deadlineAt
+  });
+
+  const plannedItems = [];
+  const skipped = [];
+
+  for (const instance of containerDetail.videoInstances || []) {
+    if (shouldStopForDeadline(deadlineAt, 1200)) {
+      break;
+    }
+
+    const result = await buildPlannedBatchItem({
+      container: containerDetail,
+      instance,
+      baseFolderInput,
+      selectedProviders,
+      folderCache,
+      folderFileCache
+    });
+
+    if (result?.planned) {
+      plannedItems.push(result.planned);
+    }
+
+    if (result?.skipped) {
+      skipped.push(result.skipped);
+    }
+  }
+
+  return {
+    containerDetail,
+    plannedItems,
+    skipped
+  };
+}
+
 async function queueBatchDownloadItem({
   chain,
   container,
@@ -1579,7 +1960,9 @@ async function queueBatchDownloadItem({
       if (existingStatus === 'processing' || existingStatus === 'uploading') {
         skipReason = 'File is already being processed';
       } else {
-        pendingProviderInfo = await uploaderService.getPendingUploadProviders(existingFile.id, selectedProviders);
+        pendingProviderInfo = await uploaderService.getPendingUploadProviders(existingFile.id, selectedProviders, {
+          verifyRemote: false
+        });
 
         if (!pendingProviderInfo.hasPendingProviders) {
           skipReason = 'File already exists on selected providers';
@@ -1694,6 +2077,8 @@ async function buildBatchChain({
   parentContainerName,
   requestContext,
   refererPath,
+  baseFolderInput = '',
+  selectedProviders = null,
   sessionId,
   containerOffset,
   containerLimit,
@@ -1739,6 +2124,9 @@ async function buildBatchChain({
     maxRetries: clampPositiveInt(BATCH_UPSTREAM_MAX_RETRIES, 1)
   };
 
+  const planningContext = normalizePlanningContext(baseFolderInput, selectedProviders);
+  ensureBatchPlanContext(session, planningContext);
+
   await advanceBatchChainSessionDiscovery(session, options, deadlineAt);
 
   touchBatchChainSession(session);
@@ -1750,6 +2138,8 @@ async function buildBatchChain({
   const pathParentName = resolveBatchParentContainerName(session);
 
   const details = [];
+  const plannedItems = [];
+  const skipped = [];
   const detailConcurrency = clampPositiveInt(BATCH_DETAIL_FETCH_CONCURRENCY, 4);
   const detailLimit = pLimit(detailConcurrency);
   const pendingContainers = [];
@@ -1764,14 +2154,53 @@ async function buildBatchChain({
   }
 
   const resolvedDetails = await Promise.all(
-    pendingContainers.map((container) => detailLimit(() => buildBatchContainerDetail({
+    pendingContainers.map((container) => detailLimit(() => buildBatchPlanForContainer({
       container,
       options,
       session,
-      deadlineAt
+      deadlineAt,
+      baseFolderInput: planningContext.baseFolderInput,
+      selectedProviders: planningContext.selectedProviders,
+      folderCache: session.planFolderCache,
+      folderFileCache: session.planFolderFileCache
     })))
   );
-  details.push(...resolvedDetails);
+
+  for (const resolved of resolvedDetails) {
+    if (!resolved?.containerDetail) {
+      continue;
+    }
+
+    const containerDetail = resolved.containerDetail;
+    const containerShortId = String(containerDetail.containerUrlShortId || '').trim();
+    if (containerShortId) {
+      session.containerDetailsByShortId.set(containerShortId, containerDetail);
+    }
+
+    details.push(containerDetail);
+    plannedItems.push(...(resolved.plannedItems || []));
+    skipped.push(...(resolved.skipped || []));
+  }
+
+  if (normalizedOffset === session.planCursor) {
+    for (const containerDetail of details) {
+      session.plannedContainers.push(containerDetail);
+    }
+
+    for (const plannedItem of plannedItems) {
+      if (!plannedItem?.planKey || session.plannedItemByKey.has(plannedItem.planKey)) {
+        continue;
+      }
+
+      session.plannedItemByKey.set(plannedItem.planKey, plannedItem);
+      session.plannedItems.push(plannedItem);
+    }
+
+    session.planCursor = cursor;
+    if (cursor >= totalContainers && session.discoveryDone) {
+      session.planReady = true;
+    }
+  }
 
   const hasMoreKnownContainers = cursor < totalContainers;
   const hasMoreContainers = hasMoreKnownContainers || !session.discoveryDone;
@@ -1796,6 +2225,8 @@ async function buildBatchChain({
     processedContainerCount: details.length,
     hasMoreContainers,
     nextContainerOffset,
+    planReady: Boolean(session.planReady),
+    plannedItemCount: session.plannedItems.length,
     containerList: {
       urlShortId: session.leafCgIds[0] || null,
       urlShortIds: session.leafCgIds,
@@ -1803,6 +2234,8 @@ async function buildBatchChain({
       items: mergedContainers.slice(normalizedOffset, cursor)
     },
     containerDetails: details,
+    plannedItems,
+    skipped,
     errors: session.errors,
     timeBudgetMs: normalizeBatchRequestBudgetMs(timeBudgetMs)
   };
@@ -1919,53 +2352,105 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
   const skipped = [];
   let totalInstances = 0;
   const session = chain.sessionId ? batchChainSessions.get(chain.sessionId) || null : null;
-  const folderCache = new Map();
-  const folderFileCache = new Map();
+  const planningContext = normalizePlanningContext(baseFolderInput, selectedProviders);
+  if (!session || session.planContextKey !== planningContext.key || !Array.isArray(session.plannedItems)) {
+    throw new Error('Preview plan is not available for the requested folder/providers context');
+  }
 
-  for (const container of chain.containerDetails || []) {
+  const normalizedOffset = Math.min(normalizeChunkOffset(chain.containerOffset), session.plannedItems.length);
+  const normalizedLimit = normalizeChunkLimit(chain.containerLimit) || clampPositiveInt(BACKGROUND_BATCH_CHUNK_SIZE, 6);
+  const planChunk = session.plannedItems.slice(normalizedOffset, normalizedOffset + normalizedLimit);
+
+  for (const plannedItem of planChunk) {
     if (cancelled()) {
       break;
     }
 
-    const containerResults = [];
-    for (const instance of container.videoInstances || []) {
-      if (cancelled()) {
-        break;
-      }
+    totalInstances += 1;
 
-      containerResults.push(await queueBatchDownloadItem({
-        chain,
-        container,
-        instance,
-        requestContext,
-        refererPath,
-        baseFolderInput,
-        selectedProviders,
-        runId,
-        session,
-        folderCache,
-        folderFileCache,
-        cancelled
-      }));
+    if (plannedItem.action === 'skip') {
+      skipped.push({
+        urlShortId: plannedItem.urlShortId,
+        reason: plannedItem.reason,
+        path: plannedItem.path,
+        fileId: plannedItem.fileId,
+        outputName: plannedItem.outputName,
+        uploadQueue: null,
+        pendingProviders: plannedItem.pendingProviders || []
+      });
+      continue;
     }
 
-    for (const result of containerResults) {
-      if (cancelled()) {
-        break;
-      }
-
-      if (!result?.counted) {
-        continue;
-      }
-
-      totalInstances += 1;
-      if (result.queued) {
-        queued.push(result.queued);
-      }
-      if (result.skipped) {
-        skipped.push(result.skipped);
-      }
+    if (plannedItem.action === 'finalize') {
+      const existingPipeline = await finalizeExistingFilePipeline(plannedItem.fileId, plannedItem.folderId, plannedItem.selectedProviders, {
+        waitForUpload: true
+      });
+      skipped.push({
+        urlShortId: plannedItem.urlShortId,
+        reason: plannedItem.reason,
+        path: plannedItem.path,
+        fileId: plannedItem.fileId,
+        outputName: plannedItem.outputName,
+        uploadQueue: existingPipeline?.uploadQueue || null,
+        pendingProviders: plannedItem.pendingProviders || []
+      });
+      continue;
     }
+
+    const requestedFilename = String(plannedItem.outputName || '').replace(/\.mp4$/i, '');
+    const queuedDownloadPromise = queueDownload({
+      urlShortId: plannedItem.urlShortId,
+      folderId: plannedItem.folderId,
+      outputName: requestedFilename,
+      selectedProviders: plannedItem.selectedProviders,
+      requestContext,
+      refererPath: plannedItem.refererPath || refererPath,
+      fallbackRefererPath: plannedItem.refererPath || '',
+      requestedFilename
+    });
+
+    if (runId && backgroundBatchRuns.has(runId)) {
+      const run = backgroundBatchRuns.get(runId);
+      run.downloadPromises.add(queuedDownloadPromise);
+      queuedDownloadPromise.finally(() => {
+        if (backgroundBatchRuns.has(runId)) {
+          const activeRun = backgroundBatchRuns.get(runId);
+          activeRun.downloadPromises?.delete(queuedDownloadPromise);
+          touchBackgroundBatchRun(activeRun);
+        }
+      });
+      touchBackgroundBatchRun(run);
+    }
+
+    queuedDownloadPromise.then((result) => {
+      if (result.cancelled) {
+        console.log(`[Zenius] Batch download ${plannedItem.urlShortId} was cancelled`);
+      } else {
+        console.log(`[Zenius] Batch download ${plannedItem.urlShortId} completed successfully`);
+        if (runId && backgroundBatchRuns.has(runId)) {
+          const run = backgroundBatchRuns.get(runId);
+          run.downloadCompletedCount = (run.downloadCompletedCount || 0) + 1;
+          touchBackgroundBatchRun(run);
+        }
+      }
+    }).catch((error) => {
+      console.error(`[Zenius] Batch download pipeline failed for ${plannedItem.urlShortId}:`, error.message);
+      if (runId && backgroundBatchRuns.has(runId)) {
+        const run = backgroundBatchRuns.get(runId);
+        run.downloadFailedCount = (run.downloadFailedCount || 0) + 1;
+        touchBackgroundBatchRun(run);
+      }
+    });
+
+    queued.push({
+      urlShortId: plannedItem.urlShortId,
+      name: plannedItem.instance?.name || null,
+      outputName: plannedItem.outputName,
+      path: plannedItem.path,
+      folderInput: plannedItem.folderInput,
+      folderId: plannedItem.folderId,
+      status: plannedItem.action === 'retry' ? 'retry-queued' : 'queued'
+    });
   }
 
   return { queued, skipped, totalInstances };
@@ -2032,6 +2517,24 @@ async function processBackgroundBatchRun(run, payload) {
     let hasMore = true;
     let iteration = 0;
 
+    const planningContext = normalizePlanningContext(payload.baseFolderInput, payload.selectedProviders);
+
+    if (!currentSessionId || !batchChainSessions.has(currentSessionId)) {
+      throw new Error('Preview plan session is missing');
+    }
+
+    const session = batchChainSessions.get(currentSessionId);
+    if (!session || session.planContextKey !== planningContext.key || !session.planReady) {
+      throw new Error('Preview plan is not ready for the requested folder/providers context');
+    }
+
+    run.rootCgName = session.rootCgName || run.rootCgName;
+    run.parentContainerName = resolveBatchParentContainerName(session) || run.parentContainerName;
+    run.totalContainers = Number(session.plannedItems?.length || 0);
+    run.hasMoreContainers = run.totalContainers > 0;
+    run.nextContainerOffset = 0;
+    run.chainErrors = Array.isArray(session.errors) ? [...session.errors] : [];
+
     while (hasMore) {
       if (run.status !== 'running') {
         break;
@@ -2042,23 +2545,29 @@ async function processBackgroundBatchRun(run, payload) {
         throw new Error(`Background batch iteration limit reached (${BACKGROUND_BATCH_MAX_ITERATIONS}). Increase ZENIUS_BACKGROUND_BATCH_MAX_ITERATIONS if needed.`);
       }
 
-      const chain = await buildBatchChain({
-        rootCgId: payload.rootCgId,
-        targetCgSelector: payload.targetCgSelector,
-        parentContainerName: payload.parentContainerName,
-        requestContext: payload.requestContext,
-        refererPath: payload.refererPath,
-        sessionId: currentSessionId,
-        containerOffset: nextOffset,
-        containerLimit: payload.containerLimit,
-        timeBudgetMs: payload.timeBudgetMs
-      });
+      const planSession = batchChainSessions.get(currentSessionId);
+      if (!planSession || planSession.planContextKey !== planningContext.key || !planSession.planReady) {
+        throw new Error('Preview plan session is no longer available');
+      }
 
-      currentSessionId = chain.sessionId || currentSessionId;
+      const totalPlannedItems = Number(planSession.plannedItems?.length || 0);
+      const chunkLimit = normalizeChunkLimit(payload.containerLimit) || clampPositiveInt(BACKGROUND_BATCH_CHUNK_SIZE, 6);
+      const chunkOffset = Math.min(nextOffset, totalPlannedItems);
+      const nextChunkOffset = Math.min(chunkOffset + chunkLimit, totalPlannedItems);
+      const chain = {
+        sessionId: currentSessionId,
+        containerOffset: chunkOffset,
+        containerLimit: chunkLimit,
+        totalContainers: totalPlannedItems,
+        nextContainerOffset: nextChunkOffset >= totalPlannedItems ? null : nextChunkOffset,
+        hasMoreContainers: nextChunkOffset < totalPlannedItems,
+        errors: Array.isArray(planSession.errors) ? [...planSession.errors] : []
+      };
+
       run.sessionId = currentSessionId;
-      run.rootCgName = chain.rootCgName || run.rootCgName;
-      run.parentContainerName = chain.parentContainerName || run.parentContainerName;
-      run.totalContainers = Number(chain.totalContainers || 0);
+      run.rootCgName = planSession.rootCgName || run.rootCgName;
+      run.parentContainerName = resolveBatchParentContainerName(planSession) || run.parentContainerName;
+      run.totalContainers = totalPlannedItems;
       run.hasMoreContainers = Boolean(chain.hasMoreContainers);
       run.nextContainerOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : 0;
       run.chainErrors = Array.isArray(chain.errors) ? [...chain.errors] : [];
@@ -2503,6 +3012,8 @@ const zeniusController = {
         parentContainerName: req.body?.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
         requestContext,
         refererPath: req.body?.refererPath,
+        baseFolderInput: stripWrappingQuotes(req.body?.folderId || ''),
+        selectedProviders: await normalizeProviders(req.body?.providers),
         sessionId: req.body?.sessionId,
         containerOffset: req.body?.containerOffset,
         containerLimit: req.body?.containerLimit,
@@ -2540,6 +3051,15 @@ const zeniusController = {
       const requestContext = buildRequestContext(req.body || {}, req);
       const selectedProviders = await normalizeProviders(req.body?.providers);
       const baseFolderInput = stripWrappingQuotes(req.body?.folderId || '');
+      const planningContext = normalizePlanningContext(baseFolderInput, selectedProviders);
+
+      if (!session || session.planContextKey !== planningContext.key || !session.planReady) {
+        return res.status(400).json({
+          success: false,
+          error: 'Preview plan is not ready for this folder/providers context. Call /batch-chain until hasMoreContainers=false and planReady=true, then start batch download.'
+        });
+      }
+
       const containerLimit = normalizeChunkLimit(req.body?.containerLimit)
         || clampPositiveInt(BACKGROUND_BATCH_CHUNK_SIZE, 6);
       const timeBudgetMs = normalizeBatchRequestBudgetMs(req.body?.timeBudgetMs);

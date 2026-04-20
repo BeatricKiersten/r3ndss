@@ -553,7 +553,8 @@ class UploaderService extends EventEmitter {
     }
   }
 
-  async getPendingUploadProviders(fileId, selectedProviders = null) {
+  async getPendingUploadProviders(fileId, selectedProviders = null, options = {}) {
+    const verifyRemote = options.verifyRemote !== false;
     const file = await this.db.getFile(fileId);
     const providerCatalog = await this._refreshProviderRuntime();
     const enabledProviders = providerCatalog
@@ -604,6 +605,11 @@ class UploaderService extends EventEmitter {
       const providerStatus = file.providers?.[provider] || null;
 
       if (providerStatus?.status === 'completed') {
+        if (!verifyRemote) {
+          skippedProviders.push({ provider, reason: 'already-uploaded' });
+          continue;
+        }
+
         const checkedStatus = await this._checkProviderFileStatus(provider, providerStatus);
         if (checkedStatus.remoteExists) {
           skippedProviders.push({ provider, reason: 'already-uploaded' });
