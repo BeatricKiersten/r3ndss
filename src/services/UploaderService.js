@@ -145,6 +145,11 @@ class UploaderService extends EventEmitter {
     return serialized;
   }
 
+  _isDbConnectionPressureError(error) {
+    const code = String(error?.code || '');
+    return code === 'ER_CON_COUNT_ERROR' || code === 'POOL_CONNLIMIT';
+  }
+
   _normalizeTerminalError(error, context = {}) {
     const message = String(error?.message || context.fallbackMessage || 'Upload failed').trim() || 'Upload failed';
     const code = String(error?.code || context.code || 'UPLOAD_FAILED').trim() || 'UPLOAD_FAILED';
@@ -1026,7 +1031,17 @@ class UploaderService extends EventEmitter {
     const resolvedTargetPath = this._safeResolvePath(filePath);
     if (!resolvedTargetPath) return;
 
-    const jobs = await this.db.getJobsByFile(fileId);
+    let jobs;
+    try {
+      jobs = await this.db.getJobsByFile(fileId);
+    } catch (error) {
+      if (this._isDbConnectionPressureError(error)) {
+        this._scheduleManagedLocalFileCleanup(fileId, resolvedTargetPath, 30000);
+        return;
+      }
+      throw error;
+    }
+
     const relatedJobs = jobs.filter((item) => this._safeResolvePath(item.metadata?.filePath) === resolvedTargetPath);
 
     if (relatedJobs.length === 0) {
@@ -1052,7 +1067,17 @@ class UploaderService extends EventEmitter {
 
     this._cancelScheduledCleanup(resolvedTargetPath);
 
-    const jobs = await this.db.getJobsByFile(fileId);
+    let jobs;
+    try {
+      jobs = await this.db.getJobsByFile(fileId);
+    } catch (error) {
+      if (this._isDbConnectionPressureError(error)) {
+        this._scheduleManagedLocalFileCleanup(fileId, resolvedTargetPath, 30000);
+        return;
+      }
+      throw error;
+    }
+
     const relatedJobs = jobs.filter((item) => this._safeResolvePath(item.metadata?.filePath) === resolvedTargetPath);
 
     if (relatedJobs.length === 0) {
