@@ -160,6 +160,7 @@ class DatabaseHandler {
 
     const pool = this.pool;
     this.pool = null;
+    this.initPromise = null;
     try {
       await pool.end();
     } catch (_) {
@@ -839,6 +840,11 @@ class DatabaseHandler {
   }
 
   async _ready() {
+    if (!this.pool && !this.initPromise) {
+      this.initError = null;
+      this._beginInitialization();
+    }
+
     if (this.initError && this._isRetryableInitError(this.initError)) {
       this.initError = null;
       this._beginInitialization();
@@ -3033,9 +3039,8 @@ class DatabaseHandler {
   }
 
   async close() {
-    if (this.pool) {
-      await this.pool.end();
-    }
+    await this._disposePool();
+    this.initError = null;
   }
 }
 
