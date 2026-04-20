@@ -26,6 +26,7 @@ const STATIC_PROVIDER_IDS = getStaticProviderIds();
 const FILE_PROVIDER_EMPTY_HISTORY = stringifyJson([]);
 const DB_INIT_RETRY_ATTEMPTS = Math.max(1, Number(process.env.DB_INIT_RETRY_ATTEMPTS || 3));
 const DB_INIT_RETRY_DELAY_MS = Math.max(250, Number(process.env.DB_INIT_RETRY_DELAY_MS || 1500));
+const DB_METADATA_CACHE_TTL_MS = Math.max(250, Number(process.env.DB_METADATA_CACHE_TTL_MS || 1000));
 
 function toInt(value, fallback = 0) {
   const parsed = Number(value);
@@ -118,6 +119,8 @@ class DatabaseHandler {
     this.startupMaintenancePromise = null;
     this.initPromise = null;
     this.initError = null;
+    this.nextInitAttemptAt = 0;
+    this.metadataCache = new Map();
     this._beginInitialization();
   }
 
@@ -129,9 +132,13 @@ class DatabaseHandler {
     this.initPromise = this._initialize()
       .then(() => {
         this.initError = null;
+        this.nextInitAttemptAt = 0;
       })
       .catch((error) => {
         this.initError = error;
+        if (this._isRetryableInitError(error)) {
+          this.nextInitAttemptAt = Date.now() + DB_INIT_RETRY_DELAY_MS;
+        }
         throw error;
       })
       .finally(() => {
@@ -166,6 +173,58 @@ class DatabaseHandler {
     } catch (_) {
       // Ignore pool shutdown errors during reconnect.
     }
+  }
+
+  _invalidateMetadataCache() {
+    this.metadataCache.clear();
+  }
+
+  async _getCachedMetadata(key, loader, ttlMs = DB_METADATA_CACHE_TTL_MS) {
+    const now = Date.now();
+    const cached = this.metadataCache.get(key);
+
+    if (cached?.value !== undefined && cached.expiresAt > now) {
+      return cached.value;
+    }
+
+    if (cached?.promise) {
+      return cached.promise;
+    }
+
+    const promise = Promise.resolve()
+      .then(loader)
+      .then((value) => {
+        this.metadataCache.set(key, {
+          value,
+          expiresAt: Date.now() + ttlMs,
+          promise: null
+        });
+        return value;
+      })
+      .catch((error) => {
+        this.metadataCache.delete(key);
+        throw error;
+      });
+
+    this.metadataCache.set(key, {
+      value: cached?.value,
+      expiresAt: cached?.expiresAt || 0,
+      promise
+    });
+
+    return promise;
+  }
+
+  _getPoolOrThrow() {
+    if (!this.pool) {
+      const error = this.initError || new Error('Database pool is not ready');
+      if (!error.code) {
+        error.code = 'DB_NOT_READY';
+      }
+      throw error;
+    }
+
+    return this.pool;
   }
 
   async _sleep(ms) {
@@ -456,6 +515,8 @@ class DatabaseHandler {
     let lastError = null;
 
     for (let attempt = 1; attempt <= DB_INIT_RETRY_ATTEMPTS; attempt += 1) {
+      let pool = null;
+
       try {
         if (this.mysql.autoCreateDatabase) {
           await this._createDatabaseIfNeeded();
@@ -477,13 +538,26 @@ class DatabaseHandler {
           poolConfig.ssl = { rejectUnauthorized: this.mysql.sslRejectUnauthorized };
         }
 
-        this.pool = mysql.createPool(poolConfig);
-        await this._createSchema();
-        await this._seedDefaults();
+        pool = mysql.createPool(poolConfig);
+        await this._createSchema(pool);
+        await this._seedDefaults(pool);
+        this.pool = pool;
+        this._invalidateMetadataCache();
         return;
       } catch (error) {
         lastError = error;
-        await this._disposePool();
+
+        if (pool) {
+          try {
+            await pool.end();
+          } catch (_) {
+            // Ignore pool shutdown errors during reconnect.
+          }
+        }
+
+        if (this.pool === pool) {
+          this.pool = null;
+        }
 
         if (!this._isRetryableInitError(error) || attempt >= DB_INIT_RETRY_ATTEMPTS) {
           throw error;
@@ -522,7 +596,7 @@ class DatabaseHandler {
     }
   }
 
-  async _createSchema() {
+  async _createSchema(pool = this._getPoolOrThrow()) {
     const statements = [
       `CREATE TABLE IF NOT EXISTS folders (
         id VARCHAR(64) PRIMARY KEY,
@@ -664,14 +738,14 @@ class DatabaseHandler {
     ];
 
     for (const statement of statements) {
-      await this.pool.query(statement);
+      await pool.query(statement);
     }
   }
 
-  async _seedDefaults() {
+  async _seedDefaults(pool = this._getPoolOrThrow()) {
     const now = this._now();
 
-    await this.pool.query(
+    await pool.query(
       `INSERT INTO folders (id, name, parent_id, path, created_at, updated_at)
        VALUES ('root', 'Root', NULL, '/', ?, ?)
        ON DUPLICATE KEY UPDATE name = VALUES(name), path = VALUES(path), updated_at = VALUES(updated_at)`,
@@ -679,14 +753,14 @@ class DatabaseHandler {
     );
 
     for (const provider of STATIC_PROVIDER_IDS) {
-      await this.pool.query(
+      await pool.query(
         `INSERT INTO provider_configs (provider, enabled, config, updated_at)
          VALUES (?, 1, '{}', ?)
          ON DUPLICATE KEY UPDATE provider = provider`,
         [provider, now]
       );
 
-      await this.pool.query(
+      await pool.query(
         `INSERT INTO provider_checks (provider, payload, checked_at)
          VALUES (?, NULL, NULL)
          ON DUPLICATE KEY UPDATE provider = provider`,
@@ -694,14 +768,14 @@ class DatabaseHandler {
       );
     }
 
-    await this.pool.query(
+    await pool.query(
       `INSERT INTO system_state (id, last_check, next_scheduled_check, primary_provider, updated_at)
        VALUES (1, NULL, NULL, 'catbox', ?)
        ON DUPLICATE KEY UPDATE id = id`,
       [now]
     );
 
-    await this.pool.query(
+    await pool.query(
       `INSERT INTO rclone_state (id, default_profile_id, last_validation, last_validated_at, updated_at)
        VALUES (1, NULL, NULL, NULL, ?)
        ON DUPLICATE KEY UPDATE id = id`,
@@ -845,7 +919,11 @@ class DatabaseHandler {
       this._beginInitialization();
     }
 
-    if (this.initError && this._isRetryableInitError(this.initError)) {
+    if (!this.initPromise && this.initError && this._isRetryableInitError(this.initError)) {
+      const cooldownMs = Math.max(0, this.nextInitAttemptAt - Date.now());
+      if (cooldownMs > 0) {
+        await this._sleep(cooldownMs);
+      }
       this.initError = null;
       this._beginInitialization();
     }
@@ -855,6 +933,7 @@ class DatabaseHandler {
     }
 
     await this.initPromise;
+    this._getPoolOrThrow();
   }
 
   async waitForConnectionOnly() {
@@ -881,7 +960,7 @@ class DatabaseHandler {
 
   async _withTransaction(fn) {
     await this._ready();
-    const connection = await this.pool.getConnection();
+    const connection = await this._getPoolOrThrow().getConnection();
 
     try {
       await connection.beginTransaction();
@@ -978,12 +1057,13 @@ class DatabaseHandler {
 
   async _getSystemState() {
     await this._ready();
-    const [rows] = await this.pool.query('SELECT * FROM system_state WHERE id = 1 LIMIT 1');
+    const pool = this._getPoolOrThrow();
+    const [rows] = await pool.query('SELECT * FROM system_state WHERE id = 1 LIMIT 1');
     const state = rows[0] || null;
 
     if (!state) {
       const now = this._now();
-      await this.pool.query(
+      await pool.query(
         `INSERT INTO system_state (id, last_check, next_scheduled_check, primary_provider, updated_at)
          VALUES (1, NULL, NULL, 'catbox', ?)`,
         [now]
@@ -1055,25 +1135,27 @@ class DatabaseHandler {
   }
 
   async _getSystemPayload() {
-    const state = await this._getSystemState();
-    const rclone = await this.getRcloneConfig();
-    const providerConfigs = await this.getProviderConfigs();
-    const providerCatalog = this._buildProviderCatalog(providerConfigs, rclone);
-    const providerChecks = await this.getProviderCheckStatuses();
+    return this._getCachedMetadata('system-payload', async () => {
+      const state = await this._getSystemState();
+      const rclone = await this.getRcloneConfig();
+      const providerConfigs = await this.getProviderConfigs();
+      const providerCatalog = this._buildProviderCatalog(providerConfigs, rclone);
+      const providerChecks = await this.getProviderCheckStatuses();
 
-    const hasPrimary = providerCatalog.some((item) => item.id === state.primary_provider);
-    const fallbackPrimary = providerCatalog.find((item) => item.enabled)?.id
-      || providerCatalog[0]?.id
-      || 'catbox';
+      const hasPrimary = providerCatalog.some((item) => item.id === state.primary_provider);
+      const fallbackPrimary = providerCatalog.find((item) => item.enabled)?.id
+        || providerCatalog[0]?.id
+        || 'catbox';
 
-    return {
-      lastCheck: state.last_check,
-      nextScheduledCheck: state.next_scheduled_check,
-      primaryProvider: hasPrimary ? state.primary_provider : fallbackPrimary,
-      providerChecks,
-      providerCatalog,
-      rclone
-    };
+      return {
+        lastCheck: state.last_check,
+        nextScheduledCheck: state.next_scheduled_check,
+        primaryProvider: hasPrimary ? state.primary_provider : fallbackPrimary,
+        providerChecks,
+        providerCatalog,
+        rclone
+      };
+    });
   }
 
   // ==================== FOLDER OPERATIONS ====================
@@ -2261,18 +2343,20 @@ class DatabaseHandler {
   // ==================== PROVIDER CONFIG OPERATIONS ====================
 
   async _getProviderConfigRowsMap() {
-    const [rows] = await this.pool.query('SELECT * FROM provider_configs');
-    const configs = {};
+    return this._getCachedMetadata('provider-config-rows', async () => {
+      const [rows] = await this._getPoolOrThrow().query('SELECT * FROM provider_configs');
+      const configs = {};
 
-    for (const row of rows) {
-      configs[row.provider] = {
-        enabled: toBool(row.enabled),
-        config: parseJson(row.config, {}) || {},
-        updatedAt: row.updated_at || null
-      };
-    }
+      for (const row of rows) {
+        configs[row.provider] = {
+          enabled: toBool(row.enabled),
+          config: parseJson(row.config, {}) || {},
+          updatedAt: row.updated_at || null
+        };
+      }
 
-    return configs;
+      return configs;
+    });
   }
 
   async updateProviderConfig(provider, config) {
@@ -2311,6 +2395,8 @@ class DatabaseHandler {
       [provider, next.enabled ? 1 : 0, stringifyJson(next.config), next.updatedAt]
     );
 
+    this._invalidateMetadataCache();
+
     return {
       enabled: next.enabled,
       config: next.config,
@@ -2320,59 +2406,63 @@ class DatabaseHandler {
 
   async getProviderConfigs() {
     await this._ready();
-    const rowConfigs = await this._getProviderConfigRowsMap();
-    const rcloneConfig = await this.getRcloneConfig();
-    const catalog = this._buildProviderCatalog(rowConfigs, rcloneConfig);
+    return this._getCachedMetadata('provider-configs', async () => {
+      const rowConfigs = await this._getProviderConfigRowsMap();
+      const rcloneConfig = await this.getRcloneConfig();
+      const catalog = this._buildProviderCatalog(rowConfigs, rcloneConfig);
 
-    const configs = {};
-    for (const provider of catalog) {
-      const row = rowConfigs[provider.id] || null;
-      configs[provider.id] = {
-        enabled: provider.enabled !== false,
-        config: row?.config || {},
-        updatedAt: row?.updatedAt || null,
-        name: provider.name,
-        kind: provider.kind,
-        source: provider.source,
-        profileId: provider.profileId || null,
-        remoteName: provider.remoteName || null,
-        remoteType: provider.remoteType || null,
-        supportsStream: provider.supportsStream !== false,
-        supportsReupload: provider.supportsReupload !== false,
-        supportsCopy: provider.supportsCopy !== false,
-        configured: provider.configured !== false
-      };
-    }
+      const configs = {};
+      for (const provider of catalog) {
+        const row = rowConfigs[provider.id] || null;
+        configs[provider.id] = {
+          enabled: provider.enabled !== false,
+          config: row?.config || {},
+          updatedAt: row?.updatedAt || null,
+          name: provider.name,
+          kind: provider.kind,
+          source: provider.source,
+          profileId: provider.profileId || null,
+          remoteName: provider.remoteName || null,
+          remoteType: provider.remoteType || null,
+          supportsStream: provider.supportsStream !== false,
+          supportsReupload: provider.supportsReupload !== false,
+          supportsCopy: provider.supportsCopy !== false,
+          configured: provider.configured !== false
+        };
+      }
 
-    for (const [providerId, row] of Object.entries(rowConfigs)) {
-      if (configs[providerId]) continue;
-      configs[providerId] = {
-        enabled: row.enabled !== false,
-        config: row.config || {},
-        updatedAt: row.updatedAt || null,
-        name: providerId,
-        kind: isRcloneProfileProviderId(providerId) ? 'rclone' : 'unknown',
-        source: 'config',
-        profileId: parseRcloneProfileId(providerId),
-        remoteName: null,
-        remoteType: null,
-        supportsStream: false,
-        supportsReupload: true,
-        supportsCopy: true,
-        configured: true
-      };
-    }
+      for (const [providerId, row] of Object.entries(rowConfigs)) {
+        if (configs[providerId]) continue;
+        configs[providerId] = {
+          enabled: row.enabled !== false,
+          config: row.config || {},
+          updatedAt: row.updatedAt || null,
+          name: providerId,
+          kind: isRcloneProfileProviderId(providerId) ? 'rclone' : 'unknown',
+          source: 'config',
+          profileId: parseRcloneProfileId(providerId),
+          remoteName: null,
+          remoteType: null,
+          supportsStream: false,
+          supportsReupload: true,
+          supportsCopy: true,
+          configured: true
+        };
+      }
 
-    return configs;
+      return configs;
+    });
   }
 
   async getProviderCatalog(options = {}) {
     await this._ready();
 
     const includeDisabled = options.includeDisabled !== false;
-    const rowConfigs = await this._getProviderConfigRowsMap();
-    const rcloneConfig = await this.getRcloneConfig();
-    const catalog = this._buildProviderCatalog(rowConfigs, rcloneConfig);
+    const catalog = await this._getCachedMetadata('provider-catalog', async () => {
+      const rowConfigs = await this._getProviderConfigRowsMap();
+      const rcloneConfig = await this.getRcloneConfig();
+      return this._buildProviderCatalog(rowConfigs, rcloneConfig);
+    });
 
     if (includeDisabled) {
       return catalog;
@@ -2524,6 +2614,8 @@ class DatabaseHandler {
       [timestamp, nextCheck, this._now()]
     );
 
+    this._invalidateMetadataCache();
+
     return {
       lastCheck: timestamp,
       nextScheduledCheck: nextCheck
@@ -2572,37 +2664,42 @@ class DatabaseHandler {
       [provider, this._now()]
     );
 
+    this._invalidateMetadataCache();
+
     return provider;
   }
 
   async getRcloneConfig() {
     await this._ready();
 
-    const [remoteRows] = await this.pool.query('SELECT * FROM rclone_remotes ORDER BY name ASC');
-    const [profileRows] = await this.pool.query('SELECT * FROM rclone_sync_profiles ORDER BY name ASC');
-    const [stateRows] = await this.pool.query('SELECT * FROM rclone_state WHERE id = 1 LIMIT 1');
-    const state = stateRows[0] || {};
+    return this._getCachedMetadata('rclone-config', async () => {
+      const pool = this._getPoolOrThrow();
+      const [remoteRows] = await pool.query('SELECT * FROM rclone_remotes ORDER BY name ASC');
+      const [profileRows] = await pool.query('SELECT * FROM rclone_sync_profiles ORDER BY name ASC');
+      const [stateRows] = await pool.query('SELECT * FROM rclone_state WHERE id = 1 LIMIT 1');
+      const state = stateRows[0] || {};
 
-    return {
-      remotes: remoteRows.map((row) => ({
-        name: row.name,
-        type: row.type,
-        parameters: parseJson(row.parameters, {}) || {}
-      })),
-      syncProfiles: profileRows.map((row) => ({
-        providerId: buildRcloneProfileProviderId(row.id),
-        id: row.id,
-        name: row.name,
-        provider: row.provider || 'rclone',
-        remoteName: row.remote_name,
-        destinationPath: row.destination_path || '',
-        publicBaseUrl: row.public_base_url || '',
-        enabled: toBool(row.enabled)
-      })),
-      defaultProfileId: state.default_profile_id || null,
-      lastValidation: parseJson(state.last_validation, null),
-      lastValidatedAt: state.last_validated_at || null
-    };
+      return {
+        remotes: remoteRows.map((row) => ({
+          name: row.name,
+          type: row.type,
+          parameters: parseJson(row.parameters, {}) || {}
+        })),
+        syncProfiles: profileRows.map((row) => ({
+          providerId: buildRcloneProfileProviderId(row.id),
+          id: row.id,
+          name: row.name,
+          provider: row.provider || 'rclone',
+          remoteName: row.remote_name,
+          destinationPath: row.destination_path || '',
+          publicBaseUrl: row.public_base_url || '',
+          enabled: toBool(row.enabled)
+        })),
+        defaultProfileId: state.default_profile_id || null,
+        lastValidation: parseJson(state.last_validation, null),
+        lastValidatedAt: state.last_validated_at || null
+      };
+    });
   }
 
   async updateRcloneConfig(payload = {}) {
@@ -2738,6 +2835,8 @@ class DatabaseHandler {
       await this._migrateLegacyRcloneProviderRows(connection);
     });
 
+    this._invalidateMetadataCache();
+
     return this.getRcloneConfig();
   }
 
@@ -2751,6 +2850,8 @@ class DatabaseHandler {
        WHERE id = 1`,
       [stringifyJson(result), now, now]
     );
+
+    this._invalidateMetadataCache();
 
     return this.getRcloneConfig();
   }
@@ -2774,24 +2875,28 @@ class DatabaseHandler {
       [provider, stringifyJson(payload), checkedAt]
     );
 
+    this._invalidateMetadataCache();
+
     return payload;
   }
 
   async getProviderCheckStatuses() {
     await this._ready();
-    const [rows] = await this.pool.query('SELECT * FROM provider_checks');
-    const catalog = await this.getProviderCatalog();
+    return this._getCachedMetadata('provider-check-statuses', async () => {
+      const [rows] = await this._getPoolOrThrow().query('SELECT * FROM provider_checks');
+      const catalog = await this.getProviderCatalog();
 
-    const checks = {};
-    for (const provider of catalog) {
-      checks[provider.id] = null;
-    }
+      const checks = {};
+      for (const provider of catalog) {
+        checks[provider.id] = null;
+      }
 
-    for (const row of rows) {
-      checks[row.provider] = parseJson(row.payload, null);
-    }
+      for (const row of rows) {
+        checks[row.provider] = parseJson(row.payload, null);
+      }
 
-    return checks;
+      return checks;
+    });
   }
 
   async getWebhookConfig() {
@@ -2815,6 +2920,7 @@ class DatabaseHandler {
       'INSERT INTO provider_checks (provider, payload, checked_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE payload = ?, checked_at = ?',
       ['__webhook_config', payload, now, payload, now]
     );
+    this._invalidateMetadataCache();
     return config;
   }
 
