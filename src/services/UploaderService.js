@@ -47,6 +47,8 @@ class UploaderService extends EventEmitter {
     super();
     this.db = dbHandler;
     this.isRunning = false;
+    this.isQueueProcessing = false;
+    this.queueProcessRequested = false;
     this.activeUploads = new Map(); // Track active upload streams
     this.processingJobIds = new Set();
     this.localCleanupTimers = new Map();
@@ -290,14 +292,14 @@ class UploaderService extends EventEmitter {
     await this._recoverStaleJobs();
     
     this.processInterval = setInterval(() => {
-      this._processQueue();
+      void this._processQueue();
     }, 2000);
 
     this.staleJobCheckInterval = setInterval(() => {
       this._recoverStaleJobs();
     }, 60000);
 
-    this._processQueue();
+    void this._processQueue();
   }
 
   /**
@@ -1570,6 +1572,24 @@ class UploaderService extends EventEmitter {
   }
 
   async _processQueue() {
+    if (this.isQueueProcessing) {
+      this.queueProcessRequested = true;
+      return;
+    }
+
+    this.isQueueProcessing = true;
+
+    try {
+      do {
+        this.queueProcessRequested = false;
+        await this._processQueueCycle();
+      } while (this.isRunning && this.queueProcessRequested);
+    } finally {
+      this.isQueueProcessing = false;
+    }
+  }
+
+  async _processQueueCycle() {
     if (!this.isRunning) return;
 
     let uploadJobs = [];
@@ -1578,9 +1598,7 @@ class UploaderService extends EventEmitter {
     try {
       await this._refreshProviderRuntime();
 
-      // Keep scanning beyond the first page so already-claimed pending jobs do not
-      // starve newer jobs sitting behind the LIMIT window.
-      const claimableJobs = await this._getClaimablePendingJobs(200, 20);
+      const claimableJobs = await this._getClaimablePendingJobs(200);
       uploadJobs = claimableJobs.filter((j) => j.type === 'upload');
       transferJobs = claimableJobs.filter((j) => j.type === 'transfer');
 
@@ -1624,39 +1642,18 @@ class UploaderService extends EventEmitter {
     }
   }
 
-  async _getClaimablePendingJobs(maxScan = 200, pageSize = 20) {
+  async _getClaimablePendingJobs(maxScan = 200) {
     const limit = Math.max(1, Number(maxScan) || 200);
-    const batchSize = Math.max(1, Number(pageSize) || 20);
     const claimable = [];
-    const seen = new Set();
+    const jobs = await this.db.getPendingJobs(limit);
 
-    while (seen.size < limit) {
-      const remaining = limit - seen.size;
-      const jobs = await this.db.getPendingJobs(Math.min(batchSize, remaining));
-      if (jobs.length === 0) {
-        break;
+    for (const job of jobs) {
+      if (this.processingJobIds.has(job.id)) {
+        continue;
       }
 
-      let discoveredNewJob = false;
-      for (const job of jobs) {
-        if (seen.has(job.id)) {
-          continue;
-        }
-
-        seen.add(job.id);
-        discoveredNewJob = true;
-
-        if (this.processingJobIds.has(job.id)) {
-          continue;
-        }
-
-        this.processingJobIds.add(job.id);
-        claimable.push(job);
-      }
-
-      if (!discoveredNewJob || jobs.length < Math.min(batchSize, remaining)) {
-        break;
-      }
+      this.processingJobIds.add(job.id);
+      claimable.push(job);
     }
 
     return claimable;

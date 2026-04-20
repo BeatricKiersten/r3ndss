@@ -585,6 +585,7 @@ class DatabaseHandler {
         completed_at VARCHAR(40) NULL,
         heartbeat_at VARCHAR(40) NULL,
         INDEX idx_jobs_status (status),
+        INDEX idx_jobs_status_created (status, created_at),
         INDEX idx_jobs_file (file_id),
         INDEX idx_jobs_type (type),
         INDEX idx_jobs_created (created_at),
@@ -810,6 +811,16 @@ class DatabaseHandler {
           return indexes.length === 0;
         },
         sql: 'ALTER TABLE files ADD INDEX idx_files_folder_name (folder_id, name(255))'
+      },
+      {
+        name: 'add_jobs_status_created_index',
+        check: async () => {
+          const [indexes] = await this.pool.query(
+            "SHOW INDEX FROM jobs WHERE Key_name = 'idx_jobs_status_created'"
+          );
+          return indexes.length === 0;
+        },
+        sql: 'ALTER TABLE jobs ADD INDEX idx_jobs_status_created (status, created_at)'
       }
     ];
 
