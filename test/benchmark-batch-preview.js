@@ -486,6 +486,66 @@ async function resolveFolderId(folderInput) {
   return db().ensureFolderPath(normalized).then((folder) => folder.id);
 }
 
+function normalizeFolderInputKey(folderInput) {
+  const normalized = String(folderInput || '')
+    .replace(/\\/g, '/')
+    .trim();
+
+  if (!normalized || normalized === '/' || normalized.toLowerCase() === 'root') {
+    return 'root';
+  }
+
+  const cleaned = normalized
+    .replace(/^\/+/, '')
+    .replace(/\/+$/g, '')
+    .split('/')
+    .map((segment) => String(segment || '').trim())
+    .filter(Boolean)
+    .join('/');
+
+  return cleaned || 'root';
+}
+
+function toFolderInputKeyFromDbPath(dbPath) {
+  const normalized = String(dbPath || '')
+    .replace(/\\/g, '/')
+    .trim();
+
+  if (!normalized || normalized === '/') {
+    return 'root';
+  }
+
+  const cleaned = normalized
+    .replace(/^\/+/, '')
+    .replace(/\/+$/g, '')
+    .split('/')
+    .map((segment) => String(segment || '').trim())
+    .filter(Boolean)
+    .join('/');
+
+  return cleaned || 'root';
+}
+
+async function loadExistingFolderMap() {
+  const rows = await runDbQuery('SELECT id, path FROM folders');
+  const folderIdByInputKey = new Map();
+
+  for (const row of rows || []) {
+    const id = String(row?.id || '').trim();
+    const key = toFolderInputKeyFromDbPath(row?.path);
+    if (!id || !key || folderIdByInputKey.has(key)) {
+      continue;
+    }
+    folderIdByInputKey.set(key, id);
+  }
+
+  if (!folderIdByInputKey.has('root')) {
+    folderIdByInputKey.set('root', 'root');
+  }
+
+  return folderIdByInputKey;
+}
+
 async function resolveFolderIdWithCache(folderCache, folderInput) {
   const cacheKey = String(folderInput || 'root');
   if (folderCache.has(cacheKey)) {
@@ -517,6 +577,7 @@ async function buildExistingFileLookup(containers, baseFolderInput, folderCache,
     plannedFolders: 0,
     resolvedFolders: 0,
     listedFolders: 0,
+    missingFolders: 0,
     totalChunks: 0,
     completedChunks: 0,
     matchedFiles: 0
@@ -526,7 +587,7 @@ async function buildExistingFileLookup(containers, baseFolderInput, folderCache,
     const elapsed = formatDuration(Date.now() - startedAt);
     const mode = force ? 'snapshot' : 'heartbeat';
     console.log(
-      `[PREFETCH-PROGRESS] mode=${mode} phase=${progress.phase} resolvedFolders:${progress.resolvedFolders}/${progress.plannedFolders} listedFolders:${progress.listedFolders}/${progress.plannedFolders} chunks:${progress.completedChunks}/${progress.totalChunks} matchedFiles:${progress.matchedFiles} elapsed:${elapsed}`
+      `[PREFETCH-PROGRESS] mode=${mode} phase=${progress.phase} resolvedFolders:${progress.resolvedFolders}/${progress.plannedFolders} listedFolders:${progress.listedFolders}/${progress.plannedFolders} missingFolders:${progress.missingFolders} chunks:${progress.completedChunks}/${progress.totalChunks} matchedFiles:${progress.matchedFiles} elapsed:${elapsed}`
     );
   };
 
@@ -564,45 +625,91 @@ async function buildExistingFileLookup(containers, baseFolderInput, folderCache,
   progress.phase = 'resolving-folders';
   logPrefetchProgress(true);
 
+  const existingFolderMap = await loadExistingFolderMap();
   const folderIdByInput = new Map();
   for (const folderInput of folderInputs) {
-    const folderId = await resolveFolderIdWithCache(folderCache, folderInput);
+    const folderKey = normalizeFolderInputKey(folderInput);
+    const folderId = existingFolderMap.get(folderKey) || null;
     folderIdByInput.set(folderInput, folderId);
     progress.resolvedFolders += 1;
+    if (!folderId) {
+      progress.missingFolders += 1;
+    }
   }
 
   const existingByFolderId = new Map();
-  const folderInputChunks = chunkArray(folderInputs, chunkSize);
+  const plannedNamesByFolderId = new Map();
+  for (const [folderInput, plannedNames] of plannedByFolderInput.entries()) {
+    const folderId = folderIdByInput.get(folderInput);
+    if (!folderId) {
+      continue;
+    }
+
+    if (!plannedNamesByFolderId.has(folderId)) {
+      plannedNamesByFolderId.set(folderId, new Set());
+    }
+
+    const merged = plannedNamesByFolderId.get(folderId);
+    for (const plannedName of plannedNames) {
+      merged.add(plannedName);
+    }
+  }
+
+  const resolvableFolderIds = Array.from(plannedNamesByFolderId.keys());
+  const folderIdChunks = chunkArray(resolvableFolderIds, chunkSize);
   progress.phase = 'listing-files';
-  progress.totalChunks = folderInputChunks.length;
+  progress.totalChunks = folderIdChunks.length;
   logPrefetchProgress(true);
 
-  for (const folderInputChunk of folderInputChunks) {
-    await Promise.all(folderInputChunk.map(async (folderInput) => {
-      const folderId = folderIdByInput.get(folderInput);
-      if (!folderId) {
-        progress.listedFolders += 1;
-        return;
-      }
+  for (const folderIdChunk of folderIdChunks) {
+    if (folderIdChunk.length > 0) {
+      const placeholders = folderIdChunk.map(() => '?').join(', ');
+      const rows = await runDbQuery(
+        `SELECT id, folder_id, name, status, created_at
+           FROM files
+          WHERE folder_id IN (${placeholders})
+          ORDER BY created_at DESC`,
+        folderIdChunk
+      );
 
-      const plannedNames = plannedByFolderInput.get(folderInput) || new Set();
-      const files = await db().listFiles(folderId);
-      const byName = new Map();
-      for (const file of files || []) {
-        const nameKey = String(file?.name || '').trim();
-        if (!nameKey || !plannedNames.has(nameKey) || byName.has(nameKey)) {
+      for (const row of rows || []) {
+        const folderId = String(row?.folder_id || '').trim();
+        const nameKey = String(row?.name || '').trim();
+        if (!folderId || !nameKey) {
           continue;
         }
-        byName.set(nameKey, file);
+
+        const plannedNames = plannedNamesByFolderId.get(folderId);
+        if (!plannedNames || !plannedNames.has(nameKey)) {
+          continue;
+        }
+
+        if (!existingByFolderId.has(folderId)) {
+          existingByFolderId.set(folderId, new Map());
+        }
+
+        const byName = existingByFolderId.get(folderId);
+        if (byName.has(nameKey)) {
+          continue;
+        }
+
+        byName.set(nameKey, {
+          id: row.id,
+          name: row.name,
+          folder_id: row.folder_id,
+          status: row.status
+        });
         progress.matchedFiles += 1;
       }
-      existingByFolderId.set(folderId, byName);
-      progress.listedFolders += 1;
-    }));
+    }
+
+    progress.listedFolders += folderIdChunk.length;
 
     progress.completedChunks += 1;
     logPrefetchProgress(true);
   }
+
+  progress.listedFolders = progress.plannedFolders;
 
   progress.phase = 'completed';
   logPrefetchProgress(true);
@@ -610,7 +717,8 @@ async function buildExistingFileLookup(containers, baseFolderInput, folderCache,
   return {
     folderIdByInput,
     existingByFolderId,
-    plannedFolderCount: folderInputs.length
+    plannedFolderCount: folderInputs.length,
+    missingFolderCount: progress.missingFolders
   };
   } finally {
     clearInterval(prefetchTicker);
@@ -657,10 +765,10 @@ async function buildProviderLabelForInstance({
   const outputFileName = `${outputBaseName}.mp4`;
   const chainPath = String(instance.path || container.path || '').trim();
   const finalFolderInput = joinFolderPaths(baseFolderInput, chainPath) || 'root';
-  const folderId = folderIdByInput?.get(finalFolderInput)
-    || await resolveFolderIdWithCache(folderCache, finalFolderInput);
-  const existingFile = existingByFolderId?.get(folderId)?.get(outputFileName)
-    || await db().findFileByNameInFolder(folderId, outputFileName);
+  const folderId = folderIdByInput?.get(finalFolderInput) || null;
+  const existingFile = folderId
+    ? (existingByFolderId?.get(folderId)?.get(outputFileName) || null)
+    : null;
 
   const result = {
     urlShortId,
@@ -986,7 +1094,12 @@ async function main() {
   }
   const existingFileLookup = includeProviderLabels
     ? await buildExistingFileLookup(previewSeedContainers, baseFolderInput, folderCache, folderPrefetchChunkSize)
-    : { folderIdByInput: new Map(), existingByFolderId: new Map(), plannedFolderCount: 0 };
+    : {
+      folderIdByInput: new Map(),
+      existingByFolderId: new Map(),
+      plannedFolderCount: 0,
+      missingFolderCount: 0
+    };
   if (includeProviderLabels) {
     console.log(`[PREFETCH] Done. plannedFolders=${existingFileLookup.plannedFolderCount}`);
   }
@@ -1010,6 +1123,7 @@ async function main() {
     providerCheckConcurrency,
     folderPrefetchChunkSize,
     prefetchFolderCount: existingFileLookup.plannedFolderCount,
+    prefetchMissingFolderCount: existingFileLookup.missingFolderCount,
     baseFolderInput: baseFolderInput || null,
     selectedProviders,
     authSource: shouldLoadFromDb ? 'database' : 'env-or-flags',
@@ -1030,7 +1144,7 @@ async function main() {
     existingByFolderId: existingFileLookup.existingByFolderId
   };
 
-  console.log(`[PLANNING] includeProviderLabels=${includeProviderLabels}, prefetch folders=${existingFileLookup.plannedFolderCount}`);
+  console.log(`[PLANNING] includeProviderLabels=${includeProviderLabels}, prefetch folders=${existingFileLookup.plannedFolderCount}, missingFolders=${existingFileLookup.missingFolderCount}`);
 
   const runners = {
     parallel: () => runLimitedParallel(containers, options, includeMetadata, containerConcurrency, metadataConcurrency, planning)
