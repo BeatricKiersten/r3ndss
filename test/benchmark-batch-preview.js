@@ -117,16 +117,12 @@ function logProgress(container, durationMs, force = false, labelInfo = null) {
 
   const nameKey = String(container?.name || container?.containerName || container?.urlShortId || 'unknown').slice(0, 40);
 
-  if (labelInfo) {
+  if (labelInfo && labelInfo.label) {
     if (labelInfo.label === 'existing') {
       progressState.duplicateCount += 1;
-      console.log(`[DUP] ${nameKey.slice(0,40)} already exists`);
     } else {
       progressState.newCount += 1;
-      console.log(`[NEW] ${nameKey.slice(0,40)} (${durationMs}ms)`);
     }
-  } else {
-    console.log(`[${progressState.completed}/${progressState.total}] ${nameKey.slice(0,35)} (${durationMs}ms)`);
   }
 }
 
@@ -567,6 +563,8 @@ async function buildProviderLabelForInstance({
   const existingFile = existingByFolderId?.get(folderId)?.get(outputFileName)
     || await db().findFileByNameInFolder(folderId, outputFileName);
 
+  console.log(`[DB-CHECK] urlShortId=${urlShortId} folderId=${folderId} fileName="${outputFileName}" existing=${existingFile ? 'YES(' + existingFile.id + ',' + existingFile.status + ')' : 'NO'}`);
+
   const result = {
     urlShortId,
     outputName: outputFileName,
@@ -690,12 +688,13 @@ function summarizeInstanceLabels(instances = []) {
 }
 
 async function runLimitedParallel(containers, options, includeMetadata, containerConcurrency, metadataConcurrency, planning) {
+  const isProviderLabelRun = planning.includeProviderLabels;
   progressState.total = containers.length;
   progressState.completed = 0;
   progressState.duplicateCount = 0;
   progressState.newCount = 0;
 
-  console.log(`[START] Processing ${containers.length} containers (concurrency=${containerConcurrency})`);
+  console.log(`[START${isProviderLabelRun ? '-PROVIDERS' : ''}] ${containers.length} containers (concurrency=${containerConcurrency}, providerLabels=${isProviderLabelRun})`);
 
   const limit = pLimit(containerConcurrency);
   const results = await Promise.all(containers.map((container) => limit(() => enrichContainer(
@@ -706,7 +705,7 @@ async function runLimitedParallel(containers, options, includeMetadata, containe
     planning
   ))));
 
-  console.log(`[DONE] dup:${progressState.duplicateCount} new:${progressState.newCount}`);
+  console.log(`[DONE${isProviderLabelRun ? '-PROVIDERS' : ''}] dup:${progressState.duplicateCount} new:${progressState.newCount}`);
   return results;
 }
 
