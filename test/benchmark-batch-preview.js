@@ -94,6 +94,56 @@ function resolveContainerShortId(item) {
   return extractContainerShortIdFromPath(item?.['path-url']);
 }
 
+const PROGRESS_LOG_INTERVAL_MS = Number.parseInt(process.env.ZENIUS_BENCH_PROGRESS_LOG_INTERVAL_MS || '500', 10);
+let progressState = {
+  startTime: null,
+  total: 0,
+  completed: 0,
+  lastLogTime: 0,
+  containerNames: new Map(),
+  lastContainer: null
+};
+
+function formatDuration(ms) {
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes > 0) {
+    return `${minutes}m${String(remainingSeconds).padStart(2, '0')}s`;
+  }
+  return `${seconds}s`;
+}
+
+function logProgress(container, durationMs, force = false) {
+  if (!progressState.startTime) {
+    progressState.startTime = Date.now();
+  }
+
+  progressState.completed += 1;
+  const now = Date.now();
+  const elapsedMs = now - progressState.startTime;
+
+  const nameKey = String(container?.name || container?.containerName || container?.urlShortId || 'unknown').slice(0, 40);
+  progressState.containerNames.set(container?.urlShortId || container?.containerUrlShortId || 'unknown', nameKey);
+  progressState.lastContainer = { name: nameKey, durationMs };
+
+  const shouldLog = force || (now - progressState.lastLogTime) >= PROGRESS_LOG_INTERVAL_MS;
+
+  if (shouldLog && progressState.total > 0) {
+    const percent = ((progressState.completed / progressState.total) * 100).toFixed(1);
+    const avgMs = elapsedMs / progressState.completed;
+    const etaMs = avgMs * (progressState.total - progressState.completed);
+    const rate = (progressState.completed / elapsedMs * 1000).toFixed(1);
+
+    const recentNames = Array.from(progressState.containerNames.values()).slice(-5);
+    const lastName = progressState.lastContainer?.name || '';
+
+    console.log(`[${formatDuration(elapsedMs)}] ${progressState.completed}/${progressState.total} (${percent}%) | rate: ${rate}/s | eta: ${formatDuration(etaMs)} | avg: ${avgMs.toFixed(0)}ms | last: ${lastName.slice(0,30)}`);
+
+    progressState.lastLogTime = now;
+  }
+}
+
 function unique(values) {
   return Array.from(new Set(values));
 }
@@ -583,6 +633,11 @@ async function enrichContainer(container, options, includeMetadata, metadataConc
   const instances = await getVideoInstanceDetails(container['url-short-id'], options);
   let enrichedInstances = instances;
 
+  logProgress({
+    urlShortId: container['url-short-id'],
+    name: container.name
+  }, Date.now() - startedAt);
+
   if (includeMetadata && instances.length > 0) {
     const metadataLimit = pLimit(metadataConcurrency);
     const metadataResults = await Promise.all(instances.map((item) => metadataLimit(async () => ({
@@ -644,14 +699,25 @@ function summarizeInstanceLabels(instances = []) {
 }
 
 async function runLimitedParallel(containers, options, includeMetadata, containerConcurrency, metadataConcurrency, planning) {
+  progressState.total = containers.length;
+  progressState.completed = 0;
+  progressState.startTime = Date.now();
+  progressState.lastLogTime = Date.now();
+  progressState.containerNames.clear();
+
+  console.log(`[START] Processing ${containers.length} containers with concurrency ${containerConcurrency}`);
+
   const limit = pLimit(containerConcurrency);
-  return Promise.all(containers.map((container) => limit(() => enrichContainer(
+  const results = await Promise.all(containers.map((container) => limit(() => enrichContainer(
     container,
     options,
     includeMetadata,
     metadataConcurrency,
     planning
   ))));
+
+  logProgress({ name: 'DONE' }, 0, true);
+  return results;
 }
 
 function summarizeResult(mode, startedAt, discovery, details) {
@@ -750,6 +816,7 @@ async function main() {
 
   const options = createOptions(requestContext, effectiveRefererPath, { timeoutMs, maxRetries });
 
+  console.log(`[DISCOVERY] Starting container discovery for rootCgId=${rootCgId}, parent="${parentContainerName}"`);
   const discoveryStartedAt = Date.now();
   const discovery = await discoverContainers({
     rootCgId,
@@ -758,12 +825,15 @@ async function main() {
     options
   });
   const discoveryElapsedMs = Date.now() - discoveryStartedAt;
+  console.log(`[DISCOVERY] Found ${discovery.containerCount} containers in ${discovery.leafCgIds.length} leaf CGs (${formatDuration(discoveryElapsedMs)})`);
 
   let containers = discovery.containers;
   if (containerLimit > 0) {
     containers = containers.slice(0, containerLimit);
+    console.log(`[LIMIT] Container limit applied: ${containers.length} containers`);
   }
 
+  console.log(`[PREVIEW] Fetching container details for ${containers.length} containers...`);
   const previewSeedContainers = await runLimitedParallel(containers, options, false, containerConcurrency, metadataConcurrency, {
     includeProviderLabels: false,
     baseFolderInput,
