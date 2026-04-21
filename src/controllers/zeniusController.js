@@ -31,8 +31,6 @@ const UPSTREAM_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_TIMEOUT_
 const UPSTREAM_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_UPSTREAM_MAX_RETRIES || '3', 10);
 const UPSTREAM_RETRY_BASE_DELAY_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_RETRY_BASE_DELAY_MS || '500', 10);
 const BATCH_CG_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CG_FETCH_CONCURRENCY || '8', 10);
-const BATCH_CONTAINER_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CONTAINER_FETCH_CONCURRENCY || '8', 10);
-const BATCH_DETAIL_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_DETAIL_FETCH_CONCURRENCY || '8', 10);
 const BATCH_INSTANCE_METADATA_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_INSTANCE_METADATA_CONCURRENCY || '12', 10);
 const MAX_BATCH_ERRORS = Number.parseInt(process.env.ZENIUS_MAX_BATCH_ERRORS || '100', 10);
 const DEFAULT_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_CHUNK_SIZE || '8', 10);
@@ -542,115 +540,6 @@ function createBatchChainSession({ rootCgId, targetCgSelector, parentContainerNa
     cgPathById: new Map([[rootCgId, []]]),
     errors: []
   };
-}
-
-function createBatchChainBranchSession(parentSession, branchCgId) {
-  const branchPath = sanitizePathSegments(parentSession.cgPathById.get(branchCgId) || []);
-
-  return {
-    id: `${parentSession.id}:${branchCgId}`,
-    createdAt: parentSession.createdAt,
-    updatedAt: Date.now(),
-    expiresAt: parentSession.expiresAt,
-    rootCgId: parentSession.rootCgId,
-    rootCgName: parentSession.rootCgName,
-    targetCgSelector: parentSession.targetCgSelector,
-    targetCgId: parentSession.targetCgId,
-    parentContainerName: parentSession.parentContainerName,
-    discoveryInitialized: true,
-    discoveryDone: false,
-    visitedCgIds: new Set([parentSession.rootCgId]),
-    queueCgIds: [branchCgId],
-    leafCgIds: [],
-    leafCgIdSet: new Set(),
-    leafCursor: 0,
-    traversal: [],
-    containerByShortId: new Map(),
-    containerVideoInstancesByShortId: new Map(),
-    containerDetailsByShortId: new Map(),
-    plannedContainers: [],
-    plannedItems: [],
-    plannedItemByKey: new Map(),
-    planCursor: 0,
-    planReady: false,
-    planContextKey: parentSession.planContextKey,
-    planBaseFolderInput: parentSession.planBaseFolderInput,
-    planSelectedProviders: Array.isArray(parentSession.planSelectedProviders)
-      ? [...parentSession.planSelectedProviders]
-      : parentSession.planSelectedProviders,
-    planFolderCache: new Map(),
-    planFolderFileCache: new Map(),
-    instanceMetadataByShortId: new Map(),
-    instanceMetadataPromisesByShortId: new Map(),
-    cgPathById: new Map([
-      [parentSession.rootCgId, sanitizePathSegments(parentSession.cgPathById.get(parentSession.rootCgId) || [])],
-      [branchCgId, branchPath]
-    ]),
-    errors: []
-  };
-}
-
-function mergeBatchChainBranchSession(targetSession, branchSession) {
-  if (!branchSession) {
-    return;
-  }
-
-  for (const visitedCgId of branchSession.visitedCgIds || []) {
-    targetSession.visitedCgIds.add(visitedCgId);
-  }
-
-  for (const [cgId, pathSegments] of branchSession.cgPathById || []) {
-    rememberCgPath(targetSession, cgId, pathSegments);
-  }
-
-  for (const traversalItem of branchSession.traversal || []) {
-    targetSession.traversal.push(traversalItem);
-  }
-
-  for (const leafCgId of branchSession.leafCgIds || []) {
-    addLeafCgId(targetSession, leafCgId);
-  }
-
-  for (const container of branchSession.containerByShortId?.values() || []) {
-    addDiscoveredContainer(
-      targetSession,
-      container?.['url-short-id'],
-      container,
-      container?.sourceLeafCgId || null,
-      container?.parentPathSegments || []
-    );
-  }
-
-  for (const [containerShortId, containerDetail] of branchSession.containerDetailsByShortId || []) {
-    if (!targetSession.containerDetailsByShortId.has(containerShortId)) {
-      targetSession.containerDetailsByShortId.set(containerShortId, containerDetail);
-    }
-  }
-
-  for (const plannedContainer of branchSession.plannedContainers || []) {
-    const containerShortId = String(plannedContainer?.containerUrlShortId || '').trim();
-    if (!containerShortId) {
-      continue;
-    }
-
-    if (!targetSession.containerDetailsByShortId.has(containerShortId) && plannedContainer) {
-      targetSession.containerDetailsByShortId.set(containerShortId, plannedContainer);
-    }
-  }
-
-  for (const plannedItem of branchSession.plannedItems || []) {
-    const planKey = String(plannedItem?.planKey || '').trim();
-    if (!planKey || targetSession.plannedItemByKey.has(planKey)) {
-      continue;
-    }
-
-    targetSession.plannedItemByKey.set(planKey, plannedItem);
-    targetSession.plannedItems.push(plannedItem);
-  }
-
-  for (const error of branchSession.errors || []) {
-    pushBatchError(targetSession.errors, error);
-  }
 }
 
 function normalizePlanningContext(baseFolderInput, selectedProviders) {
@@ -1498,173 +1387,109 @@ async function initializeBatchChainSessionDiscovery(session, options) {
   session.discoveryInitialized = true;
 }
 
-async function initializeBatchChainRootDiscovery(session, options) {
-  await initializeBatchChainSessionDiscovery(session, options);
-
-  const initialBranchCgIds = unique(session.queueCgIds);
-  session.queueCgIds = [];
-  return initialBranchCgIds;
-}
-
 async function advanceBatchChainBranchDiscovery(session, options, deadlineAt) {
-  const cgConcurrency = clampPositiveInt(BATCH_CG_FETCH_CONCURRENCY, 4);
-  const cgFetchLimit = pLimit(cgConcurrency);
-
   while (session.queueCgIds.length > 0 && !shouldStopForDeadline(deadlineAt, 2000)) {
-    const batchIds = [];
-    while (session.queueCgIds.length > 0 && batchIds.length < cgConcurrency) {
-      const currentCgId = session.queueCgIds.shift();
-      if (!currentCgId || session.visitedCgIds.has(currentCgId)) {
-        continue;
-      }
-      session.visitedCgIds.add(currentCgId);
-      batchIds.push(currentCgId);
+    const currentCgId = session.queueCgIds.shift();
+    if (!currentCgId || session.visitedCgIds.has(currentCgId)) {
+      continue;
     }
+    session.visitedCgIds.add(currentCgId);
 
-    if (batchIds.length === 0) {
+    let payload;
+    try {
+      payload = await getCgByShortId(currentCgId, options);
+    } catch (error) {
+      pushBatchError(session.errors, {
+        stage: 'cgroup-traversal',
+        urlShortId: currentCgId,
+        message: error.message
+      });
+      addLeafCgId(session, currentCgId);
       continue;
     }
 
-    const batchPayloads = await Promise.allSettled(
-      batchIds.map((currentCgId) => cgFetchLimit(async () => ({
-        currentCgId,
-        payload: await getCgByShortId(currentCgId, options)
-      })))
-    );
+    const value = payload?.value || {};
+    const valueIsParent = parseBoolean(value['is-parent']);
+    const currentPathSegments = sanitizePathSegments(session.cgPathById.get(currentCgId) || []);
+    if (!session.rootCgName) {
+      session.rootCgName = String(value.name || '').trim() || session.rootCgName;
+    }
 
-    for (let i = 0; i < batchPayloads.length; i += 1) {
-      const result = batchPayloads[i];
-      const currentCgId = batchIds[i];
-      if (!currentCgId) {
-        continue;
-      }
+    const containers = Array.isArray(value['cgs-containers']) ? value['cgs-containers'] : [];
+    const nextItems = [];
+    let directContainerCount = 0;
 
-      if (result.status !== 'fulfilled') {
-        pushBatchError(session.errors, {
-          stage: 'cgroup-traversal',
-          urlShortId: currentCgId,
-          message: result.reason?.message || String(result.reason)
+    for (const item of containers) {
+      const nextId = extractCgId(item?.['path-url']);
+      const itemIsParent = parseBoolean(item?.['is-parent']);
+
+      if (nextId) {
+        rememberCgPath(session, nextId, [...currentPathSegments, item?.name || item?.title || nextId]);
+        session.traversal.push({
+          source: value['url-short-id'] || currentCgId,
+          next: nextId,
+          isParent: itemIsParent
         });
-        addLeafCgId(session, currentCgId);
+        nextItems.push(nextId);
         continue;
       }
 
-      const payload = result.value.payload;
-      const value = payload?.value || {};
-      const valueIsParent = parseBoolean(value['is-parent']);
-      const currentPathSegments = sanitizePathSegments(session.cgPathById.get(currentCgId) || []);
-      if (!session.rootCgName) {
-        session.rootCgName = String(value.name || '').trim() || session.rootCgName;
-      }
-
-      const containers = Array.isArray(value['cgs-containers']) ? value['cgs-containers'] : [];
-      const nextItems = [];
-      let directContainerCount = 0;
-
-      for (const item of containers) {
-        const nextId = extractCgId(item?.['path-url']);
-        const itemIsParent = parseBoolean(item?.['is-parent']);
-
-        if (nextId) {
-          rememberCgPath(session, nextId, [...currentPathSegments, item?.name || item?.title || nextId]);
-          session.traversal.push({
-            source: value['url-short-id'] || currentCgId,
-            next: nextId,
-            isParent: itemIsParent
-          });
-          nextItems.push(nextId);
-          continue;
+      const containerShortId = resolveContainerShortId(item);
+      if (itemIsParent === false && containerShortId) {
+        const inserted = addDiscoveredContainer(session, containerShortId, item, currentCgId, currentPathSegments);
+        if (inserted) {
+          directContainerCount += 1;
         }
 
-        const containerShortId = resolveContainerShortId(item);
-        if (itemIsParent === false && containerShortId) {
-          const inserted = addDiscoveredContainer(session, containerShortId, item, currentCgId, currentPathSegments);
-          if (inserted) {
-            directContainerCount += 1;
-          }
-
-          session.traversal.push({
-            source: value['url-short-id'] || currentCgId,
-            next: containerShortId,
-            isParent: false,
-            isContainer: true
-          });
-        }
+        session.traversal.push({
+          source: value['url-short-id'] || currentCgId,
+          next: containerShortId,
+          isParent: false,
+          isContainer: true
+        });
       }
+    }
 
-      const uniqueNextItems = unique(nextItems);
-      if ((uniqueNextItems.length === 0 && directContainerCount === 0) || (valueIsParent === false && directContainerCount === 0)) {
-        addLeafCgId(session, currentCgId);
-      }
+    const uniqueNextItems = unique(nextItems);
+    if ((uniqueNextItems.length === 0 && directContainerCount === 0) || (valueIsParent === false && directContainerCount === 0)) {
+      addLeafCgId(session, currentCgId);
+    }
 
-      for (const nextId of uniqueNextItems) {
-        if (!session.visitedCgIds.has(nextId)) {
-          session.queueCgIds.push(nextId);
-        }
+    for (const nextId of uniqueNextItems) {
+      if (!session.visitedCgIds.has(nextId)) {
+        session.queueCgIds.push(nextId);
       }
     }
   }
 
-  const containerConcurrency = clampPositiveInt(BATCH_CONTAINER_FETCH_CONCURRENCY, 4);
-  const containerFetchLimit = pLimit(containerConcurrency);
-
   while (session.leafCursor < session.leafCgIds.length && !shouldStopForDeadline(deadlineAt, 2000)) {
-    const leafBatch = session.leafCgIds.slice(session.leafCursor, session.leafCursor + containerConcurrency);
-    if (leafBatch.length === 0) {
-      break;
+    const leafCgId = session.leafCgIds[session.leafCursor];
+    session.leafCursor += 1;
+    if (!leafCgId) {
+      continue;
     }
 
-    const containerListResults = await Promise.allSettled(
-      leafBatch.map((leafCgId) => containerFetchLimit(async () => ({
-        leafCgId,
-        list: await getContainerListWithDetails(leafCgId, options)
-      })))
-    );
-
-    for (let i = 0; i < containerListResults.length; i += 1) {
-      const result = containerListResults[i];
-      const leafCgId = leafBatch[i];
-      if (result.status !== 'fulfilled') {
-        pushBatchError(session.errors, {
-          stage: 'container-list',
-          urlShortId: leafCgId,
-          message: result.reason?.message || String(result.reason)
-        });
-        continue;
-      }
-
+    try {
+      const list = await getContainerListWithDetails(leafCgId, options);
       const leafPathSegments = sanitizePathSegments(session.cgPathById.get(leafCgId) || []);
-      for (const item of result.value.list.items) {
+      for (const item of list.items) {
         addDiscoveredContainer(session, item?.['url-short-id'], item, leafCgId, leafPathSegments);
       }
+    } catch (error) {
+      pushBatchError(session.errors, {
+        stage: 'container-list',
+        urlShortId: leafCgId,
+        message: error.message
+      });
     }
-
-    session.leafCursor += leafBatch.length;
   }
 
   session.discoveryDone = session.queueCgIds.length === 0 && session.leafCursor >= session.leafCgIds.length;
 }
 
 async function advanceBatchChainSessionDiscovery(session, options, deadlineAt) {
-  const initialBranchCgIds = await initializeBatchChainRootDiscovery(session, options);
-
-  if (initialBranchCgIds.length === 0) {
-    await advanceBatchChainBranchDiscovery(session, options, deadlineAt);
-    return;
-  }
-
-  const branchResults = [];
-  for (const branchCgId of initialBranchCgIds) {
-    const branchSession = createBatchChainBranchSession(session, branchCgId);
-    await advanceBatchChainBranchDiscovery(branchSession, options, deadlineAt);
-    branchResults.push(branchSession);
-  }
-
-  for (const branchSession of branchResults) {
-    mergeBatchChainBranchSession(session, branchSession);
-  }
-
-  session.discoveryDone = true;
+  await initializeBatchChainSessionDiscovery(session, options);
+  await advanceBatchChainBranchDiscovery(session, options, deadlineAt);
 }
 
 async function buildBatchContainerDetail({ container, options, session }) {
@@ -1784,7 +1609,9 @@ async function prefetchFolderFileCaches(folderFileCache, folderIds = []) {
     return;
   }
 
-  await Promise.all(uniqueFolderIds.map((folderId) => getFolderFileCacheEntry(folderFileCache, folderId)));
+  for (const folderId of uniqueFolderIds) {
+    await getFolderFileCacheEntry(folderFileCache, folderId);
+  }
 }
 
 async function buildPlannedBatchItem({
@@ -2221,8 +2048,6 @@ async function buildBatchChain({
   const details = [];
   const plannedItems = [];
   const skipped = [];
-  const detailConcurrency = clampPositiveInt(BATCH_DETAIL_FETCH_CONCURRENCY, 4);
-  const detailLimit = pLimit(detailConcurrency);
   const pendingContainers = [];
   let cursor = normalizedOffset;
   while (cursor < totalContainers && pendingContainers.length < normalizedLimit) {
@@ -2235,8 +2060,8 @@ async function buildBatchChain({
     pendingContainers.map((container) => joinFolderPaths(planningContext.baseFolderInput, container?.path || '') || 'root')
   );
 
-  const resolvedDetails = await Promise.all(
-    pendingContainers.map((container) => detailLimit(() => buildBatchPlanForContainer({
+  for (const container of pendingContainers) {
+    const resolved = await buildBatchPlanForContainer({
       container,
       options,
       session,
@@ -2244,10 +2069,8 @@ async function buildBatchChain({
       selectedProviders: planningContext.selectedProviders,
       folderCache: session.planFolderCache,
       folderFileCache: session.planFolderFileCache
-    })))
-  );
+    });
 
-  for (const resolved of resolvedDetails) {
     if (!resolved?.containerDetail) {
       continue;
     }
