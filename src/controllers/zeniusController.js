@@ -203,7 +203,7 @@ class DownloadQueue {
         outputName,
         outputDir: config.uploadDir,
         headers: ffmpegHeaders,
-        skipIfExists: true,
+        skipIfExists: task.skipIfExists !== false,
         selectedProviders,
         waitForUpload: true
       });
@@ -776,6 +776,35 @@ function summarizeBackgroundBatchRun(run) {
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
     updatedAt: new Date(run.updatedAt).toISOString()
+  };
+}
+
+function serializeBatchPreviewSession(session) {
+  if (!session) {
+    return null;
+  }
+
+  return {
+    sessionId: session.id,
+    rootCgId: session.rootCgId,
+    rootCgName: session.rootCgName,
+    targetCgSelector: session.targetCgSelector,
+    targetCgId: session.targetCgId,
+    parentContainerName: resolveBatchParentContainerName(session),
+    discoveryDone: Boolean(session.discoveryDone),
+    leafCgIds: Array.isArray(session.leafCgIds) ? [...session.leafCgIds] : [],
+    traversal: Array.isArray(session.traversal) ? [...session.traversal] : [],
+    totalContainers: Number(session.containerByShortId?.size || 0),
+    planReady: Boolean(session.planReady),
+    planContextKey: session.planContextKey,
+    baseFolderInput: session.planBaseFolderInput || '',
+    selectedProviders: Array.isArray(session.planSelectedProviders) ? [...session.planSelectedProviders] : null,
+    plannedItemCount: Array.isArray(session.plannedItems) ? session.plannedItems.length : 0,
+    plannedItems: Array.isArray(session.plannedItems) ? [...session.plannedItems] : [],
+    containerDetails: session.containerDetailsByShortId instanceof Map
+      ? Array.from(session.containerDetailsByShortId.values())
+      : [],
+    errors: Array.isArray(session.errors) ? [...session.errors] : []
   };
 }
 
@@ -2552,7 +2581,18 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
       requestContext,
       refererPath: plannedItem.refererPath || refererPath,
       fallbackRefererPath: plannedItem.refererPath || '',
-      requestedFilename
+      requestedFilename,
+      skipIfExists: false,
+      plannedFromPreview: true,
+      previewPlan: {
+        sessionId: session.id,
+        planKey: plannedItem.planKey,
+        action: plannedItem.action,
+        reason: plannedItem.reason,
+        fileId: plannedItem.fileId || null,
+        existingStatus: plannedItem.existingStatus || null,
+        pendingProviders: plannedItem.pendingProviders || []
+      }
     });
 
     if (runId && backgroundBatchRuns.has(runId)) {
@@ -2595,6 +2635,10 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
       path: plannedItem.path,
       folderInput: plannedItem.folderInput,
       folderId: plannedItem.folderId,
+      action: plannedItem.action,
+      reason: plannedItem.reason,
+      pendingProviders: plannedItem.pendingProviders || [],
+      existingFileId: plannedItem.fileId || null,
       status: plannedItem.action === 'retry' ? 'retry-queued' : 'queued'
     });
   }
@@ -3268,6 +3312,8 @@ const zeniusController = {
         });
       }
 
+      const previewResult = serializeBatchPreviewSession(session);
+
       const containerLimit = normalizeChunkLimit(req.body?.containerLimit)
         || clampPositiveInt(BACKGROUND_BATCH_CHUNK_SIZE, 6);
       const timeBudgetMs = normalizeBatchRequestBudgetMs(req.body?.timeBudgetMs);
@@ -3293,6 +3339,7 @@ const zeniusController = {
         targetCgSelector: run.targetCgSelector,
         baseFolderInput,
         providers: selectedProviders,
+        preview: previewResult,
         message: 'Zenius batch download started in background'
       });
 
@@ -3315,6 +3362,7 @@ const zeniusController = {
           batchRunId: run.id,
           status: summarizeBackgroundBatchRun(run),
           providers: selectedProviders,
+          preview: previewResult,
           cleanupLocalFile: true,
           baseFolderInput,
           queueStatus: getZeniusStatusSnapshot()
