@@ -685,7 +685,8 @@ export default function ZeniusPage() {
   const [batchFolderPrefix, setBatchFolderPrefix] = useState('');
   const [batchChain, setBatchChain] = useState(null);
   const [batchResult, setBatchResult] = useState(null);
-  const [batchRunId, setBatchRunId] = useState(null);
+  const [previewRunId, setPreviewRunId] = useState(null);
+  const [downloadRunId, setDownloadRunId] = useState(null);
   const [batchSessionId, setBatchSessionId] = useState(null);
   const [batchBuildProgress, setBatchBuildProgress] = useState(null);
   const [batchQueueProgress, setBatchQueueProgress] = useState(null);
@@ -741,15 +742,15 @@ export default function ZeniusPage() {
 
   const trackedPreviewRun = useMemo(() => {
     const runs = Array.isArray(queueStatus?.backgroundBatches) ? queueStatus.backgroundBatches : [];
-    if (batchRunId) return runs.find((item) => item.id === batchRunId && item.type === 'preview') || null;
+    if (previewRunId) return runs.find((item) => item.id === previewRunId && item.type === 'preview') || null;
     return runs.find((item) => item.type === 'preview' && item.status === 'running') || null;
-  }, [queueStatus, batchRunId]);
+  }, [queueStatus, previewRunId]);
 
   const trackedDownloadRun = useMemo(() => {
     const runs = Array.isArray(queueStatus?.backgroundBatches) ? queueStatus.backgroundBatches : [];
-    if (batchResult?.batchRunId) return runs.find((item) => item.id === batchResult.batchRunId && item.type !== 'preview') || null;
-    return runs.find((item) => item.type !== 'preview' && item.status === 'running') || null;
-  }, [queueStatus, batchResult?.batchRunId]);
+    if (!downloadRunId) return null;
+    return runs.find((item) => item.id === downloadRunId && item.type !== 'preview') || null;
+  }, [queueStatus, downloadRunId]);
 
   useEffect(() => {
     if (!trackedPreviewRun) return;
@@ -875,8 +876,10 @@ export default function ZeniusPage() {
 
       setBatchChain(null);
       setBatchResult(null);
-      setBatchRunId(null);
+      setDownloadRunId(null);
+      setPreviewRunId(null);
       setBatchSessionId(null);
+      setBatchQueueProgress(null);
       setBatchBuildProgress({ processed: 0, total: null });
       const started = await batchChainMutation.mutateAsync({
         rootCgId: batchRootCgId,
@@ -890,13 +893,13 @@ export default function ZeniusPage() {
       });
 
       const startedSessionId = started?.sessionId || started?.status?.sessionId || started?.status?.id || null;
-      setBatchRunId(startedSessionId);
+      setPreviewRunId(startedSessionId);
       setBatchSessionId(startedSessionId);
 
       const poll = async () => {
         if (!startedSessionId) return;
         const status = await getZeniusBatchChainStatus(startedSessionId);
-        setBatchRunId(status.id || startedSessionId);
+        setPreviewRunId(status.id || startedSessionId);
         setBatchSessionId(status.sessionId || startedSessionId);
         setBatchBuildProgress({
           processed: Number(status.containerProgress?.processed || status.processedContainers || 0),
@@ -977,6 +980,7 @@ export default function ZeniusPage() {
     setShowBatchConfirm(null);
     try {
       setBatchResult(null);
+      setDownloadRunId(null);
       setBatchQueueProgress({ processed: 0, total: null });
       const result = await batchDownloadMutation.mutateAsync({
         rootCgId: batchRootCgId,
@@ -993,7 +997,7 @@ export default function ZeniusPage() {
 
       const data = result?.data || {};
       const status = data.status || {};
-      setBatchRunId(data.batchRunId || null);
+      setDownloadRunId(data.batchRunId || null);
       setBatchSessionId(status.sessionId || batchSessionId || batchChain?.sessionId || null);
       setBatchResult({
         ...status,
@@ -1005,6 +1009,7 @@ export default function ZeniusPage() {
       toast.success('Batch Started', `${Number(status.queuedCount || 0)} videos queued, ${Number(status.skippedCount || 0)} skipped`);
     } catch (error) {
       setBatchResult(null);
+      setDownloadRunId(null);
       setBatchQueueProgress(null);
       console.error('Failed to queue zenius batch download:', error);
       toast.error('Batch Failed', error?.response?.data?.error || error.message);
