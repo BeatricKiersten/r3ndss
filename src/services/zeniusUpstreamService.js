@@ -53,16 +53,28 @@ function resolveReferer(urlShortId, customRefererPath = '', fallbackPath = '') {
 }
 
 function buildUpstreamHeaders({ requestContext, referer }) {
+  let refererOrigin = 'https://www.zenius.net';
+  try {
+    refererOrigin = new URL(referer).origin;
+  } catch {
+    refererOrigin = 'https://www.zenius.net';
+  }
+
   const headers = {
     Host: 'www.zenius.net',
     'User-Agent': requestContext.userAgent,
     Accept: '*/*',
     'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br, zstd',
     Referer: referer,
+    Origin: refererOrigin,
     Connection: 'keep-alive',
+    'X-Requested-With': 'XMLHttpRequest',
     'Sec-Fetch-Dest': 'empty',
     'Sec-Fetch-Mode': 'cors',
     'Sec-Fetch-Site': 'same-origin',
+    'Sec-CH-UA-Mobile': '?0',
+    'Sec-CH-UA-Platform': '"Linux"',
     Pragma: 'no-cache',
     'Cache-Control': 'no-cache'
   };
@@ -79,6 +91,21 @@ function buildUpstreamHeaders({ requestContext, referer }) {
   if (requestContext.requestId) headers['X-Request-Id'] = String(requestContext.requestId);
 
   return headers;
+}
+
+function looksLikeWafChallenge(response) {
+  const contentType = String(response?.headers?.['content-type'] || '').toLowerCase();
+  const isHtml = contentType.includes('text/html') || contentType.includes('application/xhtml+xml');
+  if (!isHtml) {
+    return false;
+  }
+
+  const body = String(response?.data || '').toLowerCase();
+  return body.includes('human verification')
+    || body.includes('awswafcookiedomainlist')
+    || body.includes('gokuprops')
+    || body.includes('waf')
+    || body.includes('captcha');
 }
 
 function shouldStopForDeadline(deadlineAt, guardMs) {
@@ -125,6 +152,18 @@ async function getJson(endpoint, {
         validateStatus: () => true
       });
 
+      const wafChallenge = looksLikeWafChallenge(response);
+
+      if (wafChallenge && attempt < requestMaxRetries && !shouldStopForDeadline(deadlineAt, 1500)) {
+        const delayMs = retryBaseDelay * (2 ** attempt) + Math.floor(Math.random() * 250);
+        await sleep(delayMs);
+        continue;
+      }
+
+      if (wafChallenge) {
+        throw new Error(`Upstream blocked by Human Verification/WAF for ${endpoint}. Refresh headersRaw + cookie from an active browser session and retry.`);
+      }
+
       if (response.status >= 200 && response.status < 300) {
         const payload = response.data;
         const isObjectPayload = payload && typeof payload === 'object' && !Array.isArray(payload);
@@ -164,7 +203,9 @@ async function getJson(endpoint, {
       throw new Error(`Request failed (${response.status}) for ${endpoint}. Body: ${bodyPreview(response.data)}`);
     } catch (error) {
       const status = error?.response?.status;
+      const response = error?.response || null;
       const isRetryableStatus = typeof status === 'number' && RETRYABLE_UPSTREAM_STATUS.has(status);
+      const isRetryableWaf = looksLikeWafChallenge(response);
       const isRetryableNetwork = !status && (
         error?.code === 'ECONNABORTED'
         || error?.code === 'ETIMEDOUT'
@@ -172,7 +213,7 @@ async function getJson(endpoint, {
         || error?.code === 'EAI_AGAIN'
       );
 
-      if ((isRetryableStatus || isRetryableNetwork) && attempt < requestMaxRetries && !shouldStopForDeadline(deadlineAt, 1500)) {
+      if ((isRetryableStatus || isRetryableNetwork || isRetryableWaf) && attempt < requestMaxRetries && !shouldStopForDeadline(deadlineAt, 1500)) {
         const delayMs = retryBaseDelay * (2 ** attempt) + Math.floor(Math.random() * 250);
         await sleep(delayMs);
         continue;

@@ -17,7 +17,12 @@ const KNOWN_REQUEST_HEADERS = new Set([
   'pragma',
   'cache-control',
   'cookie',
-  'host'
+  'host',
+  'origin',
+  'x-requested-with',
+  'sec-ch-ua',
+  'sec-ch-ua-mobile',
+  'sec-ch-ua-platform'
 ]);
 
 const PASSTHROUGH_HEADER_MAP = {
@@ -31,7 +36,12 @@ const PASSTHROUGH_HEADER_MAP = {
   te: 'TE',
   pragma: 'Pragma',
   'cache-control': 'Cache-Control',
-  connection: 'Connection'
+  connection: 'Connection',
+  origin: 'Origin',
+  'x-requested-with': 'X-Requested-With',
+  'sec-ch-ua': 'Sec-CH-UA',
+  'sec-ch-ua-mobile': 'Sec-CH-UA-Mobile',
+  'sec-ch-ua-platform': 'Sec-CH-UA-Platform'
 };
 
 function stripWrappingQuotes(value) {
