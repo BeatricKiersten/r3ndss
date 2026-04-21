@@ -366,12 +366,15 @@ async function discoverContainers({ rootCgId, targetCgSelector, parentContainerN
     throw new Error(`Unable to extract cg id from ${firstMatch['path-url']}`);
   }
 
+  const upstreamInitialCgName = String(firstMatch?.name || firstMatch?.title || '').trim();
+  const initialCgLabel = sanitizePathSegment(upstreamInitialCgName || normalizedParentName, 'unknown-parent');
+
   const session = {
     rootCgId,
     rootCgName: normalizedParentName,
     visitedCgIds: new Set([rootCgId]),
     queueCgIds: [initialCgId],
-    cgPathById: new Map([[rootCgId, []], [initialCgId, [normalizedParentName]]]),
+    cgPathById: new Map([[rootCgId, []], [initialCgId, [initialCgLabel]]]),
     leafCgIds: [],
     leafCgIdSet: new Set(),
     traversal: [],
