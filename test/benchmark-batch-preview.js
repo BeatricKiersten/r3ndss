@@ -94,7 +94,6 @@ function resolveContainerShortId(item) {
   return extractContainerShortIdFromPath(item?.['path-url']);
 }
 
-const PROGRESS_LOG_INTERVAL_MS = Number.parseInt(process.env.ZENIUS_BENCH_PROGRESS_LOG_INTERVAL_MS || '100', 10);
 let progressState = {
   total: 0,
   completed: 0,
