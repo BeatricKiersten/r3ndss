@@ -30,10 +30,10 @@ const DEFAULT_BATCH_PARENT_CONTAINER_NAME = '';
 const UPSTREAM_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_TIMEOUT_MS || '12000', 10);
 const UPSTREAM_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_UPSTREAM_MAX_RETRIES || '3', 10);
 const UPSTREAM_RETRY_BASE_DELAY_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_RETRY_BASE_DELAY_MS || '500', 10);
-const BATCH_CG_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CG_FETCH_CONCURRENCY || '2', 10);
-const BATCH_CONTAINER_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CONTAINER_FETCH_CONCURRENCY || '2', 10);
-const BATCH_DETAIL_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_DETAIL_FETCH_CONCURRENCY || '2', 10);
-const BATCH_INSTANCE_METADATA_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_INSTANCE_METADATA_CONCURRENCY || '3', 10);
+const BATCH_CG_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CG_FETCH_CONCURRENCY || '4', 10);
+const BATCH_CONTAINER_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CONTAINER_FETCH_CONCURRENCY || '4', 10);
+const BATCH_DETAIL_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_DETAIL_FETCH_CONCURRENCY || '4', 10);
+const BATCH_INSTANCE_METADATA_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_INSTANCE_METADATA_CONCURRENCY || '6', 10);
 const MAX_BATCH_ERRORS = Number.parseInt(process.env.ZENIUS_MAX_BATCH_ERRORS || '100', 10);
 const DEFAULT_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_CHUNK_SIZE || '8', 10);
 const MAX_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_MAX_CHUNK_SIZE || '20', 10);
@@ -1589,7 +1589,7 @@ async function advanceBatchChainSessionDiscovery(session, options, deadlineAt) {
   session.discoveryDone = true;
 }
 
-async function buildBatchContainerDetail({ container, options, session, deadlineAt }) {
+async function buildBatchContainerDetail({ container, options, session }) {
   const containerName = container.name || container['url-short-id'];
   const containerPath = buildContainerPath(resolveContainerParentSegments(session, container), containerName);
   const usedOutputNames = new Set();
@@ -1853,7 +1853,6 @@ async function buildBatchPlanForContainer({
   container,
   options,
   session,
-  deadlineAt,
   baseFolderInput,
   selectedProviders,
   folderCache,
@@ -1862,18 +1861,13 @@ async function buildBatchPlanForContainer({
   const containerDetail = await buildBatchContainerDetail({
     container,
     options,
-    session,
-    deadlineAt
+    session
   });
 
   const plannedItems = [];
   const skipped = [];
 
   for (const instance of containerDetail.videoInstances || []) {
-    if (shouldStopForDeadline(deadlineAt, 1200)) {
-      break;
-    }
-
     const result = await buildPlannedBatchItem({
       container: containerDetail,
       instance,
@@ -2122,7 +2116,9 @@ async function buildBatchChain({
 
   touchBatchChainSession(session);
 
-  const deadlineAt = Date.now() + normalizeBatchRequestBudgetMs(timeBudgetMs);
+  // Preview/build requests are resumable already, so avoid a global deadline that can
+  // cancel later upstream fetches before they even start. Keep per-request timeouts.
+  const deadlineAt = null;
   const options = {
     requestContext,
     refererPath,
@@ -2151,11 +2147,7 @@ async function buildBatchChain({
   const detailLimit = pLimit(detailConcurrency);
   const pendingContainers = [];
   let cursor = normalizedOffset;
-  while (
-    cursor < totalContainers
-    && pendingContainers.length < normalizedLimit
-    && !shouldStopForDeadline(deadlineAt, 1600)
-  ) {
+  while (cursor < totalContainers && pendingContainers.length < normalizedLimit) {
     pendingContainers.push(mergedContainers[cursor]);
     cursor += 1;
   }
@@ -2170,7 +2162,6 @@ async function buildBatchChain({
       container,
       options,
       session,
-      deadlineAt,
       baseFolderInput: planningContext.baseFolderInput,
       selectedProviders: planningContext.selectedProviders,
       folderCache: session.planFolderCache,
@@ -2249,7 +2240,7 @@ async function buildBatchChain({
     plannedItems,
     skipped,
     errors: session.errors,
-    timeBudgetMs: normalizeBatchRequestBudgetMs(timeBudgetMs)
+    timeBudgetMs: null
   };
 }
 
