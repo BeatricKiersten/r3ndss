@@ -739,49 +739,55 @@ export default function ZeniusPage() {
   const normalizedFolderPath = useMemo(() => normalizeFolderInput(folderId), [folderId]);
   const normalizedBatchFolderPrefix = useMemo(() => normalizeFolderInput(batchFolderPrefix), [batchFolderPrefix]);
 
-  const trackedBatchRun = useMemo(() => {
+  const trackedPreviewRun = useMemo(() => {
     const runs = Array.isArray(queueStatus?.backgroundBatches) ? queueStatus.backgroundBatches : [];
-    if (batchRunId) return runs.find((item) => item.id === batchRunId) || null;
-    return runs.find((item) => item.status === 'running') || null;
+    if (batchRunId) return runs.find((item) => item.id === batchRunId && item.type === 'preview') || null;
+    return runs.find((item) => item.type === 'preview' && item.status === 'running') || null;
   }, [queueStatus, batchRunId]);
 
+  const trackedDownloadRun = useMemo(() => {
+    const runs = Array.isArray(queueStatus?.backgroundBatches) ? queueStatus.backgroundBatches : [];
+    if (batchResult?.batchRunId) return runs.find((item) => item.id === batchResult.batchRunId && item.type !== 'preview') || null;
+    return runs.find((item) => item.type !== 'preview' && item.status === 'running') || null;
+  }, [queueStatus, batchResult?.batchRunId]);
+
   useEffect(() => {
-    if (!trackedBatchRun) return;
-    setBatchSessionId((prev) => trackedBatchRun.sessionId || prev || null);
+    if (!trackedPreviewRun) return;
+    setBatchSessionId((prev) => trackedPreviewRun.sessionId || prev || null);
 
-    if (trackedBatchRun.type === 'preview') {
-      setBatchBuildProgress(trackedBatchRun.status === 'running'
-        ? {
-            processed: Number(trackedBatchRun.scannedContainerCount || trackedBatchRun.processedContainers || 0),
-            total: Number.isFinite(Number(trackedBatchRun.totalContainers)) ? Number(trackedBatchRun.totalContainers) : null
-          }
-        : null);
+    setBatchBuildProgress(trackedPreviewRun.status === 'running'
+      ? {
+          processed: Number(trackedPreviewRun.scannedContainerCount || trackedPreviewRun.processedContainers || 0),
+          total: Number.isFinite(Number(trackedPreviewRun.totalContainers)) ? Number(trackedPreviewRun.totalContainers) : null
+        }
+      : null);
 
-      if (trackedBatchRun.status === 'completed' && trackedBatchRun.chainPreview) {
-        setBatchChain(trackedBatchRun.chainPreview);
-      }
-      return;
+    if (trackedPreviewRun.status === 'completed' && trackedPreviewRun.chainPreview) {
+      setBatchChain(trackedPreviewRun.chainPreview);
     }
+  }, [trackedPreviewRun]);
 
+  useEffect(() => {
+    if (!trackedDownloadRun) return;
     setBatchQueueProgress({
-      containersProcessed: Number(trackedBatchRun.scannedContainerCount || trackedBatchRun.processedContainers || 0),
-      containersTotal: Number.isFinite(Number(trackedBatchRun.totalContainers)) ? Number(trackedBatchRun.totalContainers) : null
+      containersProcessed: Number(trackedDownloadRun.scannedContainerCount || trackedDownloadRun.processedContainers || 0),
+      containersTotal: Number.isFinite(Number(trackedDownloadRun.totalContainers)) ? Number(trackedDownloadRun.totalContainers) : null
     });
     setBatchResult((prev) => ({
       ...(prev || {}),
-      ...trackedBatchRun,
-      batchRunId: trackedBatchRun.id,
-      queuedCount: Number(trackedBatchRun.queuedCount || 0),
-      skippedCount: Number(trackedBatchRun.skippedCount || 0),
-      downloadCompletedCount: Number(trackedBatchRun.downloadCompletedCount || 0),
-      downloadFailedCount: Number(trackedBatchRun.downloadFailedCount || 0),
-      discoveredVideoCount: Number(trackedBatchRun.discoveredVideoCount || 0)
+      ...trackedDownloadRun,
+      batchRunId: trackedDownloadRun.id,
+      queuedCount: Number(trackedDownloadRun.queuedCount || 0),
+      skippedCount: Number(trackedDownloadRun.skippedCount || 0),
+      downloadCompletedCount: Number(trackedDownloadRun.downloadCompletedCount || 0),
+      downloadFailedCount: Number(trackedDownloadRun.downloadFailedCount || 0),
+      discoveredVideoCount: Number(trackedDownloadRun.discoveredVideoCount || 0)
     }));
-  }, [trackedBatchRun]);
+  }, [trackedDownloadRun]);
 
   useEffect(() => {
     const hasActiveWork = Boolean(
-      queueStatus?.active || queueStatus?.queued || queueStatus?.activeBackgroundBatchCount || trackedBatchRun?.status === 'running'
+      queueStatus?.active || queueStatus?.queued || queueStatus?.activeBackgroundBatchCount || trackedPreviewRun?.status === 'running' || trackedDownloadRun?.status === 'running'
     );
     if (!hasActiveWork || typeof window === 'undefined') return undefined;
     const keepalive = () => {
@@ -789,7 +795,7 @@ export default function ZeniusPage() {
     };
     const timer = window.setInterval(keepalive, 20000);
     return () => window.clearInterval(timer);
-  }, [queueStatus, trackedBatchRun]);
+  }, [queueStatus, trackedPreviewRun, trackedDownloadRun]);
 
   const folderOptions = useMemo(() => flattenFolderPaths(folderTree), [folderTree]);
   const folderPathLookup = useMemo(() => new Set(folderOptions.map((item) => item.path.toLowerCase())), [folderOptions]);
@@ -1187,7 +1193,7 @@ export default function ZeniusPage() {
       <BatchProgressCard
         batchResult={batchResult}
         batchQueueProgress={batchQueueProgress}
-        trackedBatchRun={trackedBatchRun}
+        trackedBatchRun={trackedDownloadRun}
         batchSessionId={batchSessionId}
         onCancelBatch={() => setShowCancelConfirm(true)}
       />
