@@ -648,7 +648,7 @@ function createBackgroundBatchRun({ rootCgId, targetCgSelector, baseFolderInput,
   };
 }
 
-function createBackgroundBatchPreviewRun({ rootCgId, targetCgSelector, parentContainerName, baseFolderInput, selectedProviders, keepaliveUrl }) {
+function createBackgroundBatchPreviewRun({ rootCgId, targetCgSelector, parentContainerName, baseFolderInput, selectedProviders, keepaliveUrl, headersRaw, refererPath }) {
   const run = createBackgroundBatchRun({
     rootCgId,
     targetCgSelector,
@@ -665,7 +665,9 @@ function createBackgroundBatchPreviewRun({ rootCgId, targetCgSelector, parentCon
     targetCgSelector: String(targetCgSelector || '').trim() || null,
     parentContainerName: String(parentContainerName || '').trim() || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
     baseFolderInput: String(baseFolderInput || '').trim() || '',
-    selectedProviders: Array.isArray(selectedProviders) ? [...selectedProviders] : null
+    selectedProviders: Array.isArray(selectedProviders) ? [...selectedProviders] : null,
+    headersRaw: String(headersRaw || ''),
+    refererPath: String(refererPath || '').trim() || ''
   };
   run.chainPreview = null;
   return run;
@@ -782,12 +784,17 @@ async function continueBackgroundBatchPreviewRun(run, { requestContext, refererP
     run.status = 'running';
     touchBackgroundBatchRun(run);
 
+    const previewRequestContext = run.sessionContext?.headersRaw
+      ? buildRequestContext({ headersRaw: run.sessionContext.headersRaw }, null)
+      : requestContext;
+    const previewRefererPath = run.sessionContext?.refererPath || refererPath || '';
+
     const chain = await buildBatchChain({
       rootCgId: run.sessionContext?.rootCgId || run.rootCgId,
       targetCgSelector: run.sessionContext?.targetCgSelector || run.targetCgSelector,
       parentContainerName: run.sessionContext?.parentContainerName || run.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
-      requestContext,
-      refererPath,
+      requestContext: previewRequestContext,
+      refererPath: previewRefererPath,
       baseFolderInput: run.sessionContext?.baseFolderInput || run.baseFolderInput,
       selectedProviders: run.sessionContext?.selectedProviders || run.selectedProviders,
       sessionId: run.sessionId || null,
@@ -2948,7 +2955,9 @@ const zeniusController = {
         parentContainerName: req.body?.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
         baseFolderInput,
         selectedProviders,
-        keepaliveUrl
+        keepaliveUrl,
+        headersRaw: req.body?.headersRaw || '',
+        refererPath: req.body?.refererPath || ''
       });
 
       backgroundBatchRuns.set(run.id, run);
