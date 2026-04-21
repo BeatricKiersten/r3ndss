@@ -98,8 +98,7 @@ const PROGRESS_LOG_INTERVAL_MS = Number.parseInt(process.env.ZENIUS_BENCH_PROGRE
 let progressState = {
   total: 0,
   completed: 0,
-  duplicateCount: 0,
-  newCount: 0
+  labelCounts: {}
 };
 
 function formatDuration(ms) {
@@ -112,17 +111,20 @@ function formatDuration(ms) {
   return `${seconds}s`;
 }
 
-function logProgress(container, durationMs, force = false, labelInfo = null) {
+function accumulateLabelCounts(target, source) {
+  if (!target || !source) return;
+
+  for (const [label, count] of Object.entries(source)) {
+    const key = String(label || 'unknown');
+    target[key] = Number(target[key] || 0) + Number(count || 0);
+  }
+}
+
+function logProgress(labelCounts = null) {
   progressState.completed += 1;
 
-  const nameKey = String(container?.name || container?.containerName || container?.urlShortId || 'unknown').slice(0, 40);
-
-  if (labelInfo && labelInfo.label) {
-    if (labelInfo.label === 'existing') {
-      progressState.duplicateCount += 1;
-    } else {
-      progressState.newCount += 1;
-    }
+  if (labelCounts && typeof labelCounts === 'object') {
+    accumulateLabelCounts(progressState.labelCounts, labelCounts);
   }
 }
 
@@ -626,7 +628,6 @@ async function enrichContainer(container, options, includeMetadata, metadataConc
     enrichedInstances = metadataResults;
   }
 
-  let labelInfo = null;
   if (planning.includeProviderLabels) {
     const providerLimit = pLimit(planning.providerCheckConcurrency || 8);
     enrichedInstances = await Promise.all(enrichedInstances.map((item) => providerLimit(async () => {
@@ -640,10 +641,6 @@ async function enrichContainer(container, options, includeMetadata, metadataConc
         folderIdByInput: planning.folderIdByInput,
         existingByFolderId: planning.existingByFolderId
       });
-
-      if (!labelInfo) {
-        labelInfo = { label: providerLabel.label };
-      }
 
       return {
         ...item,
@@ -660,10 +657,9 @@ async function enrichContainer(container, options, includeMetadata, metadataConc
     })));
   }
 
-  logProgress({
-    urlShortId: container['url-short-id'],
-    name: container.name
-  }, Date.now() - startedAt, false, labelInfo || (planning.includeProviderLabels ? { label: 'unknown' } : null));
+  const labels = summarizeInstanceLabels(enrichedInstances);
+
+  logProgress(planning.includeProviderLabels ? labels : null);
 
   return {
     containerUrlShortId: container['url-short-id'],
@@ -673,7 +669,7 @@ async function enrichContainer(container, options, includeMetadata, metadataConc
     sourceLeafCgId: container.sourceLeafCgId || null,
     path: container.path,
     videoInstances: enrichedInstances,
-    labels: summarizeInstanceLabels(enrichedInstances),
+    labels,
     durationMs: Date.now() - startedAt
   };
 }
@@ -687,12 +683,23 @@ function summarizeInstanceLabels(instances = []) {
   return counts;
 }
 
+function formatLabelCounts(labelCounts = {}) {
+  const entries = Object.entries(labelCounts)
+    .filter(([, count]) => Number(count || 0) > 0)
+    .sort((left, right) => Number(right[1] || 0) - Number(left[1] || 0));
+
+  if (entries.length === 0) {
+    return 'none';
+  }
+
+  return entries.map(([label, count]) => `${label}:${count}`).join(', ');
+}
+
 async function runLimitedParallel(containers, options, includeMetadata, containerConcurrency, metadataConcurrency, planning) {
   const isProviderLabelRun = planning.includeProviderLabels;
   progressState.total = containers.length;
   progressState.completed = 0;
-  progressState.duplicateCount = 0;
-  progressState.newCount = 0;
+  progressState.labelCounts = {};
 
   console.log(`[START${isProviderLabelRun ? '-PROVIDERS' : ''}] ${containers.length} containers (concurrency=${containerConcurrency}, providerLabels=${isProviderLabelRun})`);
 
@@ -705,7 +712,14 @@ async function runLimitedParallel(containers, options, includeMetadata, containe
     planning
   ))));
 
-  console.log(`[DONE${isProviderLabelRun ? '-PROVIDERS' : ''}] dup:${progressState.duplicateCount} new:${progressState.newCount}`);
+  if (isProviderLabelRun) {
+    const existingCount = Number(progressState.labelCounts.existing || 0);
+    const newCount = Number(progressState.labelCounts.new || 0);
+    console.log(`[DONE-PROVIDERS] existing:${existingCount} new:${newCount} labels:${formatLabelCounts(progressState.labelCounts)}`);
+  } else {
+    console.log(`[DONE] processed:${progressState.completed}/${progressState.total}`);
+  }
+
   return results;
 }
 
