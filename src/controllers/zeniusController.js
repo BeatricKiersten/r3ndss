@@ -50,6 +50,8 @@ const BACKGROUND_BATCH_MAX_ITERATIONS = Number.parseInt(process.env.ZENIUS_BACKG
 const INSTANCE_METADATA_CACHE_TTL_MS = Number.parseInt(process.env.ZENIUS_INSTANCE_METADATA_CACHE_TTL_MS || '1800000', 10);
 const BATCH_METADATA_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_BATCH_METADATA_TIMEOUT_MS || '15000', 10);
 const BATCH_METADATA_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_BATCH_METADATA_MAX_RETRIES || '4', 10);
+const BATCH_FOLDER_PREFETCH_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_FOLDER_PREFETCH_CHUNK_SIZE || '80', 10);
+const BATCH_PROVIDER_PREFETCH_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_PROVIDER_PREFETCH_CHUNK_SIZE || '200', 10);
 // Caps for in-memory arrays to prevent unbounded memory growth
 const MAX_QUEUED_ITEMS_IN_MEMORY = Number.parseInt(process.env.ZENIUS_MAX_QUEUED_ITEMS_IN_MEMORY || '500', 10);
 const MAX_SKIPPED_ITEMS_IN_MEMORY = Number.parseInt(process.env.ZENIUS_MAX_SKIPPED_ITEMS_IN_MEMORY || '500', 10);
@@ -1120,6 +1122,13 @@ async function normalizeProviders(rawProviders) {
   return unique.size > 0 ? Array.from(unique) : null;
 }
 
+async function getEnabledProviderIds() {
+  const providerCatalog = await uploaderService.getProviderCatalog({ includeDisabled: false });
+  return providerCatalog
+    .filter((item) => item.enabled !== false)
+    .map((item) => item.id);
+}
+
 function getJson(endpoint, options) {
   return getUpstreamJson(endpoint, {
     ...options,
@@ -1564,12 +1573,246 @@ async function resolveFolderIdWithCache(folderCache, folderInput) {
   return pendingFolderId;
 }
 
+function chunkArray(values, chunkSize) {
+  const size = Math.max(1, Number(chunkSize) || 1);
+  const chunks = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function normalizeFolderInputKey(folderInput) {
+  const normalized = String(folderInput || '')
+    .replace(/\\/g, '/')
+    .trim();
+
+  if (!normalized || normalized === '/' || normalized.toLowerCase() === 'root') {
+    return 'root';
+  }
+
+  const cleaned = normalized
+    .replace(/^\/+/, '')
+    .replace(/\/+$/g, '')
+    .split('/')
+    .map((segment) => String(segment || '').trim())
+    .filter(Boolean)
+    .join('/');
+
+  return cleaned || 'root';
+}
+
+function toFolderInputKeyFromDbPath(dbPath) {
+  const normalized = String(dbPath || '')
+    .replace(/\\/g, '/')
+    .trim();
+
+  if (!normalized || normalized === '/') {
+    return 'root';
+  }
+
+  const cleaned = normalized
+    .replace(/^\/+/, '')
+    .replace(/\/+$/g, '')
+    .split('/')
+    .map((segment) => String(segment || '').trim())
+    .filter(Boolean)
+    .join('/');
+
+  return cleaned || 'root';
+}
+
+async function runDbQuery(sql, params = []) {
+  await db._ready();
+  const [rows] = await db.pool.query(sql, params);
+  return rows;
+}
+
+async function loadExistingFolderMap() {
+  const rows = await runDbQuery('SELECT id, path FROM folders');
+  const folderIdByInputKey = new Map();
+
+  for (const row of rows || []) {
+    const id = String(row?.id || '').trim();
+    const key = toFolderInputKeyFromDbPath(row?.path);
+    if (!id || !key || folderIdByInputKey.has(key)) {
+      continue;
+    }
+    folderIdByInputKey.set(key, id);
+  }
+
+  if (!folderIdByInputKey.has('root')) {
+    folderIdByInputKey.set('root', 'root');
+  }
+
+  return folderIdByInputKey;
+}
+
+async function buildExistingFileLookup(containers, baseFolderInput, chunkSize = BATCH_FOLDER_PREFETCH_CHUNK_SIZE) {
+  const plannedByFolderInput = new Map();
+
+  for (const container of containers || []) {
+    for (const instance of container.videoInstances || []) {
+      const urlShortId = normalizeNumericShortId(instance.urlShortId);
+      if (!urlShortId) continue;
+
+      const outputBaseName = sanitizeOutputName(instance.outputName || instance.name || `zenius-${urlShortId}`, `zenius-${urlShortId}`);
+      const outputFileName = `${outputBaseName}.mp4`;
+      const chainPath = String(instance.path || container.path || '').trim();
+      const finalFolderInput = joinFolderPaths(baseFolderInput, chainPath) || 'root';
+
+      if (!plannedByFolderInput.has(finalFolderInput)) {
+        plannedByFolderInput.set(finalFolderInput, new Set());
+      }
+      plannedByFolderInput.get(finalFolderInput).add(outputFileName);
+    }
+  }
+
+  const folderInputs = Array.from(plannedByFolderInput.keys());
+  const existingFolderMap = await loadExistingFolderMap();
+  const folderIdByInput = new Map();
+  let missingFolderCount = 0;
+  for (const folderInput of folderInputs) {
+    const folderKey = normalizeFolderInputKey(folderInput);
+    const folderId = existingFolderMap.get(folderKey) || null;
+    folderIdByInput.set(folderInput, folderId);
+    if (!folderId) {
+      missingFolderCount += 1;
+    }
+  }
+
+  const existingByFolderId = new Map();
+  const plannedNamesByFolderId = new Map();
+  for (const [folderInput, plannedNames] of plannedByFolderInput.entries()) {
+    const folderId = folderIdByInput.get(folderInput);
+    if (!folderId) {
+      continue;
+    }
+
+    if (!plannedNamesByFolderId.has(folderId)) {
+      plannedNamesByFolderId.set(folderId, new Set());
+    }
+
+    const merged = plannedNamesByFolderId.get(folderId);
+    for (const plannedName of plannedNames) {
+      merged.add(plannedName);
+    }
+  }
+
+  const resolvableFolderIds = Array.from(plannedNamesByFolderId.keys());
+  const folderIdChunks = chunkArray(resolvableFolderIds, chunkSize);
+
+  for (const folderIdChunk of folderIdChunks) {
+    if (folderIdChunk.length === 0) {
+      continue;
+    }
+
+    const placeholders = folderIdChunk.map(() => '?').join(', ');
+    const rows = await runDbQuery(
+      `SELECT id, folder_id, name, status, local_path
+         FROM files
+        WHERE folder_id IN (${placeholders})
+        ORDER BY created_at DESC`,
+      folderIdChunk
+    );
+
+    for (const row of rows || []) {
+      const folderId = String(row?.folder_id || '').trim();
+      const nameKey = String(row?.name || '').trim();
+      if (!folderId || !nameKey) {
+        continue;
+      }
+
+      const plannedNames = plannedNamesByFolderId.get(folderId);
+      if (!plannedNames || !plannedNames.has(nameKey)) {
+        continue;
+      }
+
+      if (!existingByFolderId.has(folderId)) {
+        existingByFolderId.set(folderId, new Map());
+      }
+
+      const byName = existingByFolderId.get(folderId);
+      if (byName.has(nameKey)) {
+        continue;
+      }
+
+      byName.set(nameKey, {
+        id: row.id,
+        name: row.name,
+        folder_id: row.folder_id,
+        status: row.status,
+        localPath: row.local_path || null
+      });
+    }
+  }
+
+  return {
+    folderIdByInput,
+    existingByFolderId,
+    plannedFolderCount: folderInputs.length,
+    missingFolderCount
+  };
+}
+
+function collectExistingFileIds(existingByFolderId) {
+  const fileIds = [];
+  for (const byName of existingByFolderId.values()) {
+    for (const file of byName.values()) {
+      const fileId = String(file?.id || '').trim();
+      if (fileId) {
+        fileIds.push(fileId);
+      }
+    }
+  }
+  return unique(fileIds);
+}
+
+async function buildProviderStatusLookup(existingByFolderId, chunkSize = BATCH_PROVIDER_PREFETCH_CHUNK_SIZE) {
+  const fileIds = collectExistingFileIds(existingByFolderId);
+  const providerStatusByFileId = new Map();
+
+  if (fileIds.length === 0) {
+    return { providerStatusByFileId, fileCount: 0 };
+  }
+
+  const chunks = chunkArray(fileIds, chunkSize);
+  for (const fileIdChunk of chunks) {
+    const placeholders = fileIdChunk.map(() => '?').join(', ');
+    const rows = await runDbQuery(
+      `SELECT file_id, provider, status
+         FROM file_providers
+        WHERE file_id IN (${placeholders})`,
+      fileIdChunk
+    );
+
+    for (const row of rows || []) {
+      const fileId = String(row?.file_id || '').trim();
+      const provider = String(row?.provider || '').trim();
+      const status = String(row?.status || '').trim().toLowerCase() || 'pending';
+      if (!fileId || !provider) {
+        continue;
+      }
+
+      if (!providerStatusByFileId.has(fileId)) {
+        providerStatusByFileId.set(fileId, new Map());
+      }
+      providerStatusByFileId.get(fileId).set(provider, status);
+    }
+  }
+
+  return { providerStatusByFileId, fileCount: fileIds.length };
+}
+
 async function buildPlannedBatchItem({
   container,
   instance,
   baseFolderInput,
   selectedProviders,
-  folderCache
+  folderCache,
+  folderIdByInput,
+  existingByFolderId,
+  providerStatusByFileId
 }) {
   const metadata = instance.metadata && typeof instance.metadata === 'object'
     ? { ...instance.metadata }
@@ -1595,8 +1838,9 @@ async function buildPlannedBatchItem({
   const outputFileName = `${outputName}.mp4`;
   const chainPath = String(instance.path || container.path || '').trim();
   const finalFolderInput = joinFolderPaths(baseFolderInput, chainPath) || 'root';
-  const folderId = await resolveFolderIdWithCache(folderCache, finalFolderInput);
-  const existingFile = await db.findFileByNameInFolder(folderId, outputFileName);
+  const prefetchedFolderId = folderIdByInput?.get(finalFolderInput) || null;
+  const folderId = prefetchedFolderId || await resolveFolderIdWithCache(folderCache, finalFolderInput);
+  const existingFile = (folderId && existingByFolderId?.get(folderId)?.get(outputFileName)) || null;
   const planKey = createPlannedItemKey(container.containerUrlShortId, urlShortId, outputFileName, folderId);
 
   const plannedItem = {
@@ -1661,13 +1905,16 @@ async function buildPlannedBatchItem({
     };
   }
 
-  const pendingProviderInfo = await uploaderService.getPendingUploadProviders(existingFile.id, selectedProviders, {
-    verifyRemote: false
+  const targetProviders = Array.isArray(selectedProviders) ? selectedProviders : [];
+  const fileProviderStatus = providerStatusByFileId?.get(existingFile.id) || new Map();
+  const pendingProviders = targetProviders.filter((provider) => {
+    const status = String(fileProviderStatus.get(provider) || 'pending').trim().toLowerCase();
+    return status !== 'completed';
   });
 
-  plannedItem.pendingProviders = pendingProviderInfo?.pendingProviders || [];
+  plannedItem.pendingProviders = pendingProviders;
 
-  if (!pendingProviderInfo?.hasPendingProviders) {
+  if (pendingProviders.length === 0) {
     plannedItem.action = 'skip';
     plannedItem.reason = 'File already exists on selected providers';
     return {
@@ -1704,19 +1951,14 @@ async function buildPlannedBatchItem({
 }
 
 async function buildBatchPlanForContainer({
-  container,
-  options,
-  session,
+  containerDetail,
   baseFolderInput,
   selectedProviders,
-  folderCache
+  folderCache,
+  folderIdByInput,
+  existingByFolderId,
+  providerStatusByFileId
 }) {
-  const containerDetail = await buildBatchContainerDetail({
-    container,
-    options,
-    session
-  });
-
   const plannedItems = [];
   const skipped = [];
 
@@ -1726,7 +1968,10 @@ async function buildBatchPlanForContainer({
       instance,
       baseFolderInput,
       selectedProviders,
-      folderCache
+      folderCache,
+      folderIdByInput,
+      existingByFolderId,
+      providerStatusByFileId
     });
 
     if (result?.planned) {
@@ -1983,6 +2228,11 @@ async function buildBatchChain({
   const details = [];
   const plannedItems = [];
   const skipped = [];
+  const prefetch = {
+    folderCount: 0,
+    missingFolderCount: 0,
+    providerFileCount: 0
+  };
   const pendingContainers = [];
   let cursor = normalizedOffset;
   while (cursor < totalContainers && pendingContainers.length < normalizedLimit) {
@@ -1990,29 +2240,61 @@ async function buildBatchChain({
     cursor += 1;
   }
 
-  for (const container of pendingContainers) {
-    const resolved = await buildBatchPlanForContainer({
-      container,
-      options,
-      session,
+  if (pendingContainers.length > 0) {
+    const detailLimit = pLimit(clampPositiveInt(BATCH_CG_FETCH_CONCURRENCY, 8));
+    const detailResults = await Promise.all(
+      pendingContainers.map((container) => detailLimit(async () => {
+        const containerDetail = await buildBatchContainerDetail({
+          container,
+          options,
+          session
+        });
+
+        return containerDetail || null;
+      }))
+    );
+
+    for (const containerDetail of detailResults) {
+      if (!containerDetail) {
+        continue;
+      }
+
+      const containerShortId = String(containerDetail.containerUrlShortId || '').trim();
+      if (containerShortId) {
+        session.containerDetailsByShortId.set(containerShortId, containerDetail);
+      }
+      details.push(containerDetail);
+    }
+
+    const prefetchContext = await prefetchBatchPlanContext({
+      containerDetails: details,
       baseFolderInput: planningContext.baseFolderInput,
-      selectedProviders: planningContext.selectedProviders,
-      folderCache: session.planFolderCache
+      selectedProviders: planningContext.selectedProviders
     });
+    prefetch.folderCount = Number(prefetchContext.prefetchFolderCount || 0);
+    prefetch.missingFolderCount = Number(prefetchContext.prefetchMissingFolderCount || 0);
+    prefetch.providerFileCount = Number(prefetchContext.prefetchProviderFileCount || 0);
 
-    if (!resolved?.containerDetail) {
-      continue;
+    const planLimit = pLimit(clampPositiveInt(BATCH_INSTANCE_METADATA_CONCURRENCY, 12));
+    const planResults = await Promise.all(
+      details.map((containerDetail) => planLimit(async () => buildBatchPlanForContainer({
+        containerDetail,
+        baseFolderInput: planningContext.baseFolderInput,
+        selectedProviders: prefetchContext.selectedProviders,
+        folderCache: session.planFolderCache,
+        folderIdByInput: prefetchContext.folderIdByInput,
+        existingByFolderId: prefetchContext.existingByFolderId,
+        providerStatusByFileId: prefetchContext.providerStatusByFileId
+      })))
+    );
+
+    for (const resolved of planResults) {
+      if (!resolved?.containerDetail) {
+        continue;
+      }
+      plannedItems.push(...(resolved.plannedItems || []));
+      skipped.push(...(resolved.skipped || []));
     }
-
-    const containerDetail = resolved.containerDetail;
-    const containerShortId = String(containerDetail.containerUrlShortId || '').trim();
-    if (containerShortId) {
-      session.containerDetailsByShortId.set(containerShortId, containerDetail);
-    }
-
-    details.push(containerDetail);
-    plannedItems.push(...(resolved.plannedItems || []));
-    skipped.push(...(resolved.skipped || []));
   }
 
   if (normalizedOffset === session.planCursor) {
@@ -2069,6 +2351,7 @@ async function buildBatchChain({
     containerDetails: details,
     plannedItems,
     skipped,
+    prefetch,
     errors: session.errors,
     timeBudgetMs: null
   };
@@ -2180,6 +2463,33 @@ function queueDownload(task) {
   return downloadQueue.add(task);
 }
 
+async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, selectedProviders }) {
+  const existingLookup = await buildExistingFileLookup(
+    containerDetails,
+    baseFolderInput,
+    clampPositiveInt(BATCH_FOLDER_PREFETCH_CHUNK_SIZE, 80)
+  );
+
+  const providerLookup = await buildProviderStatusLookup(
+    existingLookup.existingByFolderId,
+    clampPositiveInt(BATCH_PROVIDER_PREFETCH_CHUNK_SIZE, 200)
+  );
+
+  const activeProviders = Array.isArray(selectedProviders) && selectedProviders.length > 0
+    ? selectedProviders
+    : await getEnabledProviderIds();
+
+  return {
+    folderIdByInput: existingLookup.folderIdByInput,
+    existingByFolderId: existingLookup.existingByFolderId,
+    providerStatusByFileId: providerLookup.providerStatusByFileId,
+    selectedProviders: activeProviders,
+    prefetchFolderCount: existingLookup.plannedFolderCount,
+    prefetchMissingFolderCount: existingLookup.missingFolderCount,
+    prefetchProviderFileCount: providerLookup.fileCount
+  };
+}
+
 async function queueBatchDownloadChunk({ chain, requestContext, refererPath, baseFolderInput, selectedProviders, runId = null, cancelled = () => false }) {
   const queued = [];
   const skipped = [];
@@ -2215,7 +2525,10 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
     }
 
     if (plannedItem.action === 'finalize') {
-      const existingPipeline = await finalizeExistingFilePipeline(plannedItem.fileId, plannedItem.folderId, plannedItem.selectedProviders, {
+      const finalizeProviders = Array.isArray(plannedItem.pendingProviders) && plannedItem.pendingProviders.length > 0
+        ? plannedItem.pendingProviders
+        : plannedItem.selectedProviders;
+      const existingPipeline = await finalizeExistingFilePipeline(plannedItem.fileId, plannedItem.folderId, finalizeProviders, {
         waitForUpload: true
       });
       skipped.push({
