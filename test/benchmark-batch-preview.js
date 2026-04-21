@@ -101,7 +101,9 @@ let progressState = {
   completed: 0,
   lastLogTime: 0,
   containerNames: new Map(),
-  lastContainer: null
+  lastContainer: null,
+  duplicateCount: 0,
+  newCount: 0
 };
 
 function formatDuration(ms) {
@@ -114,18 +116,27 @@ function formatDuration(ms) {
   return `${seconds}s`;
 }
 
-function logProgress(container, durationMs, force = false) {
+function logProgress(container, durationMs, force = false, labelInfo = null) {
   if (!progressState.startTime) {
     progressState.startTime = Date.now();
   }
 
   progressState.completed += 1;
+
+  if (labelInfo) {
+    if (labelInfo.label === 'existing') {
+      progressState.duplicateCount += 1;
+    } else {
+      progressState.newCount += 1;
+    }
+  }
+
   const now = Date.now();
   const elapsedMs = now - progressState.startTime;
 
   const nameKey = String(container?.name || container?.containerName || container?.urlShortId || 'unknown').slice(0, 40);
   progressState.containerNames.set(container?.urlShortId || container?.containerUrlShortId || 'unknown', nameKey);
-  progressState.lastContainer = { name: nameKey, durationMs };
+  progressState.lastContainer = { name: nameKey, durationMs, label: labelInfo?.label };
 
   const shouldLog = force || (now - progressState.lastLogTime) >= PROGRESS_LOG_INTERVAL_MS;
 
@@ -135,10 +146,10 @@ function logProgress(container, durationMs, force = false) {
     const etaMs = avgMs * (progressState.total - progressState.completed);
     const rate = (progressState.completed / elapsedMs * 1000).toFixed(1);
 
-    const recentNames = Array.from(progressState.containerNames.values()).slice(-5);
     const lastName = progressState.lastContainer?.name || '';
+    const dupInfo = labelInfo ? ` | dup:${progressState.duplicateCount} new:${progressState.newCount}` : '';
 
-    console.log(`[${formatDuration(elapsedMs)}] ${progressState.completed}/${progressState.total} (${percent}%) | rate: ${rate}/s | eta: ${formatDuration(etaMs)} | avg: ${avgMs.toFixed(0)}ms | last: ${lastName.slice(0,30)}`);
+    console.log(`[${formatDuration(elapsedMs)}] ${progressState.completed}/${progressState.total} (${percent}%) | rate: ${rate}/s | eta: ${formatDuration(etaMs)} | avg: ${avgMs.toFixed(0)}ms | last: ${lastName.slice(0,20)}${dupInfo}`);
 
     progressState.lastLogTime = now;
   }
@@ -633,11 +644,6 @@ async function enrichContainer(container, options, includeMetadata, metadataConc
   const instances = await getVideoInstanceDetails(container['url-short-id'], options);
   let enrichedInstances = instances;
 
-  logProgress({
-    urlShortId: container['url-short-id'],
-    name: container.name
-  }, Date.now() - startedAt);
-
   if (includeMetadata && instances.length > 0) {
     const metadataLimit = pLimit(metadataConcurrency);
     const metadataResults = await Promise.all(instances.map((item) => metadataLimit(async () => ({
@@ -647,6 +653,7 @@ async function enrichContainer(container, options, includeMetadata, metadataConc
     enrichedInstances = metadataResults;
   }
 
+  let labelInfo = null;
   if (planning.includeProviderLabels) {
     const providerLimit = pLimit(planning.providerCheckConcurrency || 8);
     enrichedInstances = await Promise.all(enrichedInstances.map((item) => providerLimit(async () => {
@@ -660,6 +667,10 @@ async function enrichContainer(container, options, includeMetadata, metadataConc
         folderIdByInput: planning.folderIdByInput,
         existingByFolderId: planning.existingByFolderId
       });
+
+      if (!labelInfo) {
+        labelInfo = { label: providerLabel.label };
+      }
 
       return {
         ...item,
@@ -675,6 +686,11 @@ async function enrichContainer(container, options, includeMetadata, metadataConc
       };
     })));
   }
+
+  logProgress({
+    urlShortId: container['url-short-id'],
+    name: container.name
+  }, Date.now() - startedAt, false, labelInfo || (planning.includeProviderLabels ? { label: 'unknown' } : null));
 
   return {
     containerUrlShortId: container['url-short-id'],
@@ -704,6 +720,8 @@ async function runLimitedParallel(containers, options, includeMetadata, containe
   progressState.startTime = Date.now();
   progressState.lastLogTime = Date.now();
   progressState.containerNames.clear();
+  progressState.duplicateCount = 0;
+  progressState.newCount = 0;
 
   console.log(`[START] Processing ${containers.length} containers with concurrency ${containerConcurrency}`);
 
