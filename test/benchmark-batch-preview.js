@@ -908,17 +908,35 @@ async function main() {
       folderCache
     });
   } else {
-    // When provider labels are enabled, we fetch container instances first without preview run
+    console.log(`[PREVIEW] Seeding video instances for ${containers.length} containers (concurrency=${metadataConcurrency})...`);
     const instanceLimit = pLimit(metadataConcurrency);
-    previewSeedContainers = await Promise.all(containers.map(async container => {
+    const seedStartedAt = Date.now();
+    let seededCount = 0;
+    const totalToSeed = containers.length;
+
+    previewSeedContainers = await Promise.all(containers.map((container) => instanceLimit(async () => {
       const instances = await getVideoInstanceDetails(container['url-short-id'], options);
+      seededCount += 1;
+
+      if (seededCount === 1 || seededCount % 10 === 0 || seededCount === totalToSeed) {
+        const elapsedMs = Date.now() - seedStartedAt;
+        const throughput = (seededCount / Math.max(1, elapsedMs / 1000)).toFixed(2);
+        console.log(`[PREVIEW-SEED] containers:${seededCount}/${totalToSeed} throughput:${throughput}/s elapsed:${formatDuration(elapsedMs)}`);
+      }
+
       return { ...container, videoInstances: instances };
-    }));
+    })));
   }
 
+  if (includeProviderLabels) {
+    console.log(`[PREFETCH] Building existing file lookup for provider checks...`);
+  }
   const existingFileLookup = includeProviderLabels
     ? await buildExistingFileLookup(previewSeedContainers, baseFolderInput, folderCache, folderPrefetchChunkSize)
     : { folderIdByInput: new Map(), existingByFolderId: new Map(), plannedFolderCount: 0 };
+  if (includeProviderLabels) {
+    console.log(`[PREFETCH] Done. plannedFolders=${existingFileLookup.plannedFolderCount}`);
+  }
 
   console.log(JSON.stringify({
     phase: 'discovery',
