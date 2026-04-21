@@ -52,6 +52,7 @@ const BATCH_METADATA_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_BATCH_METAD
 const BATCH_METADATA_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_BATCH_METADATA_MAX_RETRIES || '4', 10);
 const BATCH_FOLDER_PREFETCH_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_FOLDER_PREFETCH_CHUNK_SIZE || '80', 10);
 const BATCH_PROVIDER_PREFETCH_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_PROVIDER_PREFETCH_CHUNK_SIZE || '200', 10);
+const BATCH_PREVIEW_STEPS_PER_POLL = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_STEPS_PER_POLL || '4', 10);
 // Caps for in-memory arrays to prevent unbounded memory growth
 const MAX_QUEUED_ITEMS_IN_MEMORY = Number.parseInt(process.env.ZENIUS_MAX_QUEUED_ITEMS_IN_MEMORY || '500', 10);
 const MAX_SKIPPED_ITEMS_IN_MEMORY = Number.parseInt(process.env.ZENIUS_MAX_SKIPPED_ITEMS_IN_MEMORY || '500', 10);
@@ -818,41 +819,53 @@ async function continueBackgroundBatchPreviewRun(run, { requestContext, refererP
       : requestContext;
     const previewRefererPath = run.sessionContext?.refererPath || refererPath || '';
 
-    const chain = await buildBatchChain({
-      rootCgId: run.sessionContext?.rootCgId || run.rootCgId,
-      targetCgSelector: run.sessionContext?.targetCgSelector || run.targetCgSelector,
-      parentContainerName: run.sessionContext?.parentContainerName || run.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
-      requestContext: previewRequestContext,
-      refererPath: previewRefererPath,
-      baseFolderInput: run.sessionContext?.baseFolderInput || run.baseFolderInput,
-      selectedProviders: run.sessionContext?.selectedProviders || run.selectedProviders,
-      sessionId: run.sessionId || null,
-      containerOffset: run.nextContainerOffset || 0,
-      containerLimit: clampPositiveInt(DEFAULT_BATCH_CHAIN_CHUNK_SIZE, 8),
-      timeBudgetMs: null
-    });
+    const stepsPerPoll = clampPositiveInt(BATCH_PREVIEW_STEPS_PER_POLL, 4);
+    let nextOffset = Number.isFinite(Number(run.nextContainerOffset)) ? Number(run.nextContainerOffset) : 0;
+    let hasMore = true;
 
-    run.sessionId = chain.sessionId || run.sessionId || null;
-    run.rootCgName = chain.rootCgName || run.rootCgName;
-    run.parentContainerName = chain.parentContainerName || run.parentContainerName;
-    run.totalContainers = Number(chain.totalContainers || 0);
-    run.scannedContainerCount = Number(chain.nextContainerOffset ?? chain.totalContainers ?? 0);
-    run.processedContainers = run.scannedContainerCount;
-    run.discoveredVideoCount = Number(chain.plannedItemCount || run.discoveredVideoCount || 0);
-    run.hasMoreContainers = Boolean(chain.hasMoreContainers);
-    run.nextContainerOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : 0;
-    run.chainErrors = Array.isArray(chain.errors) ? [...chain.errors] : [];
-    run.chainPreview = {
-      ...chain,
-      containerDetails: Array.isArray(chain.containerDetails)
-        ? [
-            ...((run.chainPreview?.containerDetails || []).filter((existing) => !chain.containerDetails.some((incoming) => incoming?.containerUrlShortId === existing?.containerUrlShortId))),
-            ...chain.containerDetails
-          ]
-        : (run.chainPreview?.containerDetails || [])
-    };
+    for (let step = 0; step < stepsPerPoll && hasMore; step += 1) {
+      const chain = await buildBatchChain({
+        rootCgId: run.sessionContext?.rootCgId || run.rootCgId,
+        targetCgSelector: run.sessionContext?.targetCgSelector || run.targetCgSelector,
+        parentContainerName: run.sessionContext?.parentContainerName || run.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
+        requestContext: previewRequestContext,
+        refererPath: previewRefererPath,
+        baseFolderInput: run.sessionContext?.baseFolderInput || run.baseFolderInput,
+        selectedProviders: run.sessionContext?.selectedProviders || run.selectedProviders,
+        sessionId: run.sessionId || null,
+        containerOffset: nextOffset,
+        containerLimit: clampPositiveInt(DEFAULT_BATCH_CHAIN_CHUNK_SIZE, 8),
+        timeBudgetMs: null
+      });
 
-    if (!chain.hasMoreContainers) {
+      run.sessionId = chain.sessionId || run.sessionId || null;
+      run.rootCgName = chain.rootCgName || run.rootCgName;
+      run.parentContainerName = chain.parentContainerName || run.parentContainerName;
+      run.totalContainers = Number(chain.totalContainers || 0);
+      run.scannedContainerCount = Number(chain.nextContainerOffset ?? chain.totalContainers ?? 0);
+      run.processedContainers = run.scannedContainerCount;
+      run.discoveredVideoCount = Number(chain.plannedItemCount || run.discoveredVideoCount || 0);
+      run.hasMoreContainers = Boolean(chain.hasMoreContainers);
+      run.nextContainerOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : 0;
+      run.chainErrors = Array.isArray(chain.errors) ? [...chain.errors] : [];
+      run.chainPreview = {
+        ...chain,
+        containerDetails: Array.isArray(chain.containerDetails)
+          ? [
+              ...((run.chainPreview?.containerDetails || []).filter((existing) => !chain.containerDetails.some((incoming) => incoming?.containerUrlShortId === existing?.containerUrlShortId))),
+              ...chain.containerDetails
+            ]
+          : (run.chainPreview?.containerDetails || [])
+      };
+
+      hasMore = Boolean(chain.hasMoreContainers);
+      nextOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : nextOffset;
+      if (!hasMore) {
+        break;
+      }
+    }
+
+    if (!hasMore) {
       run.status = 'completed';
       run.finishedAt = new Date().toISOString();
     }

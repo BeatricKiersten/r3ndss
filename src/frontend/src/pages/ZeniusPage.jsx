@@ -919,7 +919,9 @@ export default function ZeniusPage() {
           }
           const finalChain = status.chainPreview || null;
           const videoCount = (finalChain?.containerDetails || []).reduce((acc, c) => acc + (c.videoInstances?.length || 0), 0);
-          toast.success('Chain Built', `Found ${videoCount} videos across ${finalChain?.containerDetails?.length || 0} containers`);
+          const previewContainers = Number(finalChain?.containerDetails?.length || 0);
+          const discoveredContainers = Number(finalChain?.containerList?.totalContainers || 0);
+          toast.success('Chain Built', `Found ${videoCount} videos across ${previewContainers} preview containers (discovered: ${discoveredContainers})`);
           return;
         }
 
@@ -961,6 +963,11 @@ export default function ZeniusPage() {
   }, []);
 
   const handleStartBatchDownload = () => {
+    if (!batchChain?.planReady) {
+      toast.info('Preview belum selesai', 'Tunggu hingga chain preview selesai diproses sebelum start batch.');
+      return;
+    }
+
     const videoCount = (batchChain?.containerDetails || []).reduce((acc, c) => acc + (c.videoInstances?.length || 0), 0);
     const providerNames = selectedProviders.length > 0
       ? selectedProviders.map((p) => providers?.[p]?.name || p)
@@ -1031,6 +1038,9 @@ export default function ZeniusPage() {
   const batchVideoCount = useMemo(() => {
     return (batchChain?.containerDetails || []).reduce((acc, c) => acc + (c.videoInstances?.length || 0), 0);
   }, [batchChain]);
+  const batchPreviewContainerCount = Number(batchChain?.containerDetails?.length || 0);
+  const batchDiscoveredContainerCount = Number(batchChain?.containerList?.totalContainers || 0);
+  const isBatchChainReady = Boolean(batchChain?.planReady);
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
@@ -1561,11 +1571,20 @@ export default function ZeniusPage() {
               </div>
             )}
 
-            {batchChain && !batchChainMutation.isLoading && (
+            {batchChain && !batchChainMutation.isLoading && isBatchChainReady && (
               <div className="flex items-start gap-2 p-3 rounded-lg bg-emerald-500/5 border border-emerald-500/20">
                 <CheckCircle className="w-4 h-4 text-emerald-400 mt-0.5 flex-shrink-0" />
                 <p className="text-xs text-emerald-300">
-                  Chain ready — <strong>{batchVideoCount} video</strong> ditemukan di <strong>{batchChain.containerDetails?.length || 0} container</strong>. Periksa preview di bawah, lalu klik <strong>Start Batch Download</strong>.
+                  Chain ready — <strong>{batchVideoCount} video</strong> ditemukan di <strong>{batchPreviewContainerCount} container</strong>. Periksa preview di bawah, lalu klik <strong>Start Batch Download</strong>.
+                </p>
+              </div>
+            )}
+
+            {batchChain && !batchChainMutation.isLoading && !isBatchChainReady && (
+              <div className="flex items-start gap-2 p-3 rounded-lg bg-sky-500/5 border border-sky-500/20">
+                <Loader2 className="w-4 h-4 text-sky-400 mt-0.5 flex-shrink-0 animate-spin" />
+                <p className="text-xs text-sky-300">
+                  Preview masih diproses — saat ini <strong>{batchVideoCount} video</strong> dari <strong>{batchPreviewContainerCount} container</strong> (discovered: <strong>{batchDiscoveredContainerCount}</strong>). Tunggu hingga plan selesai sebelum start batch download.
                 </p>
               </div>
             )}
@@ -1589,13 +1608,13 @@ export default function ZeniusPage() {
             <CollapsibleSection
               title="Chain Preview"
               icon={Eye}
-              badge={`${batchVideoCount} videos, ${batchChain.containerDetails?.length || 0} containers`}
+              badge={`${batchVideoCount} videos, ${batchPreviewContainerCount} preview containers`}
               defaultOpen={true}
               rightElement={
                 <button
                   type="button"
                   onClick={handleStartBatchDownload}
-                  disabled={isBatchBusy}
+                  disabled={isBatchBusy || !isBatchChainReady}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 border border-emerald-500/30 transition-colors disabled:opacity-40"
                 >
                   {batchDownloadMutation.isLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
@@ -1604,7 +1623,7 @@ export default function ZeniusPage() {
               }
             >
               <div className="space-y-3 pt-3">
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-sm">
                   <div className="bg-[#0d0d0d] p-3 rounded-lg">
                     <p className="text-[#666] mb-1 text-xs">Leaf CG IDs</p>
                     <p className="text-white font-mono break-all">
@@ -1614,8 +1633,12 @@ export default function ZeniusPage() {
                     </p>
                   </div>
                   <div className="bg-[#0d0d0d] p-3 rounded-lg">
-                    <p className="text-[#666] mb-1 text-xs">Containers</p>
-                    <p className="text-white">{batchChain.containerList?.totalContainers ?? 0}</p>
+                    <p className="text-[#666] mb-1 text-xs">Preview Containers</p>
+                    <p className="text-white">{batchPreviewContainerCount}</p>
+                  </div>
+                  <div className="bg-[#0d0d0d] p-3 rounded-lg">
+                    <p className="text-[#666] mb-1 text-xs">Discovered Containers</p>
+                    <p className="text-white">{batchDiscoveredContainerCount}</p>
                   </div>
                   <div className="bg-[#0d0d0d] p-3 rounded-lg">
                     <p className="text-[#666] mb-1 text-xs">Video Instances</p>
