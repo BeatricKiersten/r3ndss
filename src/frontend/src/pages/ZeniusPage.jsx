@@ -883,19 +883,23 @@ export default function ZeniusPage() {
         folderId: normalizedBatchFolderPrefix || null
       });
 
-      const startedRunId = started?.batchRunId || started?.status?.id || null;
-      setBatchRunId(startedRunId);
-      setBatchSessionId(started?.status?.sessionId || null);
+      const startedSessionId = started?.sessionId || started?.status?.sessionId || started?.status?.id || null;
+      setBatchRunId(startedSessionId);
+      setBatchSessionId(startedSessionId);
 
       const poll = async () => {
-        if (!startedRunId) return;
-        const status = await getZeniusBatchChainStatus(startedRunId);
-        setBatchRunId(status.id || startedRunId);
-        setBatchSessionId(status.sessionId || null);
+        if (!startedSessionId) return;
+        const status = await getZeniusBatchChainStatus(startedSessionId);
+        setBatchRunId(status.id || startedSessionId);
+        setBatchSessionId(status.sessionId || startedSessionId);
         setBatchBuildProgress({
           processed: Number(status.containerProgress?.processed || status.processedContainers || 0),
           total: Number.isFinite(Number(status.containerProgress?.total)) ? Number(status.containerProgress.total) : null
         });
+
+        if (status.chainPreview) {
+          setBatchChain(status.chainPreview);
+        }
 
         if (status.status === 'completed') {
           setBatchChain(status.chainPreview || null);

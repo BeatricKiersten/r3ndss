@@ -295,8 +295,8 @@ export const useZeniusBatchChain = () => {
   });
 };
 
-export const getZeniusBatchChainStatus = async (batchRunId) => {
-  const response = await api.get(`/api/zenius/batch-chain/${batchRunId}`);
+export const getZeniusBatchChainStatus = async (sessionId) => {
+  const response = await api.get(`/api/zenius/batch-chain/${sessionId}`);
   return response.data.data;
 };
 

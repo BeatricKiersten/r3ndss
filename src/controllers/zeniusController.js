@@ -30,10 +30,10 @@ const DEFAULT_BATCH_PARENT_CONTAINER_NAME = '';
 const UPSTREAM_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_TIMEOUT_MS || '12000', 10);
 const UPSTREAM_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_UPSTREAM_MAX_RETRIES || '3', 10);
 const UPSTREAM_RETRY_BASE_DELAY_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_RETRY_BASE_DELAY_MS || '500', 10);
-const BATCH_CG_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CG_FETCH_CONCURRENCY || '4', 10);
-const BATCH_CONTAINER_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CONTAINER_FETCH_CONCURRENCY || '4', 10);
-const BATCH_DETAIL_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_DETAIL_FETCH_CONCURRENCY || '4', 10);
-const BATCH_INSTANCE_METADATA_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_INSTANCE_METADATA_CONCURRENCY || '6', 10);
+const BATCH_CG_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CG_FETCH_CONCURRENCY || '8', 10);
+const BATCH_CONTAINER_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CONTAINER_FETCH_CONCURRENCY || '8', 10);
+const BATCH_DETAIL_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_DETAIL_FETCH_CONCURRENCY || '8', 10);
+const BATCH_INSTANCE_METADATA_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_INSTANCE_METADATA_CONCURRENCY || '12', 10);
 const MAX_BATCH_ERRORS = Number.parseInt(process.env.ZENIUS_MAX_BATCH_ERRORS || '100', 10);
 const DEFAULT_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_CHUNK_SIZE || '8', 10);
 const MAX_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_MAX_CHUNK_SIZE || '20', 10);
@@ -769,7 +769,15 @@ function createBackgroundBatchPreviewRun({ rootCgId, targetCgSelector, parentCon
   });
 
   run.type = 'preview';
+  run.status = 'running';
   run.parentContainerName = String(parentContainerName || '').trim() || null;
+  run.sessionContext = {
+    rootCgId,
+    targetCgSelector: String(targetCgSelector || '').trim() || null,
+    parentContainerName: String(parentContainerName || '').trim() || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
+    baseFolderInput: String(baseFolderInput || '').trim() || '',
+    selectedProviders: Array.isArray(selectedProviders) ? [...selectedProviders] : null
+  };
   run.chainPreview = null;
   return run;
 }
@@ -880,24 +888,50 @@ function summarizeBackgroundBatchRun(run) {
   };
 }
 
-async function processBackgroundBatchPreviewRun(run, payload) {
+async function continueBackgroundBatchPreviewRun(run, { requestContext, refererPath }) {
   try {
-    const chain = await buildBatchChain(payload);
+    run.status = 'running';
+    touchBackgroundBatchRun(run);
+
+    const chain = await buildBatchChain({
+      rootCgId: run.sessionContext?.rootCgId || run.rootCgId,
+      targetCgSelector: run.sessionContext?.targetCgSelector || run.targetCgSelector,
+      parentContainerName: run.sessionContext?.parentContainerName || run.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
+      requestContext,
+      refererPath,
+      baseFolderInput: run.sessionContext?.baseFolderInput || run.baseFolderInput,
+      selectedProviders: run.sessionContext?.selectedProviders || run.selectedProviders,
+      sessionId: run.sessionId || null,
+      containerOffset: run.nextContainerOffset || 0,
+      containerLimit: clampPositiveInt(DEFAULT_BATCH_CHAIN_CHUNK_SIZE, 8),
+      timeBudgetMs: null
+    });
+
     run.sessionId = chain.sessionId || run.sessionId || null;
     run.rootCgName = chain.rootCgName || run.rootCgName;
     run.parentContainerName = chain.parentContainerName || run.parentContainerName;
     run.totalContainers = Number(chain.totalContainers || 0);
-    run.scannedContainerCount = Number(chain.processedContainerCount || chain.containerDetails?.length || 0);
+    run.scannedContainerCount = Number(chain.nextContainerOffset ?? chain.totalContainers ?? 0);
     run.processedContainers = run.scannedContainerCount;
-    run.discoveredVideoCount = Array.isArray(chain.containerDetails)
-      ? chain.containerDetails.reduce((acc, container) => acc + Number(container?.videoInstances?.length || 0), 0)
-      : 0;
+    run.discoveredVideoCount = Number(chain.plannedItemCount || run.discoveredVideoCount || 0);
     run.hasMoreContainers = Boolean(chain.hasMoreContainers);
     run.nextContainerOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : 0;
     run.chainErrors = Array.isArray(chain.errors) ? [...chain.errors] : [];
-    run.chainPreview = chain;
-    run.status = 'completed';
-    run.finishedAt = new Date().toISOString();
+    run.chainPreview = {
+      ...chain,
+      containerDetails: Array.isArray(chain.containerDetails)
+        ? [
+            ...((run.chainPreview?.containerDetails || []).filter((existing) => !chain.containerDetails.some((incoming) => incoming?.containerUrlShortId === existing?.containerUrlShortId))),
+            ...chain.containerDetails
+          ]
+        : (run.chainPreview?.containerDetails || [])
+    };
+
+    if (!chain.hasMoreContainers) {
+      run.status = 'completed';
+      run.finishedAt = new Date().toISOString();
+    }
+
     touchBackgroundBatchRun(run);
   } catch (error) {
     run.error = error.message;
@@ -3081,7 +3115,6 @@ const zeniusController = {
       cleanupExpiredBatchChainSessions();
       cleanupExpiredBackgroundBatchRuns();
 
-      const requestContext = buildRequestContext(req.body || {}, req);
       const selectedProviders = await normalizeProviders(req.body?.providers);
       const baseFolderInput = stripWrappingQuotes(req.body?.folderId || '');
       const keepaliveUrl = resolveBackgroundKeepaliveUrl(req);
@@ -3098,25 +3131,11 @@ const zeniusController = {
       backgroundBatchRuns.set(run.id, run);
       ensureBackgroundBatchKeepalive(keepaliveUrl);
 
-      void processBackgroundBatchPreviewRun(run, {
-        rootCgId: req.body?.rootCgId,
-        targetCgSelector: req.body?.targetCgSelector,
-        parentContainerName: req.body?.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
-        requestContext,
-        refererPath: req.body?.refererPath,
-        baseFolderInput,
-        selectedProviders,
-        sessionId: req.body?.sessionId,
-        containerOffset: req.body?.containerOffset,
-        containerLimit: req.body?.containerLimit,
-        timeBudgetMs: req.body?.timeBudgetMs
-      });
-
       res.status(202).json({
         success: true,
-        message: 'Zenius batch chain build started in background',
+        message: 'Zenius batch chain session started',
         data: {
-          batchRunId: run.id,
+          sessionId: run.id,
           status: summarizeBackgroundBatchRun(run)
         }
       });
@@ -3132,6 +3151,14 @@ const zeniusController = {
 
       if (!run || run.type !== 'preview') {
         return res.status(404).json({ success: false, error: 'Batch preview build not found' });
+      }
+
+      if (run.status === 'running' && !run.finishedAt) {
+        const requestContext = buildRequestContext(req.query || {}, req);
+        await continueBackgroundBatchPreviewRun(run, {
+          requestContext,
+          refererPath: req.query?.refererPath || ''
+        });
       }
 
       res.json({
