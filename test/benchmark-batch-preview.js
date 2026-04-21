@@ -897,13 +897,24 @@ async function main() {
     console.log(`[LIMIT] Container limit applied: ${containers.length} containers`);
   }
 
-  console.log(`[PREVIEW] Fetching container details for ${containers.length} containers...`);
-  const previewSeedContainers = await runLimitedParallel(containers, options, false, containerConcurrency, metadataConcurrency, {
-    includeProviderLabels: false,
-    baseFolderInput,
-    selectedProviders,
-    folderCache
-  });
+  let previewSeedContainers;
+  
+  if (!includeProviderLabels) {
+    console.log(`[PREVIEW] Fetching container details for ${containers.length} containers...`);
+    previewSeedContainers = await runLimitedParallel(containers, options, false, containerConcurrency, metadataConcurrency, {
+      includeProviderLabels: false,
+      baseFolderInput,
+      selectedProviders,
+      folderCache
+    });
+  } else {
+    // When provider labels are enabled, we fetch container instances first without preview run
+    const instanceLimit = pLimit(metadataConcurrency);
+    previewSeedContainers = await Promise.all(containers.map(async container => {
+      const instances = await getVideoInstanceDetails(container['url-short-id'], options);
+      return { ...container, videoInstances: instances };
+    }));
+  }
 
   const existingFileLookup = includeProviderLabels
     ? await buildExistingFileLookup(previewSeedContainers, baseFolderInput, folderCache, folderPrefetchChunkSize)
