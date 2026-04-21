@@ -1,7 +1,7 @@
 /**
- * MySQL Database Handler
+ * PostgreSQL Database Handler
  *
- * Persists critical application data in MySQL:
+ * Persists critical application data in PostgreSQL:
  * - folders, files, jobs
  * - provider states/configs/check snapshots
  * - rclone remotes/profiles/system state
@@ -10,7 +10,9 @@
  * not persisted in this database layer.
  */
 
-const mysql = require('mysql2/promise');
+require('dotenv').config();
+
+const { Pool, Client } = require('pg');
 const { v4: uuidv4 } = require('uuid');
 const {
   STATIC_PROVIDER_DEFS,
@@ -59,33 +61,36 @@ function stringifyJson(value) {
   return JSON.stringify(value === undefined ? null : value);
 }
 
-function buildMysqlConfigFromEnv() {
+function quoteIdentifier(value) {
+  return `"${String(value).replace(/"/g, '""')}"`;
+}
+
+function buildPostgresConfigFromEnv() {
+  const legacyUrl = process.env.MYSQL_URL || '';
   const config = {
-    host: process.env.MYSQL_HOST || '127.0.0.1',
-    port: Number(process.env.MYSQL_PORT || 3306),
-    user: process.env.MYSQL_USER || 'root',
-    password: process.env.MYSQL_PASSWORD || '',
-    database: process.env.MYSQL_DATABASE || 'zenius',
-    connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 5),
-    maxIdle: Number(process.env.MYSQL_MAX_IDLE || process.env.MYSQL_CONNECTION_LIMIT || 5),
-    idleTimeout: Number(process.env.MYSQL_IDLE_TIMEOUT || 60000),
-    queueLimit: Number(process.env.MYSQL_QUEUE_LIMIT || 0),
-    connectTimeout: Number(process.env.MYSQL_CONNECT_TIMEOUT || 10000),
-    enableKeepAlive: String(process.env.MYSQL_ENABLE_KEEP_ALIVE || 'true').toLowerCase() !== 'false',
-    keepAliveInitialDelay: Number(process.env.MYSQL_KEEP_ALIVE_INITIAL_DELAY || 0),
-    autoCreateDatabase: String(process.env.MYSQL_AUTO_CREATE_DATABASE || 'true').toLowerCase() !== 'false',
-    ssl: String(process.env.MYSQL_SSL || 'false').toLowerCase() === 'true',
-    sslRejectUnauthorized: String(process.env.MYSQL_SSL_REJECT_UNAUTHORIZED || 'true').toLowerCase() !== 'false'
+    host: process.env.POSTGRES_HOST || process.env.PGHOST || '127.0.0.1',
+    port: Number(process.env.POSTGRES_PORT || process.env.PGPORT || 5432),
+    user: process.env.POSTGRES_USER || process.env.PGUSER || 'postgres',
+    password: process.env.POSTGRES_PASSWORD || process.env.PGPASSWORD || '',
+    database: process.env.POSTGRES_DATABASE || process.env.PGDATABASE || 'zenius',
+    connectionLimit: Number(process.env.POSTGRES_CONNECTION_LIMIT || process.env.PGPOOLSIZE || 5),
+    idleTimeout: Number(process.env.POSTGRES_IDLE_TIMEOUT || 60000),
+    connectTimeout: Number(process.env.POSTGRES_CONNECT_TIMEOUT || 10000),
+    keepAlive: String(process.env.POSTGRES_ENABLE_KEEP_ALIVE || 'true').toLowerCase() !== 'false',
+    ssl: String(process.env.POSTGRES_SSL || 'false').toLowerCase() === 'true',
+    sslRejectUnauthorized: String(process.env.POSTGRES_SSL_REJECT_UNAUTHORIZED || 'true').toLowerCase() !== 'false'
   };
 
-  const mysqlUrl = process.env.MYSQL_URL || process.env.DATABASE_URL;
-  if (!mysqlUrl) {
+  const postgresUrl = process.env.POSTGRES_URL
+    || process.env.DATABASE_URL
+    || ((/^postgres(ql)?:\/\//i.test(legacyUrl)) ? legacyUrl : '');
+  if (!postgresUrl) {
     return config;
   }
 
-  const parsed = new URL(mysqlUrl);
-  if (!['mysql:', 'mysql2:'].includes(parsed.protocol)) {
-    throw new Error('MYSQL_URL must use mysql:// or mysql2:// protocol');
+  const parsed = new URL(postgresUrl);
+  if (!['postgres:', 'postgresql:'].includes(parsed.protocol)) {
+    throw new Error('POSTGRES_URL/DATABASE_URL must use postgres:// or postgresql:// protocol');
   }
 
   config.host = parsed.hostname || config.host;
@@ -98,46 +103,135 @@ function buildMysqlConfigFromEnv() {
     config.database = dbName;
   }
 
-  const sslMode = String(
-    parsed.searchParams.get('ssl-mode') ||
-    parsed.searchParams.get('sslmode') ||
-    parsed.searchParams.get('ssl_mode') ||
-    ''
-  ).toLowerCase();
-
-  const urlForcesSsl = ['required', 'require', 'verify_ca', 'verify_identity'].includes(sslMode)
+  const sslMode = String(parsed.searchParams.get('sslmode') || parsed.searchParams.get('ssl') || '').toLowerCase();
+  const urlForcesSsl = ['required', 'require', 'verify-ca', 'verify-full', 'true'].includes(sslMode)
     || String(parsed.searchParams.get('ssl') || '').toLowerCase() === 'true';
 
   if (urlForcesSsl) {
     config.ssl = true;
   }
 
-  if (parsed.searchParams.get('connectionLimit')) {
-    config.connectionLimit = Number(parsed.searchParams.get('connectionLimit')) || config.connectionLimit;
-  }
-
-  if (parsed.searchParams.get('maxIdle')) {
-    config.maxIdle = Number(parsed.searchParams.get('maxIdle')) || config.maxIdle;
+  if (parsed.searchParams.get('connectionLimit') || parsed.searchParams.get('pool_max')) {
+    config.connectionLimit = Number(parsed.searchParams.get('connectionLimit') || parsed.searchParams.get('pool_max')) || config.connectionLimit;
   }
 
   if (parsed.searchParams.get('idleTimeout')) {
     config.idleTimeout = Number(parsed.searchParams.get('idleTimeout')) || config.idleTimeout;
   }
 
-  if (parsed.searchParams.get('queueLimit')) {
-    config.queueLimit = Number(parsed.searchParams.get('queueLimit')) || config.queueLimit;
-  }
-
   if (parsed.searchParams.get('connectTimeout')) {
     config.connectTimeout = Number(parsed.searchParams.get('connectTimeout')) || config.connectTimeout;
   }
 
+  config.connectionString = postgresUrl;
   return config;
+}
+
+function convertPlaceholders(sql) {
+  let index = 0;
+  return sql.replace(/\?/g, () => `$${++index}`);
+}
+
+function buildQueryMeta(result) {
+  return {
+    affectedRows: Number(result?.rowCount || 0),
+    changedRows: Number(result?.rowCount || 0),
+    rowCount: Number(result?.rowCount || 0),
+    command: String(result?.command || '').toUpperCase()
+  };
+}
+
+function formatQueryResult(result) {
+  const meta = buildQueryMeta(result);
+  const command = meta.command;
+
+  if (command === 'SELECT') {
+    return [result.rows, []];
+  }
+
+  return [meta, []];
+}
+
+class PgClientCompat {
+  constructor(client, release = null) {
+    this.client = client;
+    this._release = release;
+    this._onError = (error) => {
+      console.warn(`[DB] Client error: ${error.message}`);
+    };
+    this.client.on('error', this._onError);
+  }
+
+  async query(sql, params = []) {
+    const result = await this.client.query(convertPlaceholders(sql), params);
+    return formatQueryResult(result);
+  }
+
+  async beginTransaction() {
+    await this.client.query('BEGIN');
+  }
+
+  async commit() {
+    await this.client.query('COMMIT');
+  }
+
+  async rollback() {
+    await this.client.query('ROLLBACK');
+  }
+
+  release() {
+    if (typeof this._release === 'function') {
+      this.client.removeListener('error', this._onError);
+      this._release();
+      this._release = null;
+    }
+  }
+
+  async end() {
+    this.client.removeListener('error', this._onError);
+    await this.client.end();
+  }
+}
+
+class PgPoolCompat {
+  constructor(config) {
+    this.pool = new Pool({
+      connectionString: config.connectionString,
+      host: config.connectionString ? undefined : config.host,
+      port: config.connectionString ? undefined : config.port,
+      user: config.connectionString ? undefined : config.user,
+      password: config.connectionString ? undefined : config.password,
+      database: config.connectionString ? undefined : config.database,
+      max: config.connectionLimit,
+      idleTimeoutMillis: config.idleTimeout,
+      connectionTimeoutMillis: config.connectTimeout,
+      keepAlive: config.keepAlive,
+      ssl: config.ssl ? { rejectUnauthorized: config.sslRejectUnauthorized } : false
+    });
+
+    this.pool.on('error', (error) => {
+      console.warn(`[DB] Pool client error: ${error.message}`);
+    });
+  }
+
+  async query(sql, params = []) {
+    const result = await this.pool.query(convertPlaceholders(sql), params);
+    return formatQueryResult(result);
+  }
+
+  async getConnection() {
+    const client = await this.pool.connect();
+    return new PgClientCompat(client, () => client.release());
+  }
+
+  async end() {
+    await this.pool.end();
+  }
 }
 
 class DatabaseHandler {
   constructor() {
-    this.mysql = buildMysqlConfigFromEnv();
+    this.postgres = buildPostgresConfigFromEnv();
 
     this.pool = null;
     this.startupMaintenancePromise = null;
@@ -183,13 +277,15 @@ class DatabaseHandler {
       'ECONNREFUSED',
       'ETIMEDOUT',
       'EPIPE',
-      'ER_CON_COUNT_ERROR'
+      'ER_CON_COUNT_ERROR',
+      '53300',
+      '57P03'
     ].includes(code);
   }
 
   _isMissingDatabaseError(error) {
     const code = String(error?.code || '').trim().toUpperCase();
-    return code === 'ER_BAD_DB_ERROR';
+    return code === '3D000';
   }
 
   async _disposePool() {
@@ -457,7 +553,9 @@ class DatabaseHandler {
 
   async _buildFileCompleteness(fileId, providerRows = null, options = {}) {
     const includeDisabled = options.includeDisabled === true;
-    const providerCatalog = await this.getProviderCatalog({ includeDisabled });
+    const providerCatalog = Array.isArray(options.providerCatalog)
+      ? options.providerCatalog
+      : await this.getProviderCatalog({ includeDisabled });
     const targetProviders = providerCatalog.map((item) => item.id);
 
     let rows = providerRows;
@@ -545,34 +643,12 @@ class DatabaseHandler {
 
   async _initialize() {
     let lastError = null;
-    let attemptedDatabaseCreate = false;
 
     for (let attempt = 1; attempt <= DB_INIT_RETRY_ATTEMPTS; attempt += 1) {
       let pool = null;
 
       try {
-        const poolConfig = {
-          host: this.mysql.host,
-          port: this.mysql.port,
-          user: this.mysql.user,
-          password: this.mysql.password,
-          database: this.mysql.database,
-          waitForConnections: true,
-          connectionLimit: this.mysql.connectionLimit,
-          maxIdle: Math.min(this.mysql.maxIdle, this.mysql.connectionLimit),
-          idleTimeout: this.mysql.idleTimeout,
-          queueLimit: this.mysql.queueLimit,
-          connectTimeout: this.mysql.connectTimeout,
-          enableKeepAlive: this.mysql.enableKeepAlive,
-          keepAliveInitialDelay: this.mysql.keepAliveInitialDelay,
-          charset: 'utf8mb4'
-        };
-
-        if (this.mysql.ssl) {
-          poolConfig.ssl = { rejectUnauthorized: this.mysql.sslRejectUnauthorized };
-        }
-
-        pool = mysql.createPool(poolConfig);
+        pool = new PgPoolCompat(this.postgres);
         await this._createSchema(pool);
         await this._seedDefaults(pool);
         this.pool = pool;
@@ -593,12 +669,6 @@ class DatabaseHandler {
           this.pool = null;
         }
 
-        if (this.mysql.autoCreateDatabase && !attemptedDatabaseCreate && this._isMissingDatabaseError(error)) {
-          attemptedDatabaseCreate = true;
-          await this._createDatabaseIfNeeded();
-          continue;
-        }
-
         if (!this._isRetryableInitError(error) || attempt >= DB_INIT_RETRY_ATTEMPTS) {
           throw error;
         }
@@ -612,30 +682,6 @@ class DatabaseHandler {
     throw lastError;
   }
 
-  async _createDatabaseIfNeeded() {
-    const bootstrapConfig = {
-      host: this.mysql.host,
-      port: this.mysql.port,
-      user: this.mysql.user,
-      password: this.mysql.password,
-      charset: 'utf8mb4'
-    };
-
-    if (this.mysql.ssl) {
-      bootstrapConfig.ssl = { rejectUnauthorized: this.mysql.sslRejectUnauthorized };
-    }
-
-    const connection = await mysql.createConnection(bootstrapConfig);
-    try {
-      const safeDbName = String(this.mysql.database).replace(/`/g, '``');
-      await connection.query(
-        `CREATE DATABASE IF NOT EXISTS \`${safeDbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
-      );
-    } finally {
-      await connection.end();
-    }
-  }
-
   async _createSchema(pool = this._getPoolOrThrow()) {
     const statements = [
       `CREATE TABLE IF NOT EXISTS folders (
@@ -645,8 +691,8 @@ class DatabaseHandler {
         path TEXT NOT NULL,
         created_at VARCHAR(40) NOT NULL,
         updated_at VARCHAR(40) NOT NULL,
-        INDEX idx_folders_parent (parent_id)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+        CONSTRAINT folders_parent_fk CHECK (id <> '')
+      )`,
       `CREATE TABLE IF NOT EXISTS files (
         id VARCHAR(64) PRIMARY KEY,
         folder_id VARCHAR(64) NOT NULL,
@@ -659,16 +705,12 @@ class DatabaseHandler {
         progress_download INT NOT NULL DEFAULT 0,
         progress_processing INT NOT NULL DEFAULT 0,
         progress_upload INT NOT NULL DEFAULT 0,
-        progress_extra LONGTEXT NULL,
+        progress_extra TEXT NULL,
         sync_status INT NOT NULL DEFAULT 0,
-        can_delete TINYINT(1) NOT NULL DEFAULT 0,
+        can_delete BOOLEAN NOT NULL DEFAULT FALSE,
         created_at VARCHAR(40) NOT NULL,
-        updated_at VARCHAR(40) NOT NULL,
-        INDEX idx_files_folder (folder_id),
-        INDEX idx_files_folder_name (folder_id, name(255)),
-        INDEX idx_files_status (status),
-        INDEX idx_files_created (created_at)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+        updated_at VARCHAR(40) NOT NULL
+      )`,
       `CREATE TABLE IF NOT EXISTS file_providers (
         file_id VARCHAR(64) NOT NULL,
         provider VARCHAR(64) NOT NULL,
@@ -678,12 +720,10 @@ class DatabaseHandler {
         public_file_id TEXT NULL,
         embed_url TEXT NULL,
         error TEXT NULL,
-        url_history LONGTEXT NULL,
+        url_history TEXT NULL,
         updated_at VARCHAR(40) NOT NULL,
-        PRIMARY KEY (file_id, provider),
-        INDEX idx_file_providers_provider (provider),
-        INDEX idx_file_providers_status (status)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+        PRIMARY KEY (file_id, provider)
+      )`,
       `CREATE TABLE IF NOT EXISTS jobs (
         id VARCHAR(64) PRIMARY KEY,
         type VARCHAR(32) NOT NULL,
@@ -693,19 +733,13 @@ class DatabaseHandler {
         attempts INT NOT NULL DEFAULT 0,
         max_attempts INT NOT NULL DEFAULT 3,
         error TEXT NULL,
-        metadata LONGTEXT NULL,
+        metadata TEXT NULL,
         created_at VARCHAR(40) NOT NULL,
         updated_at VARCHAR(40) NOT NULL,
         started_at VARCHAR(40) NULL,
         completed_at VARCHAR(40) NULL,
-        heartbeat_at VARCHAR(40) NULL,
-        INDEX idx_jobs_status (status),
-        INDEX idx_jobs_status_created (status, created_at),
-        INDEX idx_jobs_file (file_id),
-        INDEX idx_jobs_type (type),
-        INDEX idx_jobs_created (created_at),
-        INDEX idx_jobs_heartbeat (heartbeat_at)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+        heartbeat_at VARCHAR(40) NULL
+      )`,
       `CREATE TABLE IF NOT EXISTS batch_sessions (
         id VARCHAR(64) PRIMARY KEY,
         run_id VARCHAR(64) NULL,
@@ -719,43 +753,41 @@ class DatabaseHandler {
         queued_count INT NOT NULL DEFAULT 0,
         skipped_count INT NOT NULL DEFAULT 0,
         next_container_offset INT NOT NULL DEFAULT 0,
-        has_more TINYINT(1) NOT NULL DEFAULT 1,
+        has_more BOOLEAN NOT NULL DEFAULT TRUE,
         error TEXT NULL,
-        session_data LONGTEXT NULL,
-        queued_items LONGTEXT NULL,
-        skipped_items LONGTEXT NULL,
-        chain_errors LONGTEXT NULL,
+        session_data TEXT NULL,
+        queued_items TEXT NULL,
+        skipped_items TEXT NULL,
+        chain_errors TEXT NULL,
         created_at VARCHAR(40) NOT NULL,
         updated_at VARCHAR(40) NOT NULL,
         expires_at VARCHAR(40) NULL,
-        finished_at VARCHAR(40) NULL,
-        INDEX idx_batch_status (status),
-        INDEX idx_batch_run (run_id)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+        finished_at VARCHAR(40) NULL
+      )`,
       `CREATE TABLE IF NOT EXISTS provider_configs (
         provider VARCHAR(64) PRIMARY KEY,
-        enabled TINYINT(1) NOT NULL DEFAULT 1,
-        config LONGTEXT NULL,
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        config TEXT NULL,
         updated_at VARCHAR(40) NOT NULL
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      )`,
       `CREATE TABLE IF NOT EXISTS system_state (
-        id TINYINT PRIMARY KEY,
+        id SMALLINT PRIMARY KEY,
         last_check VARCHAR(40) NULL,
         next_scheduled_check VARCHAR(40) NULL,
         primary_provider VARCHAR(64) NOT NULL,
         updated_at VARCHAR(40) NOT NULL
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      )`,
       `CREATE TABLE IF NOT EXISTS provider_checks (
         provider VARCHAR(64) PRIMARY KEY,
-        payload LONGTEXT NULL,
+        payload TEXT NULL,
         checked_at VARCHAR(40) NULL
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      )`,
       `CREATE TABLE IF NOT EXISTS rclone_remotes (
         name VARCHAR(128) PRIMARY KEY,
         type VARCHAR(64) NOT NULL,
-        parameters LONGTEXT NULL,
+        parameters TEXT NULL,
         updated_at VARCHAR(40) NOT NULL
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      )`,
       `CREATE TABLE IF NOT EXISTS rclone_sync_profiles (
         id VARCHAR(128) PRIMARY KEY,
         name VARCHAR(255) NOT NULL,
@@ -763,18 +795,33 @@ class DatabaseHandler {
         remote_name VARCHAR(128) NOT NULL,
         destination_path TEXT NULL,
         public_base_url TEXT NULL,
-        enabled TINYINT(1) NOT NULL DEFAULT 1,
-        updated_at VARCHAR(40) NOT NULL,
-        INDEX idx_rclone_profiles_provider (provider),
-        INDEX idx_rclone_profiles_remote (remote_name)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        updated_at VARCHAR(40) NOT NULL
+      )`,
       `CREATE TABLE IF NOT EXISTS rclone_state (
-        id TINYINT PRIMARY KEY,
+        id SMALLINT PRIMARY KEY,
         default_profile_id VARCHAR(128) NULL,
-        last_validation LONGTEXT NULL,
+        last_validation TEXT NULL,
         last_validated_at VARCHAR(40) NULL,
         updated_at VARCHAR(40) NOT NULL
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+      )`,
+      'CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders (parent_id)',
+      'CREATE INDEX IF NOT EXISTS idx_files_folder ON files (folder_id)',
+      'CREATE INDEX IF NOT EXISTS idx_files_folder_name ON files (folder_id, name)',
+      'CREATE INDEX IF NOT EXISTS idx_files_status ON files (status)',
+      'CREATE INDEX IF NOT EXISTS idx_files_created ON files (created_at)',
+      'CREATE INDEX IF NOT EXISTS idx_file_providers_provider ON file_providers (provider)',
+      'CREATE INDEX IF NOT EXISTS idx_file_providers_status ON file_providers (status)',
+      'CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs (status)',
+      'CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs (status, created_at)',
+      'CREATE INDEX IF NOT EXISTS idx_jobs_file ON jobs (file_id)',
+      'CREATE INDEX IF NOT EXISTS idx_jobs_type ON jobs (type)',
+      'CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs (created_at)',
+      'CREATE INDEX IF NOT EXISTS idx_jobs_heartbeat ON jobs (heartbeat_at)',
+      'CREATE INDEX IF NOT EXISTS idx_batch_status ON batch_sessions (status)',
+      'CREATE INDEX IF NOT EXISTS idx_batch_run ON batch_sessions (run_id)',
+      'CREATE INDEX IF NOT EXISTS idx_rclone_profiles_provider ON rclone_sync_profiles (provider)',
+      'CREATE INDEX IF NOT EXISTS idx_rclone_profiles_remote ON rclone_sync_profiles (remote_name)'
     ];
 
     for (const statement of statements) {
@@ -788,22 +835,25 @@ class DatabaseHandler {
     await pool.query(
       `INSERT INTO folders (id, name, parent_id, path, created_at, updated_at)
        VALUES ('root', 'Root', NULL, '/', ?, ?)
-       ON DUPLICATE KEY UPDATE name = VALUES(name), path = VALUES(path), updated_at = VALUES(updated_at)`,
+       ON CONFLICT (id) DO UPDATE SET
+         name = EXCLUDED.name,
+         path = EXCLUDED.path,
+         updated_at = EXCLUDED.updated_at`,
       [now, now]
     );
 
     for (const provider of STATIC_PROVIDER_IDS) {
       await pool.query(
         `INSERT INTO provider_configs (provider, enabled, config, updated_at)
-         VALUES (?, 1, '{}', ?)
-         ON DUPLICATE KEY UPDATE provider = provider`,
+         VALUES (?, TRUE, '{}', ?)
+         ON CONFLICT (provider) DO NOTHING`,
         [provider, now]
       );
 
       await pool.query(
         `INSERT INTO provider_checks (provider, payload, checked_at)
          VALUES (?, NULL, NULL)
-         ON DUPLICATE KEY UPDATE provider = provider`,
+         ON CONFLICT (provider) DO NOTHING`,
         [provider]
       );
     }
@@ -811,14 +861,14 @@ class DatabaseHandler {
     await pool.query(
       `INSERT INTO system_state (id, last_check, next_scheduled_check, primary_provider, updated_at)
        VALUES (1, NULL, NULL, 'catbox', ?)
-       ON DUPLICATE KEY UPDATE id = id`,
+       ON CONFLICT (id) DO NOTHING`,
       [now]
     );
 
     await pool.query(
       `INSERT INTO rclone_state (id, default_profile_id, last_validation, last_validated_at, updated_at)
        VALUES (1, NULL, NULL, NULL, ?)
-       ON DUPLICATE KEY UPDATE id = id`,
+       ON CONFLICT (id) DO NOTHING`,
       [now]
     );
 
@@ -901,41 +951,41 @@ class DatabaseHandler {
         name: 'add_heartbeat_at_to_jobs',
         check: async () => {
           const [columns] = await this.pool.query(
-            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'jobs' AND COLUMN_NAME = 'heartbeat_at'"
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'jobs' AND column_name = 'heartbeat_at'"
           );
           return columns.length === 0;
         },
-        sql: "ALTER TABLE jobs ADD COLUMN heartbeat_at VARCHAR(40) NULL, ADD INDEX idx_jobs_heartbeat (heartbeat_at)"
+        sql: 'ALTER TABLE jobs ADD COLUMN heartbeat_at VARCHAR(40) NULL; CREATE INDEX IF NOT EXISTS idx_jobs_heartbeat ON jobs (heartbeat_at)'
       },
       {
         name: 'add_public_file_id_to_file_providers',
         check: async () => {
           const [columns] = await this.pool.query(
-            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'file_providers' AND COLUMN_NAME = 'public_file_id'"
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'file_providers' AND column_name = 'public_file_id'"
           );
           return columns.length === 0;
         },
-        sql: "ALTER TABLE file_providers ADD COLUMN public_file_id TEXT NULL AFTER remote_file_id"
+        sql: 'ALTER TABLE file_providers ADD COLUMN public_file_id TEXT NULL'
       },
       {
         name: 'add_files_folder_name_index',
         check: async () => {
           const [indexes] = await this.pool.query(
-            "SHOW INDEX FROM files WHERE Key_name = 'idx_files_folder_name'"
+            "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'files' AND indexname = 'idx_files_folder_name'"
           );
           return indexes.length === 0;
         },
-        sql: 'ALTER TABLE files ADD INDEX idx_files_folder_name (folder_id, name(255))'
+        sql: 'CREATE INDEX IF NOT EXISTS idx_files_folder_name ON files (folder_id, name)'
       },
       {
         name: 'add_jobs_status_created_index',
         check: async () => {
           const [indexes] = await this.pool.query(
-            "SHOW INDEX FROM jobs WHERE Key_name = 'idx_jobs_status_created'"
+            "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'jobs' AND indexname = 'idx_jobs_status_created'"
           );
           return indexes.length === 0;
         },
-        sql: 'ALTER TABLE jobs ADD INDEX idx_jobs_status_created (status, created_at)'
+        sql: 'CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs (status, created_at)'
       }
     ];
 
@@ -982,20 +1032,17 @@ class DatabaseHandler {
   }
 
   async waitForConnectionOnly() {
-    const pingConfig = {
-      host: this.mysql.host,
-      port: this.mysql.port,
-      user: this.mysql.user,
-      password: this.mysql.password,
-      database: this.mysql.database,
-      charset: 'utf8mb4'
-    };
-
-    if (this.mysql.ssl) {
-      pingConfig.ssl = { rejectUnauthorized: this.mysql.sslRejectUnauthorized };
-    }
-
-    const connection = await mysql.createConnection(pingConfig);
+    const connection = new PgClientCompat(new Client({
+      connectionString: this.postgres.connectionString,
+      host: this.postgres.connectionString ? undefined : this.postgres.host,
+      port: this.postgres.connectionString ? undefined : this.postgres.port,
+      user: this.postgres.connectionString ? undefined : this.postgres.user,
+      password: this.postgres.connectionString ? undefined : this.postgres.password,
+      database: this.postgres.connectionString ? undefined : this.postgres.database,
+      connectionTimeoutMillis: this.postgres.connectTimeout,
+      ssl: this.postgres.ssl ? { rejectUnauthorized: this.postgres.sslRejectUnauthorized } : false
+    }));
+    await connection.client.connect();
     try {
       await connection.query('SELECT 1 AS ok');
     } finally {
@@ -1013,25 +1060,27 @@ class DatabaseHandler {
       await connection.commit();
       return result;
     } catch (error) {
-      await connection.rollback();
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.warn(`[DB] Rollback skipped: ${rollbackError.message}`);
+      }
       throw error;
     } finally {
       connection.release();
     }
   }
 
-  async _ensureFileProvidersForFile(connection, fileId) {
-    await this._ready();
+  async _ensureFileProvidersForFile(connection, fileId, providerCatalog = null) {
     const now = this._now();
-    const providerCatalog = await this.getProviderCatalog({ includeDisabled: false });
-    const allProviderIds = providerCatalog.map((item) => item.id);
+    const allProviderIds = (Array.isArray(providerCatalog) ? providerCatalog : []).map((item) => item.id);
 
     for (const provider of allProviderIds) {
       await connection.query(
         `INSERT INTO file_providers
           (file_id, provider, status, url, remote_file_id, embed_url, error, url_history, updated_at)
          VALUES (?, ?, 'pending', NULL, NULL, NULL, NULL, '[]', ?)
-         ON DUPLICATE KEY UPDATE file_id = file_id`,
+         ON CONFLICT (file_id, provider) DO NOTHING`,
         [fileId, provider, now]
       );
     }
@@ -1221,7 +1270,7 @@ class DatabaseHandler {
     }
 
     const [existing] = await this.pool.query(
-      'SELECT id FROM folders WHERE parent_id <=> ? AND name = ? LIMIT 1',
+      'SELECT id FROM folders WHERE parent_id IS NOT DISTINCT FROM ? AND name = ? LIMIT 1',
       [parentId, trimmedName]
     );
 
@@ -1294,7 +1343,7 @@ class DatabaseHandler {
 
       for (const segment of segments) {
         const [existingRows] = await connection.query(
-          'SELECT * FROM folders WHERE parent_id <=> ? AND name = ? LIMIT 1 FOR UPDATE',
+          'SELECT * FROM folders WHERE parent_id IS NOT DISTINCT FROM ? AND name = ? LIMIT 1 FOR UPDATE',
           [current.id, segment]
         );
 
@@ -1507,7 +1556,7 @@ class DatabaseHandler {
       }
 
       const [allFolderRows] = await connection.query(
-        'SELECT id, parent_id, path FROM folders ORDER BY CHAR_LENGTH(path) DESC FOR UPDATE'
+        'SELECT id, parent_id, path FROM folders ORDER BY LENGTH(path) DESC FOR UPDATE'
       );
 
       const childrenByParent = new Map();
@@ -1598,7 +1647,7 @@ class DatabaseHandler {
     return this._withTransaction(async (connection) => {
       // Get all non-root folders ordered by path length DESC (children first)
       const [allFolderRows] = await connection.query(
-        "SELECT id, parent_id, path FROM folders WHERE id != 'root' ORDER BY CHAR_LENGTH(path) DESC FOR UPDATE"
+        "SELECT id, parent_id, path FROM folders WHERE id != 'root' ORDER BY LENGTH(path) DESC FOR UPDATE"
       );
 
       if (allFolderRows.length === 0) {
@@ -1670,6 +1719,9 @@ class DatabaseHandler {
   // ==================== FILE OPERATIONS ====================
 
   async createFile(fileData) {
+    await this._ready();
+    const providerCatalog = await this.getProviderCatalog({ includeDisabled: false });
+
     const fileId = await this._withTransaction(async (connection) => {
       const folderId = fileData.folderId || 'root';
       const [folderRows] = await connection.query('SELECT id FROM folders WHERE id = ? LIMIT 1', [folderId]);
@@ -1706,7 +1758,7 @@ class DatabaseHandler {
         ]
       );
 
-      await this._ensureFileProvidersForFile(connection, id);
+      await this._ensureFileProvidersForFile(connection, id, providerCatalog);
       return id;
     });
 
@@ -1744,6 +1796,7 @@ class DatabaseHandler {
   }
 
   async clearFileProviderLink(fileId, provider, reason = 'Provider link removed by user') {
+    const providerCatalog = await this.getProviderCatalog({ includeDisabled: false });
     return this._withTransaction(async (connection) => {
       const [fileRows] = await connection.query('SELECT id FROM files WHERE id = ? FOR UPDATE', [fileId]);
       if (!fileRows[0]) {
@@ -1786,7 +1839,10 @@ class DatabaseHandler {
         [reason, stringifyJson(history), now, fileId, provider]
       );
 
-      await this._updateFileCompleteness(connection, fileId, { updateFileStatus: true });
+      await this._updateFileCompleteness(connection, fileId, {
+        updateFileStatus: true,
+        providerCatalog
+      });
 
       return { fileId, provider, cleared: true, reason };
     });
@@ -1794,6 +1850,7 @@ class DatabaseHandler {
 
   async updateProviderStatus(fileId, provider, status, url = null, fileId_provider = null, error = null, extra = {}) {
     this._assertProviderSupported(provider);
+    const providerCatalog = await this.getProviderCatalog({ includeDisabled: false });
 
     await this._withTransaction(async (connection) => {
       const [fileRows] = await connection.query('SELECT id FROM files WHERE id = ? FOR UPDATE', [fileId]);
@@ -1801,7 +1858,7 @@ class DatabaseHandler {
         throw new Error(`File ${fileId} not found`);
       }
 
-      await this._ensureFileProvidersForFile(connection, fileId);
+      await this._ensureFileProvidersForFile(connection, fileId, providerCatalog);
 
       const [currentRows] = await connection.query(
         'SELECT * FROM file_providers WHERE file_id = ? AND provider = ? FOR UPDATE',
@@ -1833,15 +1890,15 @@ class DatabaseHandler {
         `INSERT INTO file_providers
           (file_id, provider, status, url, remote_file_id, public_file_id, embed_url, error, url_history, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-          status = VALUES(status),
-          url = VALUES(url),
-          remote_file_id = VALUES(remote_file_id),
-          public_file_id = VALUES(public_file_id),
-          embed_url = VALUES(embed_url),
-          error = VALUES(error),
-          url_history = VALUES(url_history),
-          updated_at = VALUES(updated_at)`,
+         ON CONFLICT (file_id, provider) DO UPDATE SET
+          status = EXCLUDED.status,
+          url = EXCLUDED.url,
+          remote_file_id = EXCLUDED.remote_file_id,
+          public_file_id = EXCLUDED.public_file_id,
+          embed_url = EXCLUDED.embed_url,
+          error = EXCLUDED.error,
+          url_history = EXCLUDED.url_history,
+          updated_at = EXCLUDED.updated_at`,
         [
           fileId,
           provider,
@@ -1856,7 +1913,10 @@ class DatabaseHandler {
         ]
       );
 
-      await this._updateFileCompleteness(connection, fileId, { updateFileStatus: true });
+      await this._updateFileCompleteness(connection, fileId, {
+        updateFileStatus: true,
+        providerCatalog
+      });
     });
 
     return this.getFile(fileId);
@@ -2459,11 +2519,11 @@ class DatabaseHandler {
     await this.pool.query(
       `INSERT INTO provider_configs (provider, enabled, config, updated_at)
        VALUES (?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         enabled = VALUES(enabled),
-         config = VALUES(config),
-         updated_at = VALUES(updated_at)`,
-      [provider, next.enabled ? 1 : 0, stringifyJson(next.config), next.updatedAt]
+       ON CONFLICT (provider) DO UPDATE SET
+         enabled = EXCLUDED.enabled,
+         config = EXCLUDED.config,
+         updated_at = EXCLUDED.updated_at`,
+      [provider, next.enabled, stringifyJson(next.config), next.updatedAt]
     );
 
     this._invalidateMetadataCache();
@@ -2844,7 +2904,7 @@ class DatabaseHandler {
             profile.remoteName,
             profile.destinationPath,
             profile.publicBaseUrl,
-            profile.enabled ? 1 : 0,
+            profile.enabled !== false,
             now
           ]
         );
@@ -2852,16 +2912,16 @@ class DatabaseHandler {
         await connection.query(
           `INSERT INTO provider_configs (provider, enabled, config, updated_at)
            VALUES (?, ?, ?, ?)
-           ON DUPLICATE KEY UPDATE
-             enabled = VALUES(enabled),
-             updated_at = VALUES(updated_at)`,
-          [providerId, profile.enabled ? 1 : 0, '{}', now]
+           ON CONFLICT (provider) DO UPDATE SET
+             enabled = EXCLUDED.enabled,
+             updated_at = EXCLUDED.updated_at`,
+          [providerId, profile.enabled !== false, '{}', now]
         );
 
         await connection.query(
           `INSERT INTO provider_checks (provider, payload, checked_at)
-           VALUES (?, NULL, NULL)
-           ON DUPLICATE KEY UPDATE provider = provider`,
+            VALUES (?, NULL, NULL)
+           ON CONFLICT (provider) DO NOTHING`,
           [providerId]
         );
       }
@@ -2890,11 +2950,11 @@ class DatabaseHandler {
       await connection.query(
         `INSERT INTO rclone_state (id, default_profile_id, last_validation, last_validated_at, updated_at)
          VALUES (1, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-           default_profile_id = VALUES(default_profile_id),
-           last_validation = VALUES(last_validation),
-           last_validated_at = VALUES(last_validated_at),
-           updated_at = VALUES(updated_at)`,
+         ON CONFLICT (id) DO UPDATE SET
+           default_profile_id = EXCLUDED.default_profile_id,
+           last_validation = EXCLUDED.last_validation,
+           last_validated_at = EXCLUDED.last_validated_at,
+           updated_at = EXCLUDED.updated_at`,
         [
           defaultProfileId,
           stringifyJson(current.lastValidation),
@@ -2940,9 +3000,9 @@ class DatabaseHandler {
     await this.pool.query(
       `INSERT INTO provider_checks (provider, payload, checked_at)
        VALUES (?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         payload = VALUES(payload),
-         checked_at = VALUES(checked_at)`,
+       ON CONFLICT (provider) DO UPDATE SET
+         payload = EXCLUDED.payload,
+         checked_at = EXCLUDED.checked_at`,
       [provider, stringifyJson(payload), checkedAt]
     );
 
@@ -2988,8 +3048,12 @@ class DatabaseHandler {
     });
     const now = this._now();
     await this.pool.query(
-      'INSERT INTO provider_checks (provider, payload, checked_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE payload = ?, checked_at = ?',
-      ['__webhook_config', payload, now, payload, now]
+      `INSERT INTO provider_checks (provider, payload, checked_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT (provider) DO UPDATE SET
+         payload = EXCLUDED.payload,
+         checked_at = EXCLUDED.checked_at`,
+      ['__webhook_config', payload, now]
     );
     this._invalidateMetadataCache();
     return config;

@@ -273,7 +273,7 @@ async function startServer() {
       console.log('[Server] Database initialized successfully');
     } catch (dbError) {
       console.error('[Server] Database initialization failed:', dbError.message);
-      console.error('[Server] Check MYSQL_URL, network/TLS access, or slow startup migrations/backfill');
+      console.error('[Server] Check POSTGRES_URL/DATABASE_URL, network/TLS access, or slow startup migrations/backfill');
       // Don't crash - let the server run but APIs will fail
     }
 
