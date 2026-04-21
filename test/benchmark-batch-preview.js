@@ -869,17 +869,22 @@ async function main() {
     existingByFolderId: existingFileLookup.existingByFolderId
   };
 
+  console.log(`[PLANNING] includeProviderLabels=${includeProviderLabels}, prefetch folders=${existingFileLookup.plannedFolderCount}`);
+
   const runners = {
     parallel: () => runLimitedParallel(containers, options, includeMetadata, containerConcurrency, metadataConcurrency, planning)
   };
 
   const modes = [mode];
 
+  console.log(`[RUN] modes=${JSON.stringify(modes)}, includeMetadata=${includeMetadata}`);
+
   for (const currentMode of modes) {
     if (!runners[currentMode]) {
       throw new Error(`Unsupported mode: ${currentMode}`);
     }
 
+    console.log(`[RUN] Starting mode=${currentMode}`);
     const startedAt = Date.now();
     const details = await runners[currentMode]();
     const summary = summarizeResult(currentMode, startedAt, discovery, details);
