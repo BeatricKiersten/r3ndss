@@ -759,7 +759,11 @@ export default function ZeniusPage() {
     setBatchBuildProgress(trackedPreviewRun.status === 'running'
       ? {
           processed: Number(trackedPreviewRun.scannedContainerCount || trackedPreviewRun.processedContainers || 0),
-          total: Number.isFinite(Number(trackedPreviewRun.totalContainers)) ? Number(trackedPreviewRun.totalContainers) : null
+          total: Number.isFinite(Number(trackedPreviewRun.totalContainers)) ? Number(trackedPreviewRun.totalContainers) : null,
+          discoveredVideos: Number(trackedPreviewRun.discoveredVideoCount || 0),
+          previewContainers: Number(trackedPreviewRun.chainPreview?.containerDetails?.length || 0),
+          discoveredContainers: Number(trackedPreviewRun.chainPreview?.containerList?.totalContainers || trackedPreviewRun.totalContainers || 0),
+          hasMore: Boolean(trackedPreviewRun.hasMoreContainers)
         }
       : null);
 
@@ -903,7 +907,11 @@ export default function ZeniusPage() {
         setBatchSessionId(status.sessionId || startedSessionId);
         setBatchBuildProgress({
           processed: Number(status.containerProgress?.processed || status.processedContainers || 0),
-          total: Number.isFinite(Number(status.containerProgress?.total)) ? Number(status.containerProgress.total) : null
+          total: Number.isFinite(Number(status.containerProgress?.total)) ? Number(status.containerProgress.total) : null,
+          discoveredVideos: Number(status.discoveredVideoCount || 0),
+          previewContainers: Number(status.chainPreview?.containerDetails?.length || 0),
+          discoveredContainers: Number(status.chainPreview?.containerList?.totalContainers || status.totalContainers || 0),
+          hasMore: Boolean(status.hasMoreContainers)
         });
 
         if (status.chainPreview) {
@@ -1598,6 +1606,24 @@ export default function ZeniusPage() {
                 </div>
                 <div className="w-full bg-[#1a1a1a] rounded-full h-2 overflow-hidden">
                   <div className="bg-gradient-to-r from-sky-500 to-sky-400 h-full rounded-full transition-all duration-300" style={{ width: `${batchBuildProgress.total ? Math.round((batchBuildProgress.processed / batchBuildProgress.total) * 100) : 0}%` }} />
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
+                  <div className="bg-[#0d0d0d] rounded px-2 py-1 border border-[#1f1f1f]">
+                    <span className="text-[#666]">Discovered videos</span>
+                    <p className="text-sky-200 font-mono">{Number(batchBuildProgress.discoveredVideos || 0)}</p>
+                  </div>
+                  <div className="bg-[#0d0d0d] rounded px-2 py-1 border border-[#1f1f1f]">
+                    <span className="text-[#666]">Preview containers</span>
+                    <p className="text-sky-200 font-mono">{Number(batchBuildProgress.previewContainers || 0)}</p>
+                  </div>
+                  <div className="bg-[#0d0d0d] rounded px-2 py-1 border border-[#1f1f1f]">
+                    <span className="text-[#666]">Discovered containers</span>
+                    <p className="text-sky-200 font-mono">{Number(batchBuildProgress.discoveredContainers || 0)}</p>
+                  </div>
+                  <div className="bg-[#0d0d0d] rounded px-2 py-1 border border-[#1f1f1f]">
+                    <span className="text-[#666]">Status</span>
+                    <p className="text-sky-200 font-mono">{batchBuildProgress.hasMore ? 'running' : 'finalizing'}</p>
+                  </div>
                 </div>
               </div>
             )}
