@@ -161,7 +161,7 @@ function recordDuplicateCheck(result, context = {}) {
       ? result.availableProviders.join(',')
       : '-';
 
-    console.log(`[DUP-CHECK] #${sequence} container=${containerId} name="${containerName}" ci=${result?.urlShortId || 'unknown'} label=${label} folderId=${result?.folderId || '-'} file="${result?.outputName || '-'}" existingFileId=${result?.existingFileId || '-'} status=${result?.existingStatus || '-'} pendingProviders=${pendingProviders} activeProviders=${activeProviders}`);
+    console.log(`[DUP-CHECK] #${sequence} container=${containerId} name="${containerName}" ci=${result?.urlShortId || 'unknown'} label=${label} folderId=${result?.folderId || '-'} basePath=${result?.basePath || '-'} file="${result?.outputName || '-'}" existingFileId=${result?.existingFileId || '-'} status=${result?.existingStatus || '-'} pendingProviders=${pendingProviders} activeProviders=${activeProviders}`);
   }
 
   maybeLogProviderProgress(false);
@@ -736,6 +736,12 @@ function joinFolderPaths(prefix, suffix) {
   return `${left.replace(/\/+$/g, '')}/${right.replace(/^\/+/, '')}`;
 }
 
+function buildBasePlusPath(baseFolderInput, pathInput) {
+  const base = String(baseFolderInput || '').replace(/\\/g, '/').trim() || 'root';
+  const path = String(pathInput || '').replace(/\\/g, '/').trim() || 'root';
+  return `${base}+${path}`;
+}
+
 function sanitizeOutputName(value, fallback) {
   const normalized = sanitizePathSegment(String(value || '').replace(/\.mp4$/i, ''), fallback);
   return normalized || fallback;
@@ -765,6 +771,7 @@ async function buildProviderLabelForInstance({
   const outputFileName = `${outputBaseName}.mp4`;
   const chainPath = String(instance.path || container.path || '').trim();
   const finalFolderInput = joinFolderPaths(baseFolderInput, chainPath) || 'root';
+  const basePath = buildBasePlusPath(baseFolderInput, chainPath);
   const folderId = folderIdByInput?.get(finalFolderInput) || null;
   const existingFile = folderId
     ? (existingByFolderId?.get(folderId)?.get(outputFileName) || null)
@@ -775,6 +782,7 @@ async function buildProviderLabelForInstance({
     outputName: outputFileName,
     folderId,
     folderInput: finalFolderInput,
+    basePath,
     existingFileId: existingFile?.id || null,
     existingStatus: existingFile?.status || null,
     label: existingFile ? 'existing' : 'new',
@@ -859,7 +867,8 @@ async function enrichContainer(container, options, includeMetadata, metadataConc
         existingStatus: providerLabel.existingStatus,
         outputName: providerLabel.outputName,
         folderId: providerLabel.folderId,
-        folderInput: providerLabel.folderInput
+        folderInput: providerLabel.folderInput,
+        basePath: providerLabel.basePath
       };
     })));
   }
