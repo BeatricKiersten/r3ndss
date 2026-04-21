@@ -116,6 +116,10 @@ function StatusBadge({ status }) {
     failed: { bg: 'bg-red-500/10', text: 'text-red-400', label: 'Failed' },
     pending: { bg: 'bg-zinc-500/10', text: 'text-zinc-400', label: 'Queued' },
     skipped: { bg: 'bg-amber-500/10', text: 'text-amber-400', label: 'Skipped' },
+    ready: { bg: 'bg-emerald-500/10', text: 'text-emerald-300', label: 'Download' },
+    retry: { bg: 'bg-orange-500/10', text: 'text-orange-300', label: 'Retry' },
+    finalize: { bg: 'bg-cyan-500/10', text: 'text-cyan-300', label: 'Finalize' },
+    mapped: { bg: 'bg-sky-500/10', text: 'text-sky-300', label: 'Mapped' }
   };
   const c = config[status] || config.pending;
   return (
@@ -1044,11 +1048,61 @@ export default function ZeniusPage() {
   }, []);
 
   const batchVideoCount = useMemo(() => {
+    const plannedCount = Number(batchChain?.plannedItems?.length || 0);
+    if (plannedCount > 0) return plannedCount;
     return (batchChain?.containerDetails || []).reduce((acc, c) => acc + (c.videoInstances?.length || 0), 0);
   }, [batchChain]);
   const batchPreviewContainerCount = Number(batchChain?.containerDetails?.length || 0);
   const batchDiscoveredContainerCount = Number(batchChain?.containerList?.totalContainers || 0);
   const isBatchChainReady = Boolean(batchChain?.planReady);
+  const batchPreviewRows = useMemo(() => {
+    const plannedItems = Array.isArray(batchChain?.plannedItems) ? batchChain.plannedItems : [];
+    if (plannedItems.length > 0) {
+      return plannedItems.map((item, index) => ({
+        key: item.planKey || `${item.urlShortId || 'unknown'}-${index}`,
+        index,
+        urlShortId: item.urlShortId || '-',
+        outputName: item.outputName || item.instance?.outputName || '-',
+        folderInput: item.folderInput || 'root',
+        chainPath: item.path || '',
+        containerName: item.containerName || '-',
+        reason: item.reason || '-',
+        action: item.action || 'pending',
+        providers: Array.isArray(item.pendingProviders) ? item.pendingProviders : []
+      }));
+    }
+
+    return (batchChain?.containerDetails || []).flatMap((container, ci) =>
+      (container.videoInstances || []).map((item, vi) => {
+        const index = (ci * 1000) + vi;
+        const outputName = item.outputName ? `${item.outputName}.mp4` : ((item.metadata?.name || item.name) ? `${item.metadata?.name || item.name}.mp4` : '-');
+        const chainPath = item.path || container.path || '';
+        const folderInput = normalizedBatchFolderPrefix
+          ? `root/${normalizedBatchFolderPrefix}${chainPath ? `/${chainPath}` : ''}`
+          : `root${chainPath ? `/${chainPath}` : ''}`;
+
+        return {
+          key: `${container.containerUrlShortId || 'container'}-${item.urlShortId || index}`,
+          index,
+          urlShortId: item.urlShortId || '-',
+          outputName,
+          folderInput,
+          chainPath,
+          containerName: container.containerName || '-',
+          reason: 'Menunggu planning selesai',
+          action: 'mapped',
+          providers: []
+        };
+      })
+    );
+  }, [batchChain, normalizedBatchFolderPrefix]);
+  const batchActionSummary = useMemo(() => {
+    return batchPreviewRows.reduce((summary, item) => {
+      const key = item.action || 'pending';
+      summary[key] = (summary[key] || 0) + 1;
+      return summary;
+    }, {});
+  }, [batchPreviewRows]);
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
@@ -1681,33 +1735,76 @@ export default function ZeniusPage() {
                 )}
 
                 <div>
-                  <p className="text-xs text-[#888] mb-2">Video Queue</p>
+                  <div className="flex items-center justify-between gap-3 mb-2">
+                    <p className="text-xs text-[#888]">Preview Mapping</p>
+                    <p className="text-[11px] text-[#666]">
+                      Menampilkan nama file final dan folder tujuan yang akan dipakai batch downloader.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3 text-[11px]">
+                    <div className="bg-[#0d0d0d] rounded px-2 py-1 border border-[#1f1f1f]">
+                      <span className="text-[#666]">Download</span>
+                      <p className="text-emerald-300 font-mono">{Number(batchActionSummary.download || 0)}</p>
+                    </div>
+                    <div className="bg-[#0d0d0d] rounded px-2 py-1 border border-[#1f1f1f]">
+                      <span className="text-[#666]">Retry</span>
+                      <p className="text-orange-300 font-mono">{Number(batchActionSummary.retry || 0)}</p>
+                    </div>
+                    <div className="bg-[#0d0d0d] rounded px-2 py-1 border border-[#1f1f1f]">
+                      <span className="text-[#666]">Finalize</span>
+                      <p className="text-cyan-300 font-mono">{Number(batchActionSummary.finalize || 0)}</p>
+                    </div>
+                    <div className="bg-[#0d0d0d] rounded px-2 py-1 border border-[#1f1f1f]">
+                      <span className="text-[#666]">Skip</span>
+                      <p className="text-amber-300 font-mono">{Number(batchActionSummary.skip || 0)}</p>
+                    </div>
+                  </div>
                   <div className="max-h-64 overflow-auto rounded-lg border border-[#222] bg-[#0d0d0d]">
                     <table className="w-full text-xs">
                       <thead className="bg-[#141414] text-[#8a8a8a] sticky top-0">
                         <tr>
                           <th className="text-left px-3 py-2">#</th>
+                          <th className="text-left px-3 py-2">Status</th>
                           <th className="text-left px-3 py-2">ID</th>
-                          <th className="text-left px-3 py-2">Nama</th>
-                          <th className="text-left px-3 py-2">Path</th>
+                          <th className="text-left px-3 py-2">Output File</th>
+                          <th className="text-left px-3 py-2">Target Folder</th>
+                          <th className="text-left px-3 py-2">Catatan</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {(batchChain.containerDetails || []).flatMap((container, ci) =>
-                          (container.videoInstances || []).map((item, vi) => {
-                            const idx = ci * 100 + vi;
-                            return (
-                              <tr key={`${container.containerUrlShortId}-${item.urlShortId}`} className="border-t border-[#1e1e1e] hover:bg-[#141414]">
-                                <td className="px-3 py-2 text-[#555]">{idx + 1}</td>
-                                <td className="px-3 py-2 text-[#c8c8c8] font-mono">{item.urlShortId}</td>
-                                <td className="px-3 py-2 text-[#e2e2e2] max-w-[200px] truncate">{item.metadata?.name || item.name || '-'}</td>
-                                <td className="px-3 py-2 text-[#8aa6d8] font-mono max-w-[180px] truncate">
-                                  {(normalizedBatchFolderPrefix ? `${normalizedBatchFolderPrefix}/${item.path || ''}` : item.path || '') || '-'}
-                                </td>
-                              </tr>
-                            );
-                          })
-                        )}
+                        {batchPreviewRows.map((item, index) => (
+                          <tr key={item.key} className="border-t border-[#1e1e1e] hover:bg-[#141414] align-top">
+                            <td className="px-3 py-2 text-[#555]">{index + 1}</td>
+                            <td className="px-3 py-2 whitespace-nowrap">
+                              <StatusBadge
+                                status={item.action === 'download'
+                                  ? 'ready'
+                                  : item.action === 'skip'
+                                    ? 'skipped'
+                                    : item.action === 'retry'
+                                      ? 'retry'
+                                      : item.action === 'finalize'
+                                        ? 'finalize'
+                                        : 'mapped'}
+                              />
+                            </td>
+                            <td className="px-3 py-2 text-[#c8c8c8] font-mono whitespace-nowrap">{item.urlShortId}</td>
+                            <td className="px-3 py-2 text-[#e2e2e2] min-w-[240px]">
+                              <div className="font-medium break-all">{item.outputName}</div>
+                              <div className="text-[11px] text-[#666] mt-1">Container: {item.containerName}</div>
+                            </td>
+                            <td className="px-3 py-2 text-[#8aa6d8] font-mono min-w-[260px] break-all">{item.folderInput || 'root'}</td>
+                            <td className="px-3 py-2 text-[#9aa3af] min-w-[260px]">
+                              <div>{item.reason}</div>
+                              {item.chainPath ? (
+                                <div className="text-[11px] text-[#666] mt-1 break-all">Chain path: {item.chainPath}</div>
+                              ) : null}
+                              {item.providers.length > 0 ? (
+                                <div className="text-[11px] text-[#666] mt-1 break-all">Pending providers: {item.providers.join(', ')}</div>
+                              ) : null}
+                            </td>
+                          </tr>
+                        ))}
                       </tbody>
                     </table>
                   </div>
