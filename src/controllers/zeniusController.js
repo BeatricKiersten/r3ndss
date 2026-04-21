@@ -759,6 +759,21 @@ function createBackgroundBatchRun({ rootCgId, targetCgSelector, baseFolderInput,
   };
 }
 
+function createBackgroundBatchPreviewRun({ rootCgId, targetCgSelector, parentContainerName, baseFolderInput, selectedProviders, keepaliveUrl }) {
+  const run = createBackgroundBatchRun({
+    rootCgId,
+    targetCgSelector,
+    baseFolderInput,
+    selectedProviders,
+    keepaliveUrl
+  });
+
+  run.type = 'preview';
+  run.parentContainerName = String(parentContainerName || '').trim() || null;
+  run.chainPreview = null;
+  return run;
+}
+
 function touchBackgroundBatchRun(run) {
   const now = Date.now();
   run.updatedAt = now;
@@ -818,6 +833,7 @@ function summarizeBackgroundBatchRun(run) {
 
   return {
     id: run.id,
+    type: run.type || 'download',
     status: run.status,
     error: run.error || null,
     rootCgId: run.rootCgId,
@@ -857,10 +873,38 @@ function summarizeBackgroundBatchRun(run) {
       pending: Math.max(0, Number(run.queuedCount || 0) - Number(run.downloadCompletedCount || 0) - Number(run.downloadFailedCount || 0))
     },
     chainErrors: Array.isArray(run.chainErrors) ? run.chainErrors : [],
+    chainPreview: run.chainPreview || null,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
     updatedAt: new Date(run.updatedAt).toISOString()
   };
+}
+
+async function processBackgroundBatchPreviewRun(run, payload) {
+  try {
+    const chain = await buildBatchChain(payload);
+    run.sessionId = chain.sessionId || run.sessionId || null;
+    run.rootCgName = chain.rootCgName || run.rootCgName;
+    run.parentContainerName = chain.parentContainerName || run.parentContainerName;
+    run.totalContainers = Number(chain.totalContainers || 0);
+    run.scannedContainerCount = Number(chain.processedContainerCount || chain.containerDetails?.length || 0);
+    run.processedContainers = run.scannedContainerCount;
+    run.discoveredVideoCount = Array.isArray(chain.containerDetails)
+      ? chain.containerDetails.reduce((acc, container) => acc + Number(container?.videoInstances?.length || 0), 0)
+      : 0;
+    run.hasMoreContainers = Boolean(chain.hasMoreContainers);
+    run.nextContainerOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : 0;
+    run.chainErrors = Array.isArray(chain.errors) ? [...chain.errors] : [];
+    run.chainPreview = chain;
+    run.status = 'completed';
+    run.finishedAt = new Date().toISOString();
+    touchBackgroundBatchRun(run);
+  } catch (error) {
+    run.error = error.message;
+    run.status = 'failed';
+    run.finishedAt = new Date().toISOString();
+    touchBackgroundBatchRun(run);
+  }
 }
 
 function cleanupExpiredBackgroundBatchRuns() {
@@ -3029,6 +3073,73 @@ const zeniusController = {
       });
     } catch (error) {
       res.status(400).json({ success: false, error: error.message });
+    }
+  },
+
+  async startBatchChainBuild(req, res) {
+    try {
+      cleanupExpiredBatchChainSessions();
+      cleanupExpiredBackgroundBatchRuns();
+
+      const requestContext = buildRequestContext(req.body || {}, req);
+      const selectedProviders = await normalizeProviders(req.body?.providers);
+      const baseFolderInput = stripWrappingQuotes(req.body?.folderId || '');
+      const keepaliveUrl = resolveBackgroundKeepaliveUrl(req);
+
+      const run = createBackgroundBatchPreviewRun({
+        rootCgId: normalizeCgId(req.body?.rootCgId, DEFAULT_BATCH_ROOT_CGROUP_ID),
+        targetCgSelector: req.body?.targetCgSelector,
+        parentContainerName: req.body?.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
+        baseFolderInput,
+        selectedProviders,
+        keepaliveUrl
+      });
+
+      backgroundBatchRuns.set(run.id, run);
+      ensureBackgroundBatchKeepalive(keepaliveUrl);
+
+      void processBackgroundBatchPreviewRun(run, {
+        rootCgId: req.body?.rootCgId,
+        targetCgSelector: req.body?.targetCgSelector,
+        parentContainerName: req.body?.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
+        requestContext,
+        refererPath: req.body?.refererPath,
+        baseFolderInput,
+        selectedProviders,
+        sessionId: req.body?.sessionId,
+        containerOffset: req.body?.containerOffset,
+        containerLimit: req.body?.containerLimit,
+        timeBudgetMs: req.body?.timeBudgetMs
+      });
+
+      res.status(202).json({
+        success: true,
+        message: 'Zenius batch chain build started in background',
+        data: {
+          batchRunId: run.id,
+          status: summarizeBackgroundBatchRun(run)
+        }
+      });
+    } catch (error) {
+      res.status(400).json({ success: false, error: error.message });
+    }
+  },
+
+  async getBatchChainBuildStatus(req, res) {
+    try {
+      const runId = normalizeSessionId(req.params.id);
+      const run = runId ? backgroundBatchRuns.get(runId) : null;
+
+      if (!run || run.type !== 'preview') {
+        return res.status(404).json({ success: false, error: 'Batch preview build not found' });
+      }
+
+      res.json({
+        success: true,
+        data: summarizeBackgroundBatchRun(run)
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
     }
   },
 

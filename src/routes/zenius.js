@@ -5,6 +5,8 @@ const asyncHandler = require('../middleware/asyncHandler');
 
 router.post('/details', asyncHandler(zeniusController.getInstanceDetails));
 router.post('/download', asyncHandler(zeniusController.download));
+router.post('/batch-chain/start', asyncHandler(zeniusController.startBatchChainBuild));
+router.get('/batch-chain/:id', asyncHandler(zeniusController.getBatchChainBuildStatus));
 router.post('/batch-chain', asyncHandler(zeniusController.getBatchChain));
 router.post('/batch-download', asyncHandler(zeniusController.downloadBatch));
 router.get('/batch-sessions', asyncHandler(zeniusController.getBatchSessions));

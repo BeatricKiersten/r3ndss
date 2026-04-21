@@ -279,7 +279,7 @@ export const useZeniusBatchChain = () => {
     containerLimit,
     timeBudgetMs
   }) => {
-    const response = await api.post('/api/zenius/batch-chain', {
+    const response = await api.post('/api/zenius/batch-chain/start', {
       rootCgId,
       targetCgSelector,
       parentContainerName,
@@ -289,12 +289,15 @@ export const useZeniusBatchChain = () => {
       containerOffset,
       containerLimit,
       timeBudgetMs
-    }, {
-      timeout: 90000
     });
 
     return response.data.data;
   });
+};
+
+export const getZeniusBatchChainStatus = async (batchRunId) => {
+  const response = await api.get(`/api/zenius/batch-chain/${batchRunId}`);
+  return response.data.data;
 };
 
 export const useZeniusBatchDownload = () => {
@@ -859,7 +862,9 @@ export const useQueueTransferJob = () => {
   );
 };
 
-export const useJobs = (filters = {}) => {
+export const useJobs = (filters = {}, options = {}) => {
+  const { enabled = true } = options;
+
   return useQuery(
     ['jobs', filters],
     async () => {
@@ -873,9 +878,12 @@ export const useJobs = (filters = {}) => {
       return response.data.data;
     },
     {
+      enabled,
       refetchInterval: false,
       refetchOnWindowFocus: false,
       refetchOnReconnect: false,
+      refetchOnMount: false,
+      retry: false,
       staleTime: Infinity
     }
   );

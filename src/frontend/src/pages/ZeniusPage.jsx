@@ -36,6 +36,7 @@ import {
   Upload
 } from 'lucide-react';
 import {
+  getZeniusBatchChainStatus,
   useDeleteAllFolders,
   useDeleteFolder,
   useFolders,
@@ -61,7 +62,6 @@ import { useWebSocketStore } from '../store/websocketStore';
 
 const HEADERS_STORAGE_KEY = 'zenius-headers-raw';
 const PROVIDERS_STORAGE_KEY = 'zenius-selected-providers';
-const BATCH_CHAIN_CHUNK_SIZE = 8;
 const BATCH_DOWNLOAD_CHUNK_SIZE = 6;
 const BATCH_REQUEST_BUDGET_MS = 24000;
 
@@ -722,6 +722,7 @@ export default function ZeniusPage() {
 
   const deleteAllFolders = useDeleteAllFolders();
   const batchRootCgRef = useRef(null);
+  const batchChainPollRef = useRef(null);
 
   useEffect(() => {
     const savedHeaders = localStorage.getItem(HEADERS_STORAGE_KEY);
@@ -747,6 +748,21 @@ export default function ZeniusPage() {
   useEffect(() => {
     if (!trackedBatchRun) return;
     setBatchSessionId((prev) => trackedBatchRun.sessionId || prev || null);
+
+    if (trackedBatchRun.type === 'preview') {
+      setBatchBuildProgress(trackedBatchRun.status === 'running'
+        ? {
+            processed: Number(trackedBatchRun.scannedContainerCount || trackedBatchRun.processedContainers || 0),
+            total: Number.isFinite(Number(trackedBatchRun.totalContainers)) ? Number(trackedBatchRun.totalContainers) : null
+          }
+        : null);
+
+      if (trackedBatchRun.status === 'completed' && trackedBatchRun.chainPreview) {
+        setBatchChain(trackedBatchRun.chainPreview);
+      }
+      return;
+    }
+
     setBatchQueueProgress({
       containersProcessed: Number(trackedBatchRun.scannedContainerCount || trackedBatchRun.processedContainers || 0),
       containersTotal: Number.isFinite(Number(trackedBatchRun.totalContainers)) ? Number(trackedBatchRun.totalContainers) : null
@@ -845,73 +861,91 @@ export default function ZeniusPage() {
   };
 
   const handleGetBatchChain = async () => {
-    let aggregate = null;
-    let currentSessionId = null;
-    let iteration = 0;
-
     try {
-      setBatchChain(null);
-      setBatchResult(null);
-      setBatchSessionId(null);
-      setBatchBuildProgress({ processed: 0, total: null });
-
-      let nextOffset = 0;
-      let hasMore = true;
-
-      while (hasMore) {
-        iteration += 1;
-        if (iteration > 60) break;
-
-        const result = await batchChainMutation.mutateAsync({
-          rootCgId: batchRootCgId,
-          targetCgSelector: batchTargetCgSelector,
-          parentContainerName: batchParentContainerName || null,
-          headersRaw,
-          refererPath,
-          sessionId: currentSessionId,
-          containerOffset: nextOffset,
-          containerLimit: currentSessionId ? BATCH_CHAIN_CHUNK_SIZE : Math.max(2, Math.floor(BATCH_CHAIN_CHUNK_SIZE / 2)),
-          timeBudgetMs: BATCH_REQUEST_BUDGET_MS
-        });
-
-        currentSessionId = result.sessionId || currentSessionId;
-        setBatchSessionId(currentSessionId);
-
-        if (!aggregate) {
-          aggregate = { ...result, containerDetails: [...(result.containerDetails || [])], errors: [...(result.errors || [])] };
-        } else {
-          aggregate = {
-            ...aggregate,
-            ...result,
-            sessionId: currentSessionId || aggregate.sessionId || null,
-            containerDetails: [...(aggregate.containerDetails || []), ...(result.containerDetails || [])],
-            errors: [...(result.errors || aggregate.errors || [])]
-          };
-        }
-
-        const total = Number.isFinite(Number(result.totalContainers))
-          ? Number(result.totalContainers)
-          : Number.isFinite(Number(aggregate?.totalContainers))
-            ? Number(aggregate.totalContainers)
-            : null;
-
-        setBatchBuildProgress({ processed: aggregate.containerDetails.length, total });
-        setBatchChain(aggregate);
-
-        hasMore = Boolean(result.hasMoreContainers);
-        nextOffset = Number.isFinite(Number(result.nextContainerOffset)) ? Number(result.nextContainerOffset) : 0;
+      if (batchChainPollRef.current) {
+        window.clearInterval(batchChainPollRef.current);
+        batchChainPollRef.current = null;
       }
 
-      setBatchBuildProgress(null);
-      const videoCount = (aggregate?.containerDetails || []).reduce((acc, c) => acc + (c.videoInstances?.length || 0), 0);
-      toast.success('Chain Built', `Found ${videoCount} videos across ${aggregate?.containerDetails?.length || 0} containers`);
+      setBatchChain(null);
+      setBatchResult(null);
+      setBatchRunId(null);
+      setBatchSessionId(null);
+      setBatchBuildProgress({ processed: 0, total: null });
+      const started = await batchChainMutation.mutateAsync({
+        rootCgId: batchRootCgId,
+        targetCgSelector: batchTargetCgSelector,
+        parentContainerName: batchParentContainerName || null,
+        headersRaw,
+        refererPath,
+        timeBudgetMs: BATCH_REQUEST_BUDGET_MS,
+        providers: selectedProviders.length > 0 ? selectedProviders : null,
+        folderId: normalizedBatchFolderPrefix || null
+      });
+
+      const startedRunId = started?.batchRunId || started?.status?.id || null;
+      setBatchRunId(startedRunId);
+      setBatchSessionId(started?.status?.sessionId || null);
+
+      const poll = async () => {
+        if (!startedRunId) return;
+        const status = await getZeniusBatchChainStatus(startedRunId);
+        setBatchRunId(status.id || startedRunId);
+        setBatchSessionId(status.sessionId || null);
+        setBatchBuildProgress({
+          processed: Number(status.containerProgress?.processed || status.processedContainers || 0),
+          total: Number.isFinite(Number(status.containerProgress?.total)) ? Number(status.containerProgress.total) : null
+        });
+
+        if (status.status === 'completed') {
+          setBatchChain(status.chainPreview || null);
+          setBatchBuildProgress(null);
+          if (batchChainPollRef.current) {
+            window.clearInterval(batchChainPollRef.current);
+            batchChainPollRef.current = null;
+          }
+          const finalChain = status.chainPreview || null;
+          const videoCount = (finalChain?.containerDetails || []).reduce((acc, c) => acc + (c.videoInstances?.length || 0), 0);
+          toast.success('Chain Built', `Found ${videoCount} videos across ${finalChain?.containerDetails?.length || 0} containers`);
+          return;
+        }
+
+        if (status.status === 'failed') {
+          setBatchBuildProgress(null);
+          if (batchChainPollRef.current) {
+            window.clearInterval(batchChainPollRef.current);
+            batchChainPollRef.current = null;
+          }
+          throw new Error(status.error || 'Batch preview build failed');
+        }
+      };
+
+      await poll();
+      batchChainPollRef.current = window.setInterval(() => {
+        poll().catch((error) => {
+          if (batchChainPollRef.current) {
+            window.clearInterval(batchChainPollRef.current);
+            batchChainPollRef.current = null;
+          }
+          setBatchBuildProgress(null);
+          console.error('Failed to poll zenius batch chain status:', error);
+          toast.error('Chain Failed', error?.response?.data?.error || error.message);
+        });
+      }, 2000);
     } catch (error) {
-      if (!aggregate) setBatchChain(null);
+      setBatchChain(null);
       setBatchBuildProgress(null);
       console.error('Failed to fetch zenius batch chain:', error);
       toast.error('Chain Failed', error?.response?.data?.error || error.message);
     }
   };
+
+  useEffect(() => () => {
+    if (batchChainPollRef.current) {
+      window.clearInterval(batchChainPollRef.current);
+      batchChainPollRef.current = null;
+    }
+  }, []);
 
   const handleStartBatchDownload = () => {
     const videoCount = (batchChain?.containerDetails || []).reduce((acc, c) => acc + (c.videoInstances?.length || 0), 0);
