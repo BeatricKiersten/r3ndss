@@ -31,6 +31,8 @@ const DB_INIT_RETRY_DELAY_MS = Math.max(250, Number(process.env.DB_INIT_RETRY_DE
 const DB_INIT_COOLDOWN_ON_CONN_ERROR_MS = Math.max(DB_INIT_RETRY_DELAY_MS, Number(process.env.DB_INIT_COOLDOWN_ON_CONN_ERROR_MS || 15000));
 const DB_METADATA_CACHE_TTL_MS = Math.max(250, Number(process.env.DB_METADATA_CACHE_TTL_MS || 1000));
 const DB_JOB_LIST_LIMIT = Math.max(1, Number(process.env.DB_JOB_LIST_LIMIT || 1000));
+const DB_STATS_CACHE_TTL_MS = Math.max(250, Number(process.env.DB_STATS_CACHE_TTL_MS || 5000));
+const DB_DASHBOARD_CACHE_TTL_MS = Math.max(250, Number(process.env.DB_DASHBOARD_CACHE_TTL_MS || 3000));
 
 function toInt(value, fallback = 0) {
   const parsed = Number(value);
@@ -153,9 +155,10 @@ function formatQueryResult(result) {
 }
 
 class PgClientCompat {
-  constructor(client, release = null) {
+  constructor(client, release = null, onMutation = null) {
     this.client = client;
     this._release = release;
+    this._onMutation = typeof onMutation === 'function' ? onMutation : null;
     this._onError = (error) => {
       console.warn(`[DB] Client error: ${error.message}`);
     };
@@ -164,6 +167,9 @@ class PgClientCompat {
 
   async query(sql, params = []) {
     const result = await this.client.query(convertPlaceholders(sql), params);
+    if (this._onMutation && !['SELECT', 'BEGIN', 'COMMIT', 'ROLLBACK'].includes(String(result.command || '').toUpperCase())) {
+      this._onMutation();
+    }
     return formatQueryResult(result);
   }
 
@@ -194,7 +200,8 @@ class PgClientCompat {
 }
 
 class PgPoolCompat {
-  constructor(config) {
+  constructor(config, options = {}) {
+    this._onMutation = typeof options.onMutation === 'function' ? options.onMutation : null;
     this.pool = new Pool({
       connectionString: config.connectionString,
       host: config.connectionString ? undefined : config.host,
@@ -216,12 +223,15 @@ class PgPoolCompat {
 
   async query(sql, params = []) {
     const result = await this.pool.query(convertPlaceholders(sql), params);
+    if (this._onMutation && !['SELECT', 'BEGIN', 'COMMIT', 'ROLLBACK'].includes(String(result.command || '').toUpperCase())) {
+      this._onMutation();
+    }
     return formatQueryResult(result);
   }
 
   async getConnection() {
     const client = await this.pool.connect();
-    return new PgClientCompat(client, () => client.release());
+    return new PgClientCompat(client, () => client.release(), this._onMutation);
   }
 
   async end() {
@@ -305,6 +315,11 @@ class DatabaseHandler {
 
   _invalidateMetadataCache() {
     this.metadataCache.clear();
+  }
+
+  _invalidateHotPathCache() {
+    this.metadataCache.delete('stats');
+    this.metadataCache.delete('dashboard');
   }
 
   async _getCachedMetadata(key, loader, ttlMs = DB_METADATA_CACHE_TTL_MS) {
@@ -648,7 +663,9 @@ class DatabaseHandler {
       let pool = null;
 
       try {
-        pool = new PgPoolCompat(this.postgres);
+        pool = new PgPoolCompat(this.postgres, {
+          onMutation: () => this._invalidateHotPathCache()
+        });
         await this._createSchema(pool);
         await this._seedDefaults(pool);
         this.pool = pool;
@@ -808,13 +825,17 @@ class DatabaseHandler {
       'CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders (parent_id)',
       'CREATE INDEX IF NOT EXISTS idx_files_folder ON files (folder_id)',
       'CREATE INDEX IF NOT EXISTS idx_files_folder_name ON files (folder_id, name)',
+      'CREATE INDEX IF NOT EXISTS idx_files_folder_created ON files (folder_id, created_at DESC)',
       'CREATE INDEX IF NOT EXISTS idx_files_status ON files (status)',
+      'CREATE INDEX IF NOT EXISTS idx_files_status_created ON files (status, created_at DESC)',
       'CREATE INDEX IF NOT EXISTS idx_files_created ON files (created_at)',
       'CREATE INDEX IF NOT EXISTS idx_file_providers_provider ON file_providers (provider)',
       'CREATE INDEX IF NOT EXISTS idx_file_providers_status ON file_providers (status)',
       'CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs (status)',
+      'CREATE INDEX IF NOT EXISTS idx_jobs_status_updated ON jobs (status, updated_at DESC)',
       'CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs (status, created_at)',
       'CREATE INDEX IF NOT EXISTS idx_jobs_file ON jobs (file_id)',
+      'CREATE INDEX IF NOT EXISTS idx_jobs_file_created ON jobs (file_id, created_at DESC)',
       'CREATE INDEX IF NOT EXISTS idx_jobs_type ON jobs (type)',
       'CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs (created_at)',
       'CREATE INDEX IF NOT EXISTS idx_jobs_heartbeat ON jobs (heartbeat_at)',
@@ -986,6 +1007,46 @@ class DatabaseHandler {
           return indexes.length === 0;
         },
         sql: 'CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs (status, created_at)'
+      },
+      {
+        name: 'add_files_folder_created_index',
+        check: async () => {
+          const [indexes] = await this.pool.query(
+            "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'files' AND indexname = 'idx_files_folder_created'"
+          );
+          return indexes.length === 0;
+        },
+        sql: 'CREATE INDEX IF NOT EXISTS idx_files_folder_created ON files (folder_id, created_at DESC)'
+      },
+      {
+        name: 'add_files_status_created_index',
+        check: async () => {
+          const [indexes] = await this.pool.query(
+            "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'files' AND indexname = 'idx_files_status_created'"
+          );
+          return indexes.length === 0;
+        },
+        sql: 'CREATE INDEX IF NOT EXISTS idx_files_status_created ON files (status, created_at DESC)'
+      },
+      {
+        name: 'add_jobs_status_updated_index',
+        check: async () => {
+          const [indexes] = await this.pool.query(
+            "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'jobs' AND indexname = 'idx_jobs_status_updated'"
+          );
+          return indexes.length === 0;
+        },
+        sql: 'CREATE INDEX IF NOT EXISTS idx_jobs_status_updated ON jobs (status, updated_at DESC)'
+      },
+      {
+        name: 'add_jobs_file_created_index',
+        check: async () => {
+          const [indexes] = await this.pool.query(
+            "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'jobs' AND indexname = 'idx_jobs_file_created'"
+          );
+          return indexes.length === 0;
+        },
+        sql: 'CREATE INDEX IF NOT EXISTS idx_jobs_file_created ON jobs (file_id, created_at DESC)'
       }
     ];
 
@@ -2612,100 +2673,110 @@ class DatabaseHandler {
   async getStats() {
     await this._ready();
 
-    const providerCatalog = await this.getProviderCatalog();
+    return this._getCachedMetadata('stats', async () => {
+      const providerCatalog = await this.getProviderCatalog();
 
-    const [fileTotals] = await this.pool.query('SELECT COUNT(*) AS count FROM files');
-    const [jobTotals] = await this.pool.query('SELECT COUNT(*) AS count FROM jobs');
-    const [fileStatusRows] = await this.pool.query('SELECT status, COUNT(*) AS count FROM files GROUP BY status');
-    const [jobStatusRows] = await this.pool.query('SELECT status, COUNT(*) AS count FROM jobs GROUP BY status');
-    const [providerRows] = await this.pool.query(
-      'SELECT provider, status, COUNT(*) AS count FROM file_providers GROUP BY provider, status'
-    );
+      const [fileTotals] = await this.pool.query('SELECT COUNT(*) AS count FROM files');
+      const [jobTotals] = await this.pool.query('SELECT COUNT(*) AS count FROM jobs');
+      const [folderTotals] = await this.pool.query('SELECT COUNT(*) AS count FROM folders');
+      const [fileStatusRows] = await this.pool.query('SELECT status, COUNT(*) AS count FROM files GROUP BY status');
+      const [jobStatusRows] = await this.pool.query('SELECT status, COUNT(*) AS count FROM jobs GROUP BY status');
+      const [providerRows] = await this.pool.query(
+        'SELECT provider, status, COUNT(*) AS count FROM file_providers GROUP BY provider, status'
+      );
 
-    const providerStats = providerCatalog.reduce((acc, provider) => {
-      acc[provider.id] = { pending: 0, completed: 0, failed: 0 };
-      return acc;
-    }, {});
+      const providerStats = providerCatalog.reduce((acc, provider) => {
+        acc[provider.id] = { pending: 0, completed: 0, failed: 0 };
+        return acc;
+      }, {});
 
-    for (const row of providerRows) {
-      if (!providerStats[row.provider]) {
-        providerStats[row.provider] = { pending: 0, completed: 0, failed: 0 };
+      for (const row of providerRows) {
+        if (!providerStats[row.provider]) {
+          providerStats[row.provider] = { pending: 0, completed: 0, failed: 0 };
+        }
+
+        providerStats[row.provider][row.status] = toInt(row.count);
       }
 
-      providerStats[row.provider][row.status] = toInt(row.count);
-    }
+      const fileByStatus = { processing: 0, uploading: 0, completed: 0, failed: 0, partial: 0 };
+      for (const row of fileStatusRows) {
+        fileByStatus[row.status] = toInt(row.count);
+      }
 
-    const fileByStatus = { processing: 0, uploading: 0, completed: 0, failed: 0, partial: 0 };
-    for (const row of fileStatusRows) {
-      fileByStatus[row.status] = toInt(row.count);
-    }
+      const jobByStatus = { pending: 0, processing: 0, completed: 0, failed: 0 };
+      for (const row of jobStatusRows) {
+        jobByStatus[row.status] = toInt(row.count);
+      }
 
-    const jobByStatus = { pending: 0, processing: 0, completed: 0, failed: 0 };
-    for (const row of jobStatusRows) {
-      jobByStatus[row.status] = toInt(row.count);
-    }
-
-    return {
-      folders: toInt((await this.pool.query('SELECT COUNT(*) AS count FROM folders'))[0][0]?.count),
-      files: {
-        total: toInt(fileTotals[0]?.count),
-        byStatus: fileByStatus
-      },
-      jobs: {
-        total: toInt(jobTotals[0]?.count),
-        byStatus: jobByStatus
-      },
-      providers: providerStats,
-      system: await this._getSystemPayload()
-    };
+      return {
+        folders: toInt(folderTotals[0]?.count),
+        files: {
+          total: toInt(fileTotals[0]?.count),
+          byStatus: fileByStatus
+        },
+        jobs: {
+          total: toInt(jobTotals[0]?.count),
+          byStatus: jobByStatus
+        },
+        providers: providerStats,
+        system: await this._getSystemPayload()
+      };
+    }, DB_STATS_CACHE_TTL_MS);
   }
 
   async getDashboardData() {
     await this._ready();
 
-    const system = await this._getSystemPayload();
+    return this._getCachedMetadata('dashboard', async () => {
+      const system = await this._getSystemPayload();
 
-    const [recentFileRows] = await this.pool.query(
-      'SELECT * FROM files ORDER BY created_at DESC LIMIT 20'
-    );
-    const recentFiles = await this._hydrateFiles(recentFileRows, {
-      providerCatalog: system.providerCatalog
-    });
+      const [recentFileRows] = await this.pool.query(
+        `SELECT id, folder_id, name, original_url, local_path, size, duration, status,
+                progress_download, progress_processing, progress_upload, progress_extra,
+                sync_status, can_delete, created_at, updated_at
+           FROM files
+           ORDER BY created_at DESC
+           LIMIT 20`
+      );
+      const recentFiles = await this._hydrateFiles(recentFileRows, {
+        providerCatalog: system.providerCatalog
+      });
 
-    const [activeJobRows] = await this.pool.query(
-      `SELECT id, type, file_id, progress, attempts
-       FROM jobs
-       WHERE status = 'processing'
-       ORDER BY updated_at DESC`
-    );
+      const [activeJobRows] = await this.pool.query(
+        `SELECT id, type, file_id, progress, attempts
+         FROM jobs
+         WHERE status = 'processing'
+         ORDER BY updated_at DESC`
+      );
 
-    const [pendingRows] = await this.pool.query("SELECT COUNT(*) AS count FROM jobs WHERE status = 'pending'");
-    const [processingRows] = await this.pool.query("SELECT COUNT(*) AS count FROM jobs WHERE status = 'processing'");
+      const [pendingRows] = await this.pool.query("SELECT COUNT(*) AS count FROM jobs WHERE status = 'pending'");
+      const [processingRows] = await this.pool.query("SELECT COUNT(*) AS count FROM jobs WHERE status = 'processing'");
 
-    return {
-      recentFiles: recentFiles.map((file) => ({
-        id: file.id,
-        name: file.name,
-        status: file.status,
-        syncStatus: file.syncStatus,
-        progress: file.progress,
-        providers: file.providers,
-        updatedAt: file.updatedAt
-      })),
-      activeJobs: activeJobRows.map((row) => ({
-        id: row.id,
-        type: row.type,
-        fileId: row.file_id,
-        progress: toInt(row.progress),
-        attempts: toInt(row.attempts)
-      })),
-      queueStats: {
-        pending: toInt(pendingRows[0]?.count),
-        processing: toInt(processingRows[0]?.count)
-      },
-      batchSessions: await this._getBatchSessionSummary(),
-      system
-    };
+      return {
+        recentFiles: recentFiles.map((file) => ({
+          id: file.id,
+          name: file.name,
+          status: file.status,
+          syncStatus: file.syncStatus,
+          progress: file.progress,
+          providers: file.providers,
+          updatedAt: file.updatedAt
+        })),
+        activeJobs: activeJobRows.map((row) => ({
+          id: row.id,
+          type: row.type,
+          fileId: row.file_id,
+          progress: toInt(row.progress),
+          attempts: toInt(row.attempts)
+        })),
+        queueStats: {
+          pending: toInt(pendingRows[0]?.count),
+          processing: toInt(processingRows[0]?.count)
+        },
+        batchSessions: await this._getBatchSessionSummary(),
+        system
+      };
+    }, DB_DASHBOARD_CACHE_TTL_MS);
   }
 
   async _getBatchSessionSummary() {

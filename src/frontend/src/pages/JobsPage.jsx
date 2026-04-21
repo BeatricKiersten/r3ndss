@@ -88,7 +88,11 @@ export default function JobsPage() {
     limit: 200
   }), [statusFilter, typeFilter]);
 
-  const { data: jobs = [], isLoading, refetch, isFetching } = useJobs(filters);
+  const { data: jobs = [], isLoading, refetch, isFetching } = useJobs(filters, { enabled: false });
+
+  useEffect(() => {
+    refetch();
+  }, [refetch, filters]);
 
   const handleSubmitTransfer = async (e) => {
     e.preventDefault();
