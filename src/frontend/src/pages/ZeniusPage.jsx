@@ -1606,8 +1606,12 @@ export default function ZeniusPage() {
               <div className="space-y-3 pt-3">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
                   <div className="bg-[#0d0d0d] p-3 rounded-lg">
-                    <p className="text-[#666] mb-1 text-xs">Leaf CG ID</p>
-                    <p className="text-white font-mono">{batchChain.leafCgId || '-'}</p>
+                    <p className="text-[#666] mb-1 text-xs">Leaf CG IDs</p>
+                    <p className="text-white font-mono break-all">
+                      {Array.isArray(batchChain.leafCgIds) && batchChain.leafCgIds.length > 0
+                        ? batchChain.leafCgIds.join(', ')
+                        : (batchChain.leafCgId || '-')}
+                    </p>
                   </div>
                   <div className="bg-[#0d0d0d] p-3 rounded-lg">
                     <p className="text-[#666] mb-1 text-xs">Containers</p>

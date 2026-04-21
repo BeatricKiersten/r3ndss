@@ -2357,7 +2357,7 @@ async function buildBatchChain({
     targetCgSelector: session.targetCgSelector,
     targetCgId: session.targetCgId,
     parentContainerName: pathParentName,
-    leafCgId: session.leafCgIds[0] || null,
+    leafCgId: session.leafCgIds.length === 1 ? session.leafCgIds[0] : null,
     leafCgIds: session.leafCgIds,
     traversal: session.traversal,
     discoveredLeafCount: session.leafCgIds.length,
@@ -2372,7 +2372,7 @@ async function buildBatchChain({
     planReady: Boolean(session.planReady),
     plannedItemCount: session.plannedItems.length,
     containerList: {
-      urlShortId: session.leafCgIds[0] || null,
+      urlShortId: session.leafCgIds.length === 1 ? session.leafCgIds[0] : null,
       urlShortIds: session.leafCgIds,
       totalContainers,
       items: mergedContainers.slice(normalizedOffset, cursor)
@@ -3257,6 +3257,9 @@ const zeniusController = {
 
   async getBatchChainBuildStatus(req, res) {
     try {
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.set('Pragma', 'no-cache');
+      res.set('Expires', '0');
       const runId = normalizeSessionId(req.params.id);
       const run = runId ? backgroundBatchRuns.get(runId) : null;
 
