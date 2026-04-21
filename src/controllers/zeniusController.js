@@ -534,7 +534,6 @@ function createBatchChainSession({ rootCgId, targetCgSelector, parentContainerNa
     planBaseFolderInput: '',
     planSelectedProviders: null,
     planFolderCache: new Map(),
-    planFolderFileCache: new Map(),
     instanceMetadataByShortId: new Map(),
     instanceMetadataPromisesByShortId: new Map(),
     cgPathById: new Map([[rootCgId, []]]),
@@ -569,7 +568,6 @@ function resetBatchPlanState(session, planningContext) {
   session.planCursor = 0;
   session.planReady = false;
   session.planFolderCache = new Map();
-  session.planFolderFileCache = new Map();
 }
 
 function ensureBatchPlanContext(session, planningContext) {
@@ -1566,68 +1564,12 @@ async function resolveFolderIdWithCache(folderCache, folderInput) {
   return pendingFolderId;
 }
 
-async function getFolderFileCacheEntry(folderFileCache, folderId) {
-  const cacheKey = String(folderId || 'root');
-  if (folderFileCache.has(cacheKey)) {
-    return folderFileCache.get(cacheKey);
-  }
-
-  // Keep one in-flight lookup per folder to avoid duplicate listFiles() calls.
-  const pendingEntry = db.listFiles(cacheKey).then((files) => {
-    const filesByName = new Map();
-    for (const file of files || []) {
-      const nameKey = String(file?.name || '').trim();
-      if (!nameKey || filesByName.has(nameKey)) {
-        continue;
-      }
-      filesByName.set(nameKey, file);
-    }
-
-    return {
-      folderId: cacheKey,
-      filesByName
-    };
-  }).catch((error) => {
-    folderFileCache.delete(cacheKey);
-    throw error;
-  });
-
-  folderFileCache.set(cacheKey, pendingEntry);
-  return pendingEntry;
-}
-
-async function getCachedFileByNameInFolder(folderFileCache, folderId, fileName) {
-  const entry = await getFolderFileCacheEntry(folderFileCache, folderId);
-  return entry.filesByName.get(String(fileName || '').trim()) || null;
-}
-
-async function rememberCachedFileInFolder(folderFileCache, folderId, file) {
-  if (!file || !file.name) {
-    return;
-  }
-
-  const entry = await getFolderFileCacheEntry(folderFileCache, folderId);
-  entry.filesByName.set(String(file.name).trim(), file);
-}
-
-async function prefetchFolderFileCaches(folderFileCache, folderIds = []) {
-  const uniqueFolderIds = [...new Set((folderIds || []).map((value) => String(value || '').trim()).filter(Boolean))];
-  if (uniqueFolderIds.length === 0) {
-    return;
-  }
-
-  for (const folderId of uniqueFolderIds) {
-    await getFolderFileCacheEntry(folderFileCache, folderId);
-  }
-}
-
 async function buildPlannedBatchItem({
   container,
   instance,
   baseFolderInput,
   selectedProviders,
-  folderCache,
-  folderFileCache
+  folderCache
 }) {
   const metadata = instance.metadata && typeof instance.metadata === 'object'
     ? { ...instance.metadata }
@@ -1654,7 +1596,7 @@ async function buildPlannedBatchItem({
   const chainPath = String(instance.path || container.path || '').trim();
   const finalFolderInput = joinFolderPaths(baseFolderInput, chainPath) || 'root';
   const folderId = await resolveFolderIdWithCache(folderCache, finalFolderInput);
-  const existingFile = await getCachedFileByNameInFolder(folderFileCache, folderId, outputFileName);
+  const existingFile = await db.findFileByNameInFolder(folderId, outputFileName);
   const planKey = createPlannedItemKey(container.containerUrlShortId, urlShortId, outputFileName, folderId);
 
   const plannedItem = {
@@ -1767,8 +1709,7 @@ async function buildBatchPlanForContainer({
   session,
   baseFolderInput,
   selectedProviders,
-  folderCache,
-  folderFileCache
+  folderCache
 }) {
   const containerDetail = await buildBatchContainerDetail({
     container,
@@ -1785,8 +1726,7 @@ async function buildBatchPlanForContainer({
       instance,
       baseFolderInput,
       selectedProviders,
-      folderCache,
-      folderFileCache
+      folderCache
     });
 
     if (result?.planned) {
@@ -1816,7 +1756,6 @@ async function queueBatchDownloadItem({
   runId,
   session,
   folderCache,
-  folderFileCache,
   cancelled = () => false
 }) {
   if (cancelled()) {
@@ -1858,7 +1797,7 @@ async function queueBatchDownloadItem({
   const finalFolderInput = joinFolderPaths(baseFolderInput, chainPath) || 'root';
   const folderId = await resolveFolderIdWithCache(folderCache, finalFolderInput);
   const outputFileName = `${outputName}.mp4`;
-  const existingFile = await getCachedFileByNameInFolder(folderFileCache, folderId, outputFileName);
+  const existingFile = await db.findFileByNameInFolder(folderId, outputFileName);
 
   if (existingFile) {
     const existingStatus = String(existingFile.status || '').trim().toLowerCase();
@@ -1924,17 +1863,6 @@ async function queueBatchDownloadItem({
     refererPath,
     fallbackRefererPath: container.containerPathUrl || '',
     requestedFilename: outputName
-  });
-
-  await rememberCachedFileInFolder(folderFileCache, folderId, {
-    id: `queued-${urlShortId}`,
-    folderId,
-    name: outputFileName,
-    status: 'processing',
-    localPath: null,
-    size: 0,
-    duration: 0,
-    providers: {}
   });
 
   if (runId && backgroundBatchRuns.has(runId)) {
@@ -2062,11 +1990,6 @@ async function buildBatchChain({
     cursor += 1;
   }
 
-  await prefetchFolderFileCaches(
-    session.planFolderFileCache,
-    pendingContainers.map((container) => joinFolderPaths(planningContext.baseFolderInput, container?.path || '') || 'root')
-  );
-
   for (const container of pendingContainers) {
     const resolved = await buildBatchPlanForContainer({
       container,
@@ -2074,8 +1997,7 @@ async function buildBatchChain({
       session,
       baseFolderInput: planningContext.baseFolderInput,
       selectedProviders: planningContext.selectedProviders,
-      folderCache: session.planFolderCache,
-      folderFileCache: session.planFolderFileCache
+      folderCache: session.planFolderCache
     });
 
     if (!resolved?.containerDetail) {
