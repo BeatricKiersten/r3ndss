@@ -1,5 +1,6 @@
 const pLimit = require('p-limit');
 const fs = require('fs-extra');
+const path = require('path');
 
 const { getInstance } = require('../src/db/handler');
 const { buildRequestContext } = require('../src/services/requestContext');
@@ -335,7 +336,7 @@ async function getVideoInstanceDetails(urlShortId, options) {
     ? payload.value['content-instances']
     : [];
 
-  return instances
+  const resolvedInstances = instances
     .filter((item) => {
       const type = String(item?.type || '').trim().toLowerCase();
       return type === 'vidio' || type === 'video';
@@ -347,6 +348,17 @@ async function getVideoInstanceDetails(urlShortId, options) {
       type: String(item?.type || '').trim()
     }))
     .filter((item) => item.urlShortId);
+
+  const usedOutputNames = new Set();
+  return resolvedInstances.map((item) => ({
+    ...item,
+    outputName: reserveUniqueOutputName(
+      item.name || `zenius-${item.urlShortId}`,
+      `zenius-${item.urlShortId}`,
+      item.urlShortId,
+      usedOutputNames
+    )
+  }));
 }
 
 async function getInstanceMetadata(urlShortId, options) {
@@ -771,8 +783,44 @@ function buildBasePlusPath(baseFolderInput, pathInput) {
 }
 
 function sanitizeOutputName(value, fallback) {
-  const normalized = sanitizePathSegment(String(value || '').replace(/\.mp4$/i, ''), fallback);
+  const parsed = path.parse(String(value || '').trim()).name;
+  const normalized = parsed
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180);
   return normalized || fallback;
+}
+
+function reserveUniqueOutputName(rawName, fallback, urlShortId, usedNames) {
+  const baseName = sanitizeOutputName(rawName, fallback);
+  if (!usedNames) {
+    return baseName;
+  }
+
+  const normalizedKey = baseName.toLowerCase();
+  if (!usedNames.has(normalizedKey)) {
+    usedNames.add(normalizedKey);
+    return baseName;
+  }
+
+  const withId = sanitizeOutputName(`${baseName}-${urlShortId}`, fallback);
+  const withIdKey = withId.toLowerCase();
+  if (!usedNames.has(withIdKey)) {
+    usedNames.add(withIdKey);
+    return withId;
+  }
+
+  let counter = 2;
+  while (true) {
+    const candidate = sanitizeOutputName(`${baseName}-${urlShortId}-${counter}`, fallback);
+    const candidateKey = candidate.toLowerCase();
+    if (!usedNames.has(candidateKey)) {
+      usedNames.add(candidateKey);
+      return candidate;
+    }
+    counter += 1;
+  }
 }
 
 async function getActiveProviderIds(selectedProviders = null) {
