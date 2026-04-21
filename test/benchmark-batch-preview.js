@@ -19,6 +19,7 @@ const DEFAULT_METADATA_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BENCH_ME
 const DEFAULT_FOLDER_PREFETCH_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BENCH_FOLDER_PREFETCH_CHUNK_SIZE || '50', 10);
 const DEFAULT_PROGRESS_LOG_INTERVAL_MS = Number.parseInt(process.env.ZENIUS_BENCH_PROGRESS_LOG_INTERVAL_MS || '1000', 10);
 const DEFAULT_PROVIDER_CHECK_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_BENCH_PROVIDER_CHECK_TIMEOUT_MS || '15000', 10);
+const DEFAULT_PROVIDER_LABEL_MODE = String(process.env.ZENIUS_BENCH_PROVIDER_LABEL_MODE || 'fast').trim().toLowerCase();
 
 function db() {
   return getInstance();
@@ -187,7 +188,10 @@ function recordDuplicateCheck(result, context = {}) {
       ? result.availableProviders.join(',')
       : '-';
 
-    console.log(`[DUP-CHECK] #${sequence} container=${containerId} name="${containerName}" ci=${result?.urlShortId || 'unknown'} label=${label} folderId=${result?.folderId || '-'} basePath=${result?.basePath || '-'} file="${result?.outputName || '-'}" existingFileId=${result?.existingFileId || '-'} status=${result?.existingStatus || '-'} pendingProviders=${pendingProviders} activeProviders=${activeProviders}`);
+    const providerError = label === 'provider-check-error'
+      ? ` providerError="${String(result?.providerSummary || 'provider check failed').replace(/\s+/g, ' ').slice(0, 180)}"`
+      : '';
+    console.log(`[DUP-CHECK] #${sequence} container=${containerId} name="${containerName}" ci=${result?.urlShortId || 'unknown'} label=${label} folderId=${result?.folderId || '-'} basePath=${result?.basePath || '-'} file="${result?.outputName || '-'}" existingFileId=${result?.existingFileId || '-'} status=${result?.existingStatus || '-'} pendingProviders=${pendingProviders} activeProviders=${activeProviders}${providerError}`);
   }
 
   maybeLogProviderProgress(false);
@@ -610,6 +614,55 @@ function chunkArray(values, chunkSize) {
   return chunks;
 }
 
+function collectExistingFileIds(existingByFolderId) {
+  const fileIds = [];
+  for (const byName of existingByFolderId.values()) {
+    for (const file of byName.values()) {
+      const fileId = String(file?.id || '').trim();
+      if (fileId) {
+        fileIds.push(fileId);
+      }
+    }
+  }
+  return unique(fileIds);
+}
+
+async function buildProviderStatusLookup(existingByFolderId, chunkSize = 200) {
+  const fileIds = collectExistingFileIds(existingByFolderId);
+  const providerStatusByFileId = new Map();
+
+  if (fileIds.length === 0) {
+    return { providerStatusByFileId, fileCount: 0 };
+  }
+
+  const chunks = chunkArray(fileIds, chunkSize);
+  for (const fileIdChunk of chunks) {
+    const placeholders = fileIdChunk.map(() => '?').join(', ');
+    const rows = await runDbQuery(
+      `SELECT file_id, provider, status
+         FROM file_providers
+        WHERE file_id IN (${placeholders})`,
+      fileIdChunk
+    );
+
+    for (const row of rows || []) {
+      const fileId = String(row?.file_id || '').trim();
+      const provider = String(row?.provider || '').trim();
+      const status = String(row?.status || '').trim().toLowerCase() || 'pending';
+      if (!fileId || !provider) {
+        continue;
+      }
+
+      if (!providerStatusByFileId.has(fileId)) {
+        providerStatusByFileId.set(fileId, new Map());
+      }
+      providerStatusByFileId.get(fileId).set(provider, status);
+    }
+  }
+
+  return { providerStatusByFileId, fileCount: fileIds.length };
+}
+
 async function buildExistingFileLookup(containers, baseFolderInput, folderCache, chunkSize = DEFAULT_FOLDER_PREFETCH_CHUNK_SIZE) {
   const startedAt = Date.now();
   const progress = {
@@ -839,9 +892,11 @@ async function buildProviderLabelForInstance({
   selectedProviders,
   folderCache,
   includeProviderLabels,
+  providerLabelMode,
   providerCheckTimeoutMs,
   folderIdByInput,
-  existingByFolderId
+  existingByFolderId,
+  providerStatusByFileId
 }) {
   progressState.checksInFlight += 1;
   try {
@@ -871,6 +926,27 @@ async function buildProviderLabelForInstance({
   };
 
   if (!existingFile || !includeProviderLabels) {
+    recordDuplicateCheck(result, { container, instance });
+    return result;
+  }
+
+  const mode = String(providerLabelMode || DEFAULT_PROVIDER_LABEL_MODE).trim().toLowerCase();
+  if (mode === 'fast') {
+    const targetProviders = Array.isArray(selectedProviders) ? selectedProviders : [];
+    const fileProviderStatus = providerStatusByFileId?.get(existingFile.id) || new Map();
+    const pendingProviders = targetProviders.filter((provider) => {
+      const status = String(fileProviderStatus.get(provider) || 'pending').trim().toLowerCase();
+      return status !== 'completed';
+    });
+    const completedProviders = targetProviders.length - pendingProviders.length;
+
+    result.pendingProviders = pendingProviders;
+    result.availableProviders = [...targetProviders];
+    result.providerSummary = `${completedProviders}/${targetProviders.length} active providers`;
+    result.label = pendingProviders.length === 0
+      ? 'complete-on-active-providers'
+      : `missing-active-providers:${pendingProviders.join(',')}`;
+
     recordDuplicateCheck(result, { container, instance });
     return result;
   }
@@ -939,19 +1015,21 @@ async function enrichContainer(container, options, includeMetadata, metadataConc
   }
 
   if (planning.includeProviderLabels) {
-    const providerLimit = pLimit(planning.providerCheckConcurrency || 8);
+    const providerLimit = planning.providerCheckLimit || pLimit(planning.providerCheckConcurrency || 8);
     enrichedInstances = await Promise.all(enrichedInstances.map((item) => providerLimit(async () => {
       const providerLabel = await buildProviderLabelForInstance({
         container,
         instance: item,
         baseFolderInput: planning.baseFolderInput,
-        selectedProviders: planning.selectedProviders,
-        folderCache: planning.folderCache,
-        includeProviderLabels: planning.includeProviderLabels,
-        providerCheckTimeoutMs: planning.providerCheckTimeoutMs,
-        folderIdByInput: planning.folderIdByInput,
-        existingByFolderId: planning.existingByFolderId
-      });
+          selectedProviders: planning.selectedProviders,
+          folderCache: planning.folderCache,
+          includeProviderLabels: planning.includeProviderLabels,
+          providerLabelMode: planning.providerLabelMode,
+          providerCheckTimeoutMs: planning.providerCheckTimeoutMs,
+          folderIdByInput: planning.folderIdByInput,
+          existingByFolderId: planning.existingByFolderId,
+          providerStatusByFileId: planning.providerStatusByFileId
+        });
 
       return {
         ...item,
@@ -1020,6 +1098,10 @@ async function runLimitedParallel(containers, options, includeMetadata, containe
   progressState.progressLogIntervalMs = clampPositiveInt(planning.progressLogIntervalMs, DEFAULT_PROGRESS_LOG_INTERVAL_MS);
   progressState.isProviderLabelRun = isProviderLabelRun;
   progressState.duplicateDetailLog = Boolean(isProviderLabelRun && planning.duplicateDetailLog);
+
+  if (isProviderLabelRun && !planning.providerCheckLimit) {
+    planning.providerCheckLimit = pLimit(planning.providerCheckConcurrency || 8);
+  }
 
   console.log(`[START${isProviderLabelRun ? '-PROVIDERS' : ''}] ${containers.length} containers (concurrency=${containerConcurrency}, providerLabels=${isProviderLabelRun})`);
   if (isProviderLabelRun) {
@@ -1112,6 +1194,7 @@ async function main() {
   const providerCheckConcurrency = clampPositiveInt(flags.providerCheckConcurrency || process.env.ZENIUS_BENCH_PROVIDER_CHECK_CONCURRENCY, 8);
   const providerCheckTimeoutMs = clampPositiveInt(flags.providerCheckTimeoutMs || process.env.ZENIUS_BENCH_PROVIDER_CHECK_TIMEOUT_MS, DEFAULT_PROVIDER_CHECK_TIMEOUT_MS);
   const includeProviderLabels = parseBoolean(flags.providerLabels ?? process.env.ZENIUS_BENCH_PROVIDER_LABELS, true);
+  const providerLabelMode = String(flags.providerLabelMode || process.env.ZENIUS_BENCH_PROVIDER_LABEL_MODE || DEFAULT_PROVIDER_LABEL_MODE).trim().toLowerCase();
   const duplicateDetailLog = parseBoolean(flags.duplicateDetailLog ?? process.env.ZENIUS_BENCH_DUPLICATE_DETAIL_LOG, true);
   const progressLogIntervalMs = clampPositiveInt(flags.progressLogIntervalMs || process.env.ZENIUS_BENCH_PROGRESS_LOG_INTERVAL_MS, DEFAULT_PROGRESS_LOG_INTERVAL_MS);
   const baseFolderInput = String(flags.baseFolderInput || process.env.ZENIUS_BENCH_BASE_FOLDER || '').trim();
@@ -1226,6 +1309,13 @@ async function main() {
     console.log(`[PREFETCH] Done. plannedFolders=${existingFileLookup.plannedFolderCount}`);
   }
 
+  const fastProviderLookup = (includeProviderLabels && providerLabelMode === 'fast')
+    ? await buildProviderStatusLookup(existingFileLookup.existingByFolderId, Math.max(100, folderPrefetchChunkSize))
+    : { providerStatusByFileId: new Map(), fileCount: 0 };
+  if (includeProviderLabels && providerLabelMode === 'fast') {
+    console.log(`[PREFETCH] Fast provider status loaded for ${fastProviderLookup.fileCount} files`);
+  }
+
   console.log(JSON.stringify({
     phase: 'discovery',
     rootCgId,
@@ -1240,10 +1330,12 @@ async function main() {
     metadataConcurrency,
     mode,
     includeProviderLabels,
+    providerLabelMode,
     duplicateDetailLog,
     progressLogIntervalMs,
     providerCheckConcurrency,
     providerCheckTimeoutMs,
+    providerLabelMode,
     folderPrefetchChunkSize,
     prefetchFolderCount: existingFileLookup.plannedFolderCount,
     prefetchMissingFolderCount: existingFileLookup.missingFolderCount,
@@ -1265,10 +1357,11 @@ async function main() {
     selectedProviders,
     folderCache,
     folderIdByInput: existingFileLookup.folderIdByInput,
-    existingByFolderId: existingFileLookup.existingByFolderId
+    existingByFolderId: existingFileLookup.existingByFolderId,
+    providerStatusByFileId: fastProviderLookup.providerStatusByFileId
   };
 
-  console.log(`[PLANNING] includeProviderLabels=${includeProviderLabels}, prefetch folders=${existingFileLookup.plannedFolderCount}, missingFolders=${existingFileLookup.missingFolderCount}`);
+  console.log(`[PLANNING] includeProviderLabels=${includeProviderLabels}, providerLabelMode=${providerLabelMode}, prefetch folders=${existingFileLookup.plannedFolderCount}, missingFolders=${existingFileLookup.missingFolderCount}`);
 
   const runners = {
     parallel: () => runLimitedParallel(containers, options, includeMetadata, containerConcurrency, metadataConcurrency, planning)

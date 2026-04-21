@@ -17,6 +17,7 @@
     "test": "jest",
     "test:instance-details": "node test/get-instance-details.js",
     "test:cgroup-video-chain": "node test/get-cgroup-video-chain.js",
+    "test:benchmark-duplicate-demo": "node test/benchmark-duplicate-check-demo.js",
     "heroku-postbuild": "npm run build"
   },
   "dependencies": {
