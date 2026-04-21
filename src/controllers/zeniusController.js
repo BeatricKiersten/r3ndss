@@ -539,6 +539,7 @@ function createBatchChainSession({ rootCgId, targetCgSelector, parentContainerNa
     planBaseFolderInput: '',
     planSelectedProviders: null,
     planFolderCache: new Map(),
+    planExistingFolderMap: null,
     instanceMetadataByShortId: new Map(),
     instanceMetadataPromisesByShortId: new Map(),
     cgPathById: new Map([[rootCgId, []]]),
@@ -573,6 +574,7 @@ function resetBatchPlanState(session, planningContext) {
   session.planCursor = 0;
   session.planReady = false;
   session.planFolderCache = new Map();
+  session.planExistingFolderMap = null;
 }
 
 function ensureBatchPlanContext(session, planningContext) {
@@ -1687,7 +1689,11 @@ async function runDbQuery(sql, params = []) {
   return rows;
 }
 
-async function loadExistingFolderMap() {
+async function loadExistingFolderMap(session = null) {
+  if (session?.planExistingFolderMap instanceof Map) {
+    return session.planExistingFolderMap;
+  }
+
   const rows = await runDbQuery('SELECT id, path FROM folders');
   const folderIdByInputKey = new Map();
 
@@ -1704,10 +1710,14 @@ async function loadExistingFolderMap() {
     folderIdByInputKey.set('root', 'root');
   }
 
+  if (session) {
+    session.planExistingFolderMap = folderIdByInputKey;
+  }
+
   return folderIdByInputKey;
 }
 
-async function buildExistingFileLookup(containers, baseFolderInput, chunkSize = BATCH_FOLDER_PREFETCH_CHUNK_SIZE) {
+async function buildExistingFileLookup(containers, baseFolderInput, chunkSize = BATCH_FOLDER_PREFETCH_CHUNK_SIZE, session = null) {
   const plannedByFolderInput = new Map();
 
   for (const container of containers || []) {
@@ -1728,7 +1738,7 @@ async function buildExistingFileLookup(containers, baseFolderInput, chunkSize = 
   }
 
   const folderInputs = Array.from(plannedByFolderInput.keys());
-  const existingFolderMap = await loadExistingFolderMap();
+  const existingFolderMap = await loadExistingFolderMap(session);
   const folderIdByInput = new Map();
   let missingFolderCount = 0;
   for (const folderInput of folderInputs) {
@@ -1871,7 +1881,8 @@ async function buildPlannedBatchItem({
   folderCache,
   folderIdByInput,
   existingByFolderId,
-  providerStatusByFileId
+  providerStatusByFileId,
+  includeLocalSourceCheck = false
 }) {
   const metadata = instance.metadata && typeof instance.metadata === 'object'
     ? { ...instance.metadata }
@@ -1991,7 +2002,9 @@ async function buildPlannedBatchItem({
     };
   }
 
-  const hasLocalSource = Boolean(existingFile.localPath && await fs.pathExists(existingFile.localPath));
+  const hasLocalSource = includeLocalSourceCheck
+    ? Boolean(existingFile.localPath && await fs.pathExists(existingFile.localPath))
+    : true;
   if (hasLocalSource) {
     plannedItem.action = 'finalize';
     plannedItem.reason = 'File already exists locally; queued missing providers only';
@@ -2016,7 +2029,8 @@ async function buildBatchPlanForContainer({
   folderCache,
   folderIdByInput,
   existingByFolderId,
-  providerStatusByFileId
+  providerStatusByFileId,
+  includeLocalSourceCheck = false
 }) {
   const plannedItems = [];
   const skipped = [];
@@ -2030,7 +2044,8 @@ async function buildBatchPlanForContainer({
       folderCache,
       folderIdByInput,
       existingByFolderId,
-      providerStatusByFileId
+      providerStatusByFileId,
+      includeLocalSourceCheck
     });
 
     if (result?.planned) {
@@ -2328,7 +2343,8 @@ async function buildBatchChain({
     const prefetchContext = await prefetchBatchPlanContext({
       containerDetails: details,
       baseFolderInput: planningContext.baseFolderInput,
-      selectedProviders: planningContext.selectedProviders
+      selectedProviders: planningContext.selectedProviders,
+      session
     });
     prefetch.folderCount = Number(prefetchContext.prefetchFolderCount || 0);
     prefetch.missingFolderCount = Number(prefetchContext.prefetchMissingFolderCount || 0);
@@ -2343,7 +2359,8 @@ async function buildBatchChain({
         folderCache: session.planFolderCache,
         folderIdByInput: prefetchContext.folderIdByInput,
         existingByFolderId: prefetchContext.existingByFolderId,
-        providerStatusByFileId: prefetchContext.providerStatusByFileId
+        providerStatusByFileId: prefetchContext.providerStatusByFileId,
+        includeLocalSourceCheck: false
       })))
     );
 
@@ -2522,11 +2539,12 @@ function queueDownload(task) {
   return downloadQueue.add(task);
 }
 
-async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, selectedProviders }) {
+async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, selectedProviders, session = null }) {
   const existingLookup = await buildExistingFileLookup(
     containerDetails,
     baseFolderInput,
-    clampPositiveInt(BATCH_FOLDER_PREFETCH_CHUNK_SIZE, 80)
+    clampPositiveInt(BATCH_FOLDER_PREFETCH_CHUNK_SIZE, 80),
+    session
   );
 
   const providerLookup = await buildProviderStatusLookup(
@@ -2587,6 +2605,82 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
       const finalizeProviders = Array.isArray(plannedItem.pendingProviders) && plannedItem.pendingProviders.length > 0
         ? plannedItem.pendingProviders
         : plannedItem.selectedProviders;
+
+      const existingFile = plannedItem.fileId ? await db.getFile(plannedItem.fileId).catch(() => null) : null;
+      const hasLocalSource = Boolean(existingFile?.localPath && await fs.pathExists(existingFile.localPath));
+      if (!hasLocalSource) {
+        const requestedFilename = String(plannedItem.outputName || '').replace(/\.mp4$/i, '');
+        const queuedDownloadPromise = queueDownload({
+          urlShortId: plannedItem.urlShortId,
+          folderId: plannedItem.folderId,
+          outputName: requestedFilename,
+          selectedProviders: finalizeProviders,
+          requestContext,
+          refererPath: plannedItem.refererPath || refererPath,
+          fallbackRefererPath: plannedItem.refererPath || '',
+          requestedFilename,
+          skipIfExists: false,
+          plannedFromPreview: true,
+          previewPlan: {
+            sessionId: session.id,
+            planKey: plannedItem.planKey,
+            action: 'download',
+            reason: `Existing file ${plannedItem.fileId || 'unknown'} missing local source at execution time; switching finalize -> download`,
+            fileId: plannedItem.fileId || null,
+            existingStatus: plannedItem.existingStatus || null,
+            pendingProviders: plannedItem.pendingProviders || []
+          }
+        });
+
+        if (runId && backgroundBatchRuns.has(runId)) {
+          const run = backgroundBatchRuns.get(runId);
+          run.downloadPromises.add(queuedDownloadPromise);
+          queuedDownloadPromise.finally(() => {
+            if (backgroundBatchRuns.has(runId)) {
+              const activeRun = backgroundBatchRuns.get(runId);
+              activeRun.downloadPromises?.delete(queuedDownloadPromise);
+              touchBackgroundBatchRun(activeRun);
+            }
+          });
+          touchBackgroundBatchRun(run);
+        }
+
+        queuedDownloadPromise.then((result) => {
+          if (result.cancelled) {
+            console.log(`[Zenius] Batch download ${plannedItem.urlShortId} was cancelled`);
+          } else {
+            console.log(`[Zenius] Batch download ${plannedItem.urlShortId} completed successfully`);
+            if (runId && backgroundBatchRuns.has(runId)) {
+              const run = backgroundBatchRuns.get(runId);
+              run.downloadCompletedCount = (run.downloadCompletedCount || 0) + 1;
+              touchBackgroundBatchRun(run);
+            }
+          }
+        }).catch((error) => {
+          console.error(`[Zenius] Batch download pipeline failed for ${plannedItem.urlShortId}:`, error.message);
+          if (runId && backgroundBatchRuns.has(runId)) {
+            const run = backgroundBatchRuns.get(runId);
+            run.downloadFailedCount = (run.downloadFailedCount || 0) + 1;
+            touchBackgroundBatchRun(run);
+          }
+        });
+
+        queued.push({
+          urlShortId: plannedItem.urlShortId,
+          name: plannedItem.instance?.name || null,
+          outputName: plannedItem.outputName,
+          path: plannedItem.path,
+          folderInput: plannedItem.folderInput,
+          folderId: plannedItem.folderId,
+          action: 'download',
+          reason: `Execution fallback: missing local source for finalize item ${plannedItem.fileId || 'unknown'}`,
+          pendingProviders: plannedItem.pendingProviders || [],
+          existingFileId: plannedItem.fileId || null,
+          status: 'queued'
+        });
+        continue;
+      }
+
       const existingPipeline = await finalizeExistingFilePipeline(plannedItem.fileId, plannedItem.folderId, finalizeProviders, {
         waitForUpload: true
       });
@@ -2603,11 +2697,14 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
     }
 
     const requestedFilename = String(plannedItem.outputName || '').replace(/\.mp4$/i, '');
+    const uploadProviders = Array.isArray(plannedItem.pendingProviders) && plannedItem.pendingProviders.length > 0
+      ? plannedItem.pendingProviders
+      : plannedItem.selectedProviders;
     const queuedDownloadPromise = queueDownload({
       urlShortId: plannedItem.urlShortId,
       folderId: plannedItem.folderId,
       outputName: requestedFilename,
-      selectedProviders: plannedItem.selectedProviders,
+      selectedProviders: uploadProviders,
       requestContext,
       refererPath: plannedItem.refererPath || refererPath,
       fallbackRefererPath: plannedItem.refererPath || '',
