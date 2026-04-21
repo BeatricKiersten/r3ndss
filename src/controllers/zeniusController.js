@@ -813,6 +813,127 @@ function serializeBatchPreviewSession(session) {
   };
 }
 
+function summarizePreviewChain(chainPreview = null) {
+  const containerDetails = Array.isArray(chainPreview?.containerDetails) ? chainPreview.containerDetails : [];
+  const plannedItems = Array.isArray(chainPreview?.plannedItems) ? chainPreview.plannedItems : [];
+  const videoCount = containerDetails.reduce((sum, container) => sum + Number(container?.videoInstances?.length || 0), 0);
+
+  return {
+    previewContainerCount: containerDetails.length,
+    previewVideoCount: videoCount,
+    plannedItemCount: plannedItems.length,
+    discoveredContainerCount: Number(chainPreview?.containerList?.totalContainers || 0),
+    leafCgIds: Array.isArray(chainPreview?.leafCgIds) ? chainPreview.leafCgIds : []
+  };
+}
+
+async function persistPreviewRunSnapshot(run) {
+  if (!run?.id) {
+    return null;
+  }
+
+  const previewSummary = summarizePreviewChain(run.chainPreview || null);
+  const sessionData = {
+    type: 'preview',
+    sessionId: run.sessionId || null,
+    rootCgId: run.rootCgId,
+    rootCgName: run.rootCgName,
+    targetCgSelector: run.targetCgSelector,
+    parentContainerName: run.parentContainerName,
+    baseFolderInput: run.baseFolderInput,
+    selectedProviders: Array.isArray(run.selectedProviders) ? run.selectedProviders : null,
+    discoveredVideoCount: Number(run.discoveredVideoCount || 0),
+    scannedContainerCount: Number(run.scannedContainerCount || 0),
+    processedContainers: Number(run.processedContainers || 0),
+    nextContainerOffset: Number(run.nextContainerOffset || 0),
+    hasMoreContainers: run.hasMoreContainers !== false,
+    previewSummary,
+    chainPreview: run.chainPreview || null,
+    previewItems: Array.isArray(run.chainPreview?.plannedItems) ? run.chainPreview.plannedItems : [],
+    previewContainers: Array.isArray(run.chainPreview?.containerDetails) ? run.chainPreview.containerDetails : [],
+    itemErrors: Array.isArray(run.itemErrors) ? run.itemErrors : [],
+    itemErrorsOverflow: Number(run._itemErrorsOverflow || 0)
+  };
+
+  return withDbRetry(
+    () => db.updateBatchSession(run.id, {
+      runId: run.id,
+      status: run.status,
+      rootCgName: run.rootCgName,
+      parentContainerName: run.parentContainerName,
+      totalContainers: Number(run.totalContainers || previewSummary.discoveredContainerCount || 0),
+      processedContainers: Number(run.processedContainers || 0),
+      queuedCount: Number(run.queuedCount || 0),
+      skippedCount: Number(run.skippedCount || 0),
+      nextContainerOffset: Number(run.nextContainerOffset || 0),
+      hasMore: run.hasMoreContainers !== false,
+      error: run.error || null,
+      queuedItems: Array.isArray(run.queued) ? run.queued : [],
+      skippedItems: Array.isArray(run.skipped) ? run.skipped : [],
+      chainErrors: Array.isArray(run.chainErrors) ? run.chainErrors : [],
+      sessionData
+    }),
+    `preview-session-update[${run.id}]`
+  );
+}
+
+function summarizePersistedPreviewRun(dbSession) {
+  const sessionData = dbSession?.sessionData || {};
+  const chainPreview = sessionData.chainPreview || null;
+  const previewSummary = sessionData.previewSummary || summarizePreviewChain(chainPreview);
+  const scannedContainerCount = Number(sessionData.scannedContainerCount || dbSession?.processedContainers || 0);
+  const totalContainers = Number(dbSession?.totalContainers || previewSummary.discoveredContainerCount || 0);
+  const discoveredVideoCount = Number(sessionData.discoveredVideoCount || previewSummary.previewVideoCount || 0);
+
+  return {
+    id: dbSession.id,
+    type: 'preview',
+    status: dbSession.status,
+    error: dbSession.error || null,
+    rootCgId: dbSession.rootCgId,
+    targetCgSelector: dbSession.targetCgSelector,
+    baseFolderInput: sessionData.baseFolderInput || '',
+    selectedProviders: Array.isArray(sessionData.selectedProviders) ? sessionData.selectedProviders : null,
+    sessionId: sessionData.sessionId || dbSession.id,
+    rootCgName: dbSession.rootCgName,
+    parentContainerName: dbSession.parentContainerName,
+    totalContainers,
+    scannedContainerCount,
+    processedContainers: scannedContainerCount,
+    discoveredVideoCount,
+    queuedCount: Number(dbSession.queuedCount || 0),
+    skippedCount: Number(dbSession.skippedCount || 0),
+    queuedItemsTracked: Array.isArray(dbSession.queuedItems) ? dbSession.queuedItems.length : 0,
+    skippedItemsTracked: Array.isArray(dbSession.skippedItems) ? dbSession.skippedItems.length : 0,
+    queuedItemsOverflow: 0,
+    skippedItemsOverflow: 0,
+    itemErrorsTracked: Array.isArray(sessionData.itemErrors) ? sessionData.itemErrors.length : 0,
+    itemErrorsOverflow: Number(sessionData.itemErrorsOverflow || 0),
+    downloadCompletedCount: 0,
+    downloadFailedCount: 0,
+    hasMoreContainers: dbSession.hasMore !== false,
+    nextContainerOffset: Number(sessionData.nextContainerOffset || dbSession.nextContainerOffset || 0),
+    containerProgress: {
+      processed: scannedContainerCount,
+      total: totalContainers,
+      percent: totalContainers > 0 ? Math.round((scannedContainerCount / totalContainers) * 100) : 0
+    },
+    videoProgress: {
+      discovered: discoveredVideoCount,
+      queued: 0,
+      skipped: 0,
+      completed: 0,
+      failed: 0,
+      pending: 0
+    },
+    chainErrors: Array.isArray(dbSession.chainErrors) ? dbSession.chainErrors : [],
+    chainPreview,
+    startedAt: dbSession.createdAt,
+    finishedAt: dbSession.finishedAt,
+    updatedAt: dbSession.updatedAt
+  };
+}
+
 async function continueBackgroundBatchPreviewRun(run, { requestContext, refererPath }) {
   try {
     run.status = 'running';
@@ -889,11 +1010,14 @@ async function continueBackgroundBatchPreviewRun(run, { requestContext, refererP
       run.finishedAt = new Date().toISOString();
     }
 
+    await persistPreviewRunSnapshot(run);
+
     touchBackgroundBatchRun(run);
   } catch (error) {
     run.error = error.message;
     run.status = 'failed';
     run.finishedAt = new Date().toISOString();
+    await persistPreviewRunSnapshot(run);
     touchBackgroundBatchRun(run);
   }
 }
@@ -3369,6 +3493,37 @@ const zeniusController = {
       backgroundBatchRuns.set(run.id, run);
       ensureBackgroundBatchKeepalive(keepaliveUrl);
 
+      await withDbRetry(
+        () => db.createBatchSession({
+          id: run.id,
+          runId: run.id,
+          rootCgId: run.rootCgId,
+          rootCgName: run.rootCgName,
+          targetCgSelector: run.targetCgSelector,
+          parentContainerName: run.parentContainerName,
+          status: run.status,
+          totalContainers: 0,
+          processedContainers: 0,
+          queuedCount: 0,
+          skippedCount: 0,
+          nextContainerOffset: 0,
+          hasMore: true,
+          sessionData: {
+            type: 'preview',
+            sessionId: run.id,
+            baseFolderInput: baseFolderInput || '',
+            selectedProviders,
+            chainPreview: null,
+            previewSummary: summarizePreviewChain(null)
+          },
+          queuedItems: [],
+          skippedItems: [],
+          chainErrors: [],
+          expiresAt: run.expiresAt
+        }),
+        `preview-session-create[${run.id}]`
+      );
+
       res.status(202).json({
         success: true,
         message: 'Zenius batch chain session started',
@@ -3391,6 +3546,14 @@ const zeniusController = {
       const run = runId ? backgroundBatchRuns.get(runId) : null;
 
       if (!run || run.type !== 'preview') {
+        const dbSession = runId ? await db.getBatchSession(runId) : null;
+        if (dbSession?.sessionData?.type === 'preview') {
+          return res.json({
+            success: true,
+            data: summarizePersistedPreviewRun(dbSession)
+          });
+        }
+
         return res.status(404).json({ success: false, error: 'Batch preview build not found' });
       }
 
