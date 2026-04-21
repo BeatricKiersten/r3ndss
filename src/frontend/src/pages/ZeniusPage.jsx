@@ -742,8 +742,8 @@ export default function ZeniusPage() {
 
   const trackedPreviewRun = useMemo(() => {
     const runs = Array.isArray(queueStatus?.backgroundBatches) ? queueStatus.backgroundBatches : [];
-    if (previewRunId) return runs.find((item) => item.id === previewRunId && item.type === 'preview') || null;
-    return runs.find((item) => item.type === 'preview' && item.status === 'running') || null;
+    if (!previewRunId) return null;
+    return runs.find((item) => item.id === previewRunId && item.type === 'preview') || null;
   }, [queueStatus, previewRunId]);
 
   const trackedDownloadRun = useMemo(() => {
