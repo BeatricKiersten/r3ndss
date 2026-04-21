@@ -17,6 +17,7 @@ const DEFAULT_CONTAINER_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BENCH_C
 const DEFAULT_METADATA_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BENCH_METADATA_CONCURRENCY || '12', 10);
 const DEFAULT_FOLDER_PREFETCH_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BENCH_FOLDER_PREFETCH_CHUNK_SIZE || '50', 10);
 const DEFAULT_PROGRESS_LOG_INTERVAL_MS = Number.parseInt(process.env.ZENIUS_BENCH_PROGRESS_LOG_INTERVAL_MS || '1000', 10);
+const DEFAULT_PROVIDER_CHECK_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_BENCH_PROVIDER_CHECK_TIMEOUT_MS || '15000', 10);
 
 function db() {
   return getInstance();
@@ -100,6 +101,8 @@ let progressState = {
   completed: 0,
   labelCounts: {},
   checkedInstances: 0,
+  checksInFlight: 0,
+  checkErrors: 0,
   startedAt: 0,
   lastProgressLogAt: 0,
   progressLogIntervalMs: DEFAULT_PROGRESS_LOG_INTERVAL_MS,
@@ -137,12 +140,34 @@ function maybeLogProviderProgress(force = false) {
   progressState.lastProgressLogAt = now;
   const elapsedMs = Math.max(1, now - progressState.startedAt);
   const checks = Number(progressState.checkedInstances || 0);
+  const inFlight = Number(progressState.checksInFlight || 0);
+  const checkErrors = Number(progressState.checkErrors || 0);
   const existingCount = Number(progressState.labelCounts.existing || 0);
   const newCount = Number(progressState.labelCounts.new || 0);
   const dupRate = checks > 0 ? ((existingCount / checks) * 100).toFixed(1) : '0.0';
   const throughput = (checks / (elapsedMs / 1000)).toFixed(2);
 
-  console.log(`[PROGRESS-PROVIDERS] containers:${progressState.completed}/${progressState.total} checks:${checks} existing:${existingCount} new:${newCount} dupRate:${dupRate}% throughput:${throughput}/s elapsed:${formatDuration(elapsedMs)} labels:${formatLabelCounts(progressState.labelCounts)}`);
+  console.log(`[PROGRESS-PROVIDERS] containers:${progressState.completed}/${progressState.total} checks:${checks} inFlight:${inFlight} errors:${checkErrors} existing:${existingCount} new:${newCount} dupRate:${dupRate}% throughput:${throughput}/s elapsed:${formatDuration(elapsedMs)} labels:${formatLabelCounts(progressState.labelCounts)}`);
+}
+
+async function withTimeout(promise, timeoutMs, label) {
+  const ms = Math.max(1, Number(timeoutMs) || 1);
+  let timer = null;
+  try {
+    const timeoutPromise = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`${label} timed out after ${ms}ms`));
+      }, ms);
+      if (typeof timer.unref === 'function') {
+        timer.unref();
+      }
+    });
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 function recordDuplicateCheck(result, context = {}) {
@@ -766,9 +791,12 @@ async function buildProviderLabelForInstance({
   selectedProviders,
   folderCache,
   includeProviderLabels,
+  providerCheckTimeoutMs,
   folderIdByInput,
   existingByFolderId
 }) {
+  progressState.checksInFlight += 1;
+  try {
   const urlShortId = normalizeNumericShortId(instance.urlShortId);
   const outputBaseName = sanitizeOutputName(instance.outputName || instance.name || `zenius-${urlShortId}`, `zenius-${urlShortId}`);
   const outputFileName = `${outputBaseName}.mp4`;
@@ -799,9 +827,22 @@ async function buildProviderLabelForInstance({
     return result;
   }
 
-  const pendingProviderInfo = await uploaderService.getPendingUploadProviders(existingFile.id, selectedProviders, {
-    verifyRemote: false
-  });
+  let pendingProviderInfo;
+  try {
+    pendingProviderInfo = await withTimeout(
+      uploaderService.getPendingUploadProviders(existingFile.id, selectedProviders, {
+        verifyRemote: false
+      }),
+      providerCheckTimeoutMs,
+      `provider-check file=${existingFile.id}`
+    );
+  } catch (error) {
+    progressState.checkErrors += 1;
+    result.label = 'provider-check-error';
+    result.providerSummary = String(error?.message || 'provider check failed').slice(0, 160);
+    recordDuplicateCheck(result, { container, instance });
+    return result;
+  }
   const targetProviders = Array.isArray(pendingProviderInfo?.targetProviders)
     ? pendingProviderInfo.targetProviders
     : [];
@@ -830,6 +871,9 @@ async function buildProviderLabelForInstance({
   result.label = `missing-local-and-providers:${pendingProviders.join(',')}`;
   recordDuplicateCheck(result, { container, instance });
   return result;
+  } finally {
+    progressState.checksInFlight = Math.max(0, Number(progressState.checksInFlight || 0) - 1);
+  }
 }
 
 async function enrichContainer(container, options, includeMetadata, metadataConcurrency, planning = {}) {
@@ -856,6 +900,7 @@ async function enrichContainer(container, options, includeMetadata, metadataConc
         selectedProviders: planning.selectedProviders,
         folderCache: planning.folderCache,
         includeProviderLabels: planning.includeProviderLabels,
+        providerCheckTimeoutMs: planning.providerCheckTimeoutMs,
         folderIdByInput: planning.folderIdByInput,
         existingByFolderId: planning.existingByFolderId
       });
@@ -920,6 +965,8 @@ async function runLimitedParallel(containers, options, includeMetadata, containe
   progressState.completed = 0;
   progressState.labelCounts = {};
   progressState.checkedInstances = 0;
+  progressState.checksInFlight = 0;
+  progressState.checkErrors = 0;
   progressState.startedAt = Date.now();
   progressState.lastProgressLogAt = 0;
   progressState.progressLogIntervalMs = clampPositiveInt(planning.progressLogIntervalMs, DEFAULT_PROGRESS_LOG_INTERVAL_MS);
@@ -932,13 +979,27 @@ async function runLimitedParallel(containers, options, includeMetadata, containe
   }
 
   const limit = pLimit(containerConcurrency);
+  let heartbeatTimer = null;
+  if (isProviderLabelRun) {
+    heartbeatTimer = setInterval(() => {
+      maybeLogProviderProgress(false);
+    }, Math.max(500, Number(progressState.progressLogIntervalMs) || DEFAULT_PROGRESS_LOG_INTERVAL_MS));
+    if (typeof heartbeatTimer.unref === 'function') {
+      heartbeatTimer.unref();
+    }
+  }
+
   const results = await Promise.all(containers.map((container) => limit(() => enrichContainer(
     container,
     options,
     includeMetadata,
     metadataConcurrency,
     planning
-  ))));
+  )))).finally(() => {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+    }
+  });
 
   maybeLogProviderProgress(true);
 
@@ -947,7 +1008,7 @@ async function runLimitedParallel(containers, options, includeMetadata, containe
     const newCount = Number(progressState.labelCounts.new || 0);
     const checks = Number(progressState.checkedInstances || 0);
     const dupRate = checks > 0 ? ((existingCount / checks) * 100).toFixed(1) : '0.0';
-    console.log(`[DONE-PROVIDERS] containers:${progressState.completed}/${progressState.total} checks:${checks} existing:${existingCount} new:${newCount} dupRate:${dupRate}% labels:${formatLabelCounts(progressState.labelCounts)}`);
+    console.log(`[DONE-PROVIDERS] containers:${progressState.completed}/${progressState.total} checks:${checks} errors:${progressState.checkErrors} existing:${existingCount} new:${newCount} dupRate:${dupRate}% labels:${formatLabelCounts(progressState.labelCounts)}`);
   } else {
     console.log(`[DONE] processed:${progressState.completed}/${progressState.total}`);
   }
@@ -1001,6 +1062,7 @@ async function main() {
   const containerConcurrency = clampPositiveInt(flags.containerConcurrency, DEFAULT_CONTAINER_CONCURRENCY);
   const metadataConcurrency = clampPositiveInt(flags.metadataConcurrency, DEFAULT_METADATA_CONCURRENCY);
   const providerCheckConcurrency = clampPositiveInt(flags.providerCheckConcurrency || process.env.ZENIUS_BENCH_PROVIDER_CHECK_CONCURRENCY, 8);
+  const providerCheckTimeoutMs = clampPositiveInt(flags.providerCheckTimeoutMs || process.env.ZENIUS_BENCH_PROVIDER_CHECK_TIMEOUT_MS, DEFAULT_PROVIDER_CHECK_TIMEOUT_MS);
   const includeProviderLabels = parseBoolean(flags.providerLabels ?? process.env.ZENIUS_BENCH_PROVIDER_LABELS, true);
   const duplicateDetailLog = parseBoolean(flags.duplicateDetailLog ?? process.env.ZENIUS_BENCH_DUPLICATE_DETAIL_LOG, true);
   const progressLogIntervalMs = clampPositiveInt(flags.progressLogIntervalMs || process.env.ZENIUS_BENCH_PROGRESS_LOG_INTERVAL_MS, DEFAULT_PROGRESS_LOG_INTERVAL_MS);
@@ -1133,6 +1195,7 @@ async function main() {
     duplicateDetailLog,
     progressLogIntervalMs,
     providerCheckConcurrency,
+    providerCheckTimeoutMs,
     folderPrefetchChunkSize,
     prefetchFolderCount: existingFileLookup.plannedFolderCount,
     prefetchMissingFolderCount: existingFileLookup.missingFolderCount,
@@ -1149,6 +1212,7 @@ async function main() {
     duplicateDetailLog,
     progressLogIntervalMs,
     providerCheckConcurrency,
+    providerCheckTimeoutMs,
     baseFolderInput,
     selectedProviders,
     folderCache,
