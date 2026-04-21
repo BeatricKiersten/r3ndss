@@ -94,14 +94,10 @@ function resolveContainerShortId(item) {
   return extractContainerShortIdFromPath(item?.['path-url']);
 }
 
-const PROGRESS_LOG_INTERVAL_MS = Number.parseInt(process.env.ZENIUS_BENCH_PROGRESS_LOG_INTERVAL_MS || '500', 10);
+const PROGRESS_LOG_INTERVAL_MS = Number.parseInt(process.env.ZENIUS_BENCH_PROGRESS_LOG_INTERVAL_MS || '100', 10);
 let progressState = {
-  startTime: null,
   total: 0,
   completed: 0,
-  lastLogTime: 0,
-  containerNames: new Map(),
-  lastContainer: null,
   duplicateCount: 0,
   newCount: 0
 };
@@ -117,41 +113,20 @@ function formatDuration(ms) {
 }
 
 function logProgress(container, durationMs, force = false, labelInfo = null) {
-  if (!progressState.startTime) {
-    progressState.startTime = Date.now();
-  }
-
   progressState.completed += 1;
+
+  const nameKey = String(container?.name || container?.containerName || container?.urlShortId || 'unknown').slice(0, 40);
 
   if (labelInfo) {
     if (labelInfo.label === 'existing') {
       progressState.duplicateCount += 1;
+      console.log(`[DUP] ${nameKey.slice(0,40)} already exists`);
     } else {
       progressState.newCount += 1;
+      console.log(`[NEW] ${nameKey.slice(0,40)} (${durationMs}ms)`);
     }
-  }
-
-  const now = Date.now();
-  const elapsedMs = now - progressState.startTime;
-
-  const nameKey = String(container?.name || container?.containerName || container?.urlShortId || 'unknown').slice(0, 40);
-  progressState.containerNames.set(container?.urlShortId || container?.containerUrlShortId || 'unknown', nameKey);
-  progressState.lastContainer = { name: nameKey, durationMs, label: labelInfo?.label };
-
-  const shouldLog = force || (now - progressState.lastLogTime) >= PROGRESS_LOG_INTERVAL_MS;
-
-  if (shouldLog && progressState.total > 0) {
-    const percent = ((progressState.completed / progressState.total) * 100).toFixed(1);
-    const avgMs = elapsedMs / progressState.completed;
-    const etaMs = avgMs * (progressState.total - progressState.completed);
-    const rate = (progressState.completed / elapsedMs * 1000).toFixed(1);
-
-    const lastName = progressState.lastContainer?.name || '';
-    const dupInfo = labelInfo ? ` | dup:${progressState.duplicateCount} new:${progressState.newCount}` : '';
-
-    console.log(`[${formatDuration(elapsedMs)}] ${progressState.completed}/${progressState.total} (${percent}%) | rate: ${rate}/s | eta: ${formatDuration(etaMs)} | avg: ${avgMs.toFixed(0)}ms | last: ${lastName.slice(0,20)}${dupInfo}`);
-
-    progressState.lastLogTime = now;
+  } else {
+    console.log(`[${progressState.completed}/${progressState.total}] ${nameKey.slice(0,35)} (${durationMs}ms)`);
   }
 }
 
@@ -717,13 +692,10 @@ function summarizeInstanceLabels(instances = []) {
 async function runLimitedParallel(containers, options, includeMetadata, containerConcurrency, metadataConcurrency, planning) {
   progressState.total = containers.length;
   progressState.completed = 0;
-  progressState.startTime = Date.now();
-  progressState.lastLogTime = Date.now();
-  progressState.containerNames.clear();
   progressState.duplicateCount = 0;
   progressState.newCount = 0;
 
-  console.log(`[START] Processing ${containers.length} containers with concurrency ${containerConcurrency}`);
+  console.log(`[START] Processing ${containers.length} containers (concurrency=${containerConcurrency})`);
 
   const limit = pLimit(containerConcurrency);
   const results = await Promise.all(containers.map((container) => limit(() => enrichContainer(
@@ -734,7 +706,7 @@ async function runLimitedParallel(containers, options, includeMetadata, containe
     planning
   ))));
 
-  logProgress({ name: 'DONE' }, 0, true);
+  console.log(`[DONE] dup:${progressState.duplicateCount} new:${progressState.newCount}`);
   return results;
 }
 
