@@ -511,6 +511,35 @@ function chunkArray(values, chunkSize) {
 }
 
 async function buildExistingFileLookup(containers, baseFolderInput, folderCache, chunkSize = DEFAULT_FOLDER_PREFETCH_CHUNK_SIZE) {
+  const startedAt = Date.now();
+  const progress = {
+    phase: 'planning',
+    plannedFolders: 0,
+    resolvedFolders: 0,
+    listedFolders: 0,
+    totalChunks: 0,
+    completedChunks: 0,
+    matchedFiles: 0
+  };
+
+  const logPrefetchProgress = (force = false) => {
+    const elapsed = formatDuration(Date.now() - startedAt);
+    const mode = force ? 'snapshot' : 'heartbeat';
+    console.log(
+      `[PREFETCH-PROGRESS] mode=${mode} phase=${progress.phase} resolvedFolders:${progress.resolvedFolders}/${progress.plannedFolders} listedFolders:${progress.listedFolders}/${progress.plannedFolders} chunks:${progress.completedChunks}/${progress.totalChunks} matchedFiles:${progress.matchedFiles} elapsed:${elapsed}`
+    );
+  };
+
+  const prefetchTicker = setInterval(() => {
+    logPrefetchProgress(false);
+  }, 1000);
+  if (typeof prefetchTicker.unref === 'function') {
+    prefetchTicker.unref();
+  }
+
+  logPrefetchProgress(true);
+
+  try {
   const plannedByFolderInput = new Map();
 
   for (const container of containers) {
@@ -531,17 +560,30 @@ async function buildExistingFileLookup(containers, baseFolderInput, folderCache,
   }
 
   const folderInputs = Array.from(plannedByFolderInput.keys());
+  progress.plannedFolders = folderInputs.length;
+  progress.phase = 'resolving-folders';
+  logPrefetchProgress(true);
+
   const folderIdByInput = new Map();
   for (const folderInput of folderInputs) {
     const folderId = await resolveFolderIdWithCache(folderCache, folderInput);
     folderIdByInput.set(folderInput, folderId);
+    progress.resolvedFolders += 1;
   }
 
   const existingByFolderId = new Map();
-  for (const folderInputChunk of chunkArray(folderInputs, chunkSize)) {
+  const folderInputChunks = chunkArray(folderInputs, chunkSize);
+  progress.phase = 'listing-files';
+  progress.totalChunks = folderInputChunks.length;
+  logPrefetchProgress(true);
+
+  for (const folderInputChunk of folderInputChunks) {
     await Promise.all(folderInputChunk.map(async (folderInput) => {
       const folderId = folderIdByInput.get(folderInput);
-      if (!folderId) return;
+      if (!folderId) {
+        progress.listedFolders += 1;
+        return;
+      }
 
       const plannedNames = plannedByFolderInput.get(folderInput) || new Set();
       const files = await db().listFiles(folderId);
@@ -552,16 +594,27 @@ async function buildExistingFileLookup(containers, baseFolderInput, folderCache,
           continue;
         }
         byName.set(nameKey, file);
+        progress.matchedFiles += 1;
       }
       existingByFolderId.set(folderId, byName);
+      progress.listedFolders += 1;
     }));
+
+    progress.completedChunks += 1;
+    logPrefetchProgress(true);
   }
+
+  progress.phase = 'completed';
+  logPrefetchProgress(true);
 
   return {
     folderIdByInput,
     existingByFolderId,
     plannedFolderCount: folderInputs.length
   };
+  } finally {
+    clearInterval(prefetchTicker);
+  }
 }
 
 function joinFolderPaths(prefix, suffix) {
