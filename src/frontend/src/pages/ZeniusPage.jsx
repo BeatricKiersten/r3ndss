@@ -1753,6 +1753,21 @@ export default function ZeniusPage() {
                   <><Zap className="w-4 h-4" /> Start Batch Download</>
                 )}
               </button>
+
+              {trackedPreviewRun?.status === 'running' && (
+                <button
+                  type="button"
+                  onClick={() => handleCancelTrackedRun(trackedPreviewRun.id, 'preview')}
+                  disabled={cancelBatchRunMutation.isLoading}
+                  className="btn flex items-center justify-center gap-2 sm:w-auto rounded-lg px-5 py-2.5 font-medium transition-colors bg-red-500/15 text-red-300 hover:bg-red-500/25 border border-red-500/30 disabled:opacity-40"
+                >
+                  {cancelBatchRunMutation.isLoading ? (
+                    <><Loader2 className="w-4 h-4 animate-spin" /> Cancelling Preview...</>
+                  ) : (
+                    <><XCircle className="w-4 h-4" /> Cancel Preview</>
+                  )}
+                </button>
+              )}
             </div>
 
             {!batchChain && !batchChainMutation.isLoading && (
