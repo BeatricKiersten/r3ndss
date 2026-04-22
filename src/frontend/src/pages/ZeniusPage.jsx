@@ -1765,13 +1765,10 @@ export default function ZeniusPage() {
               <button
                 type="button"
                 onClick={() => handleCancelTrackedRun(previewCancelRunId, 'preview')}
-                disabled={cancelBatchRunMutation.isLoading || !previewCancelRunId || !isPreviewRunning}
-                className="btn flex items-center justify-center gap-2 sm:w-auto rounded-lg px-5 py-2.5 font-medium transition-colors bg-red-500/15 text-red-300 hover:bg-red-500/25 border border-red-500/30 disabled:opacity-40 disabled:cursor-not-allowed"
+                className="btn flex items-center justify-center gap-2 sm:w-auto rounded-lg px-5 py-2.5 font-medium transition-colors bg-red-500/15 text-red-300 hover:bg-red-500/25 border border-red-500/30"
               >
                 {cancelBatchRunMutation.isLoading ? (
                   <><Loader2 className="w-4 h-4 animate-spin" /> Cancelling Preview...</>
-                ) : isPreviewRunning ? (
-                  <><XCircle className="w-4 h-4" /> Cancel Preview</>
                 ) : (
                   <><XCircle className="w-4 h-4" /> Cancel Preview</>
                 )}
