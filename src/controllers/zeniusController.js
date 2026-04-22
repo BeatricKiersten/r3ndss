@@ -1165,9 +1165,15 @@ async function runBackgroundBatchPreviewLoop(run, { requestContext, refererPath 
 
       try {
         await continueBackgroundBatchPreviewRun(run, { requestContext, refererPath });
+        if (run.status !== 'running' || run.finishedAt) {
+          break;
+        }
         run.previewRetryCount = 0;
         run.lastError = null;
       } catch (error) {
+        if (run.status !== 'running' || run.finishedAt) {
+          break;
+        }
         run.lastError = error.message;
         if (!shouldContinuePreviewAfterError(run, error)) {
           run.status = 'failed';
@@ -1200,6 +1206,10 @@ async function runBackgroundBatchPreviewLoop(run, { requestContext, refererPath 
 }
 
 async function continueBackgroundBatchPreviewRun(run, { requestContext, refererPath }) {
+  if (!run || run.status !== 'running' || run.finishedAt) {
+    return;
+  }
+
   run.status = 'running';
   touchBackgroundBatchRun(run);
 
@@ -1217,6 +1227,10 @@ async function continueBackgroundBatchPreviewRun(run, { requestContext, refererP
   let latestDiscoveredVideos = Number(run.discoveredVideoCount || 0);
 
   for (let step = 0; step < stepsPerPoll && hasMore; step += 1) {
+    if (run.status !== 'running' || run.finishedAt) {
+      break;
+    }
+
     const chain = await buildBatchChain({
       rootCgId: run.sessionContext?.rootCgId || run.rootCgId,
       targetCgSelector: run.sessionContext?.targetCgSelector || run.targetCgSelector,
@@ -1265,6 +1279,10 @@ async function continueBackgroundBatchPreviewRun(run, { requestContext, refererP
 
     hasMore = Boolean(chain.hasMoreContainers);
     nextOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : nextOffset;
+    if (run.status !== 'running' || run.finishedAt) {
+      break;
+    }
+
     if (!hasMore) {
       break;
     }
@@ -1277,6 +1295,12 @@ async function continueBackgroundBatchPreviewRun(run, { requestContext, refererP
   const elapsedMs = Math.max(1, Date.now() - startedAt);
   const throughput = (totalProcessedThisPoll / (elapsedMs / 1000)).toFixed(2);
   console.log(`[Zenius][Preview] processed=${totalProcessedThisPoll} discoveredVideos=${latestDiscoveredVideos} offset=${run.nextContainerOffset}/${run.totalContainers} hasMore=${hasMore} throughput=${throughput}/s elapsed=${elapsedMs}ms`);
+
+  if (run.status !== 'running' || run.finishedAt) {
+    await persistPreviewRunSnapshot(run);
+    touchBackgroundBatchRun(run);
+    return;
+  }
 
   if (!hasMore) {
     run.status = 'completed';
