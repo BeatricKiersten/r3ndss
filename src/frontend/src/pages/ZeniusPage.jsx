@@ -49,6 +49,7 @@ import {
   useWebhookConfig,
   useZeniusBatchChain,
   useZeniusBatchDownload,
+  useZeniusCancelBatchRun,
   useZeniusCancelAll,
   useZeniusDownload,
   useZeniusInstanceDetails,
@@ -593,6 +594,7 @@ function BatchProgressCard({ batchResult, batchQueueProgress, trackedBatchRun, b
   const total = batchQueueProgress?.containersTotal ?? trackedBatchRun?.totalContainers ?? null;
   const pct = total ? Math.round((processed / total) * 100) : 0;
   const isRunning = status === 'running';
+  const runLabel = trackedBatchRun?.type === 'preview' ? 'Preview Build' : 'Batch Download';
 
   return (
     <div className={`card p-5 space-y-4 ${isRunning ? 'border-blue-500/30' : status === 'completed' ? 'border-emerald-500/30' : 'border-amber-500/30'}`}>
@@ -613,10 +615,10 @@ function BatchProgressCard({ batchResult, batchQueueProgress, trackedBatchRun, b
           )}
           <div>
             <p className="text-sm font-semibold text-white">
-              {isRunning ? 'Batch Download Running' : status === 'completed' ? 'Batch Download Completed' : `Batch ${status}`}
+              {isRunning ? `${runLabel} Running` : status === 'completed' ? `${runLabel} Completed` : `${runLabel} ${status}`}
             </p>
             <p className="text-xs text-[#888]">
-              {isRunning ? 'Videos are being processed in the background' : `Batch finished with status: ${status}`}
+              {isRunning ? 'Videos are being processed in the background' : `${runLabel} finished with status: ${status}`}
             </p>
           </div>
         </div>
@@ -717,6 +719,7 @@ export default function ZeniusPage() {
   const downloadMutation = useZeniusDownload();
   const batchChainMutation = useZeniusBatchChain();
   const batchDownloadMutation = useZeniusBatchDownload();
+  const cancelBatchRunMutation = useZeniusCancelBatchRun();
   const deleteFolderMutation = useDeleteFolder();
   const cancelAllMutation = useZeniusCancelAll();
   const resetFilesMutation = useZeniusResetFiles();
@@ -1120,6 +1123,21 @@ export default function ZeniusPage() {
     }
   };
 
+  const handleCancelTrackedRun = async (runId, type = 'batch') => {
+    if (!runId) return;
+
+    try {
+      await cancelBatchRunMutation.mutateAsync(runId);
+      if (type === 'preview') {
+        setBatchBuildProgress(null);
+      }
+      toast.success('Cancelled', `${type === 'preview' ? 'Preview build' : 'Batch run'} cancelled`);
+    } catch (error) {
+      console.error('Failed to cancel background batch run:', error);
+      toast.error('Cancel Failed', error?.response?.data?.error || error.message);
+    }
+  };
+
   useEffect(() => {
     const onKeyDown = (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
@@ -1370,8 +1388,23 @@ export default function ZeniusPage() {
         batchQueueProgress={batchQueueProgress}
         trackedBatchRun={trackedDownloadRun}
         batchSessionId={batchSessionId}
-        onCancelBatch={() => setShowCancelConfirm(true)}
+        onCancelBatch={() => handleCancelTrackedRun(trackedDownloadRun?.id, 'batch')}
       />
+
+      {trackedPreviewRun && (
+        <BatchProgressCard
+          batchResult={trackedPreviewRun}
+          batchQueueProgress={{
+            containersProcessed: Number(trackedPreviewRun.scannedContainerCount || trackedPreviewRun.processedContainers || 0),
+            containersTotal: Number.isFinite(Number(trackedPreviewRun.totalContainers)) ? Number(trackedPreviewRun.totalContainers) : null
+          }}
+          trackedBatchRun={trackedPreviewRun}
+          batchSessionId={trackedPreviewRun.sessionId || previewRunId}
+          onCancelBatch={trackedPreviewRun.status === 'running'
+            ? () => handleCancelTrackedRun(trackedPreviewRun.id, 'preview')
+            : null}
+        />
+      )}
 
       {/* Shared Headers Section */}
       <CollapsibleSection title="Headers & Authentication" icon={KeyRound} defaultOpen={!headersRaw}>

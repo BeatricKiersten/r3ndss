@@ -14,6 +14,7 @@ router.get('/batch-sessions/:id', asyncHandler(zeniusController.getBatchSessionS
 
 // New management endpoints
 router.post('/cancel-all', asyncHandler(zeniusController.cancelAll));
+router.post('/batch-runs/:id/cancel', asyncHandler(zeniusController.cancelBatchRun));
 router.post('/reset-files', asyncHandler(zeniusController.resetFiles));
 router.get('/queue-status', asyncHandler(zeniusController.getQueueStatus));
 router.put('/max-concurrent', asyncHandler(zeniusController.setMaxConcurrent));

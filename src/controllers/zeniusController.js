@@ -1397,6 +1397,50 @@ function markBackgroundBatchRunsCancelled(reason = 'Cancelled by user') {
   return cancelledCount;
 }
 
+async function cancelBackgroundBatchRun(runId, reason = 'Cancelled by user') {
+  const normalizedRunId = normalizeSessionId(runId);
+  if (!normalizedRunId || !backgroundBatchRuns.has(normalizedRunId)) {
+    return null;
+  }
+
+  const run = backgroundBatchRuns.get(normalizedRunId);
+  if (!run) {
+    return null;
+  }
+
+  if (run.status === 'running') {
+    run.status = 'cancelled';
+    run.error = reason;
+    run.lastError = reason;
+    run.finishedAt = new Date().toISOString();
+    touchBackgroundBatchRun(run);
+  }
+
+  const existingSession = await db.getBatchSession(normalizedRunId).catch(() => null);
+  if (existingSession) {
+    await withDbRetry(
+      () => db.updateBatchSession(normalizedRunId, {
+        status: run.status,
+        error: run.error,
+        rootCgName: run.rootCgName,
+        parentContainerName: run.parentContainerName,
+        totalContainers: Number(run.totalContainers || 0),
+        processedContainers: Number(run.processedContainers || 0),
+        queuedCount: Number(run.queuedCount || 0),
+        skippedCount: Number(run.skippedCount || 0),
+        nextContainerOffset: Number(run.nextContainerOffset || 0),
+        hasMore: false,
+        queuedItems: Array.isArray(run.queued) ? run.queued : [],
+        skippedItems: Array.isArray(run.skipped) ? run.skipped : [],
+        chainErrors: Array.isArray(run.chainErrors) ? run.chainErrors : []
+      }),
+      `batch-session-cancel[${normalizedRunId}]`
+    );
+  }
+
+  return run;
+}
+
 function addLeafCgId(session, cgId) {
   if (!cgId || !/^\d+$/.test(String(cgId).trim())) {
     return;
@@ -3949,6 +3993,28 @@ const zeniusController = {
           errors: result.errors,
           details: result
         }
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  async cancelBatchRun(req, res) {
+    try {
+      const runId = normalizeSessionId(req.params.id);
+      if (!runId) {
+        return res.status(400).json({ success: false, error: 'Batch run id is required' });
+      }
+
+      const run = await cancelBackgroundBatchRun(runId, 'Cancelled by user');
+      if (!run) {
+        return res.status(404).json({ success: false, error: 'Background batch run not found' });
+      }
+
+      res.json({
+        success: true,
+        message: 'Background batch cancelled',
+        data: serializeBackgroundBatchRun(run, { includePreview: true })
       });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });

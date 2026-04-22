@@ -352,6 +352,22 @@ export const useZeniusCancelAll = () => {
   });
 };
 
+export const useZeniusCancelBatchRun = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation(
+    async (runId) => {
+      const response = await api.post(`/api/zenius/batch-runs/${runId}/cancel`);
+      return response.data;
+    },
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('zenius-queue-status');
+      }
+    }
+  );
+};
+
 export const useZeniusResetFiles = () => {
   const queryClient = useQueryClient();
   
