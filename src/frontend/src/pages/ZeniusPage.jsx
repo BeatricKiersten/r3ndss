@@ -811,6 +811,14 @@ export default function ZeniusPage() {
     if (trackedPreviewRun.status === 'completed' && trackedPreviewRun.chainPreview) {
       setBatchChain(trackedPreviewRun.chainPreview);
     }
+
+    if (trackedPreviewRun.status === 'cancelled') {
+      setBatchBuildProgress(null);
+      if (batchChainPollRef.current) {
+        window.clearInterval(batchChainPollRef.current);
+        batchChainPollRef.current = null;
+      }
+    }
   }, [trackedPreviewRun]);
 
   useEffect(() => {
@@ -984,6 +992,15 @@ export default function ZeniusPage() {
           return;
         }
 
+        if (status.status === 'cancelled') {
+          setBatchBuildProgress(null);
+          if (batchChainPollRef.current) {
+            window.clearInterval(batchChainPollRef.current);
+            batchChainPollRef.current = null;
+          }
+          return;
+        }
+
         if (status.status === 'failed') {
           setBatchBuildProgress(null);
           if (batchChainPollRef.current) {
@@ -1011,7 +1028,7 @@ export default function ZeniusPage() {
   }, []);
 
   useEffect(() => {
-    if (!previewRunId || trackedPreviewRun?.status === 'completed' || trackedPreviewRun?.status === 'failed') {
+    if (!previewRunId || trackedPreviewRun?.status === 'completed' || trackedPreviewRun?.status === 'failed' || trackedPreviewRun?.status === 'cancelled') {
       if (batchChainPollRef.current) {
         window.clearInterval(batchChainPollRef.current);
         batchChainPollRef.current = null;
@@ -1030,6 +1047,15 @@ export default function ZeniusPage() {
       setBatchSessionId((prev) => status.sessionId || prev || previewRunId);
       if (status.chainPreview) {
         setBatchChain(status.chainPreview);
+      }
+      if (status.status === 'cancelled') {
+        setBatchBuildProgress(null);
+        if (batchChainPollRef.current) {
+          window.clearInterval(batchChainPollRef.current);
+          batchChainPollRef.current = null;
+        }
+        setPreviewRunId(null);
+        return;
       }
       setBatchBuildProgress(status.status === 'running'
         ? {
@@ -1129,7 +1155,12 @@ export default function ZeniusPage() {
     try {
       await cancelBatchRunMutation.mutateAsync(runId);
       if (type === 'preview') {
+        if (batchChainPollRef.current) {
+          window.clearInterval(batchChainPollRef.current);
+          batchChainPollRef.current = null;
+        }
         setBatchBuildProgress(null);
+        setPreviewRunId(null);
       }
       toast.success('Cancelled', `${type === 'preview' ? 'Preview build' : 'Batch run'} cancelled`);
     } catch (error) {
