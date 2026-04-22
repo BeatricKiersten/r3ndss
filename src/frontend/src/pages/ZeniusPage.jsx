@@ -99,6 +99,16 @@ function normalizeFolderInput(rawValue) {
   return normalized.trim();
 }
 
+function buildPreviewContextSignature({ rootCgId, targetCgSelector, parentContainerName, folderPrefix, providers }) {
+  return JSON.stringify({
+    rootCgId: String(rootCgId || '').trim(),
+    targetCgSelector: String(targetCgSelector || '').trim(),
+    parentContainerName: String(parentContainerName || '').trim(),
+    folderPrefix: normalizeFolderInput(folderPrefix),
+    providers: Array.isArray(providers) ? [...providers].sort() : []
+  });
+}
+
 function flattenFolderPaths(folderTree) {
   const result = [];
   const walk = (node, parentPath = '') => {
@@ -707,6 +717,7 @@ export default function ZeniusPage() {
   const [previewRunId, setPreviewRunId] = useState(savedPreviewSession?.previewRunId || null);
   const [downloadRunId, setDownloadRunId] = useState(null);
   const [batchSessionId, setBatchSessionId] = useState(savedPreviewSession?.batchSessionId || null);
+  const [previewContextSignature, setPreviewContextSignature] = useState(savedPreviewSession?.contextSignature || null);
   const [batchBuildProgress, setBatchBuildProgress] = useState(null);
   const [batchQueueProgress, setBatchQueueProgress] = useState(null);
   const [previewPollErrorCount, setPreviewPollErrorCount] = useState(0);
@@ -762,8 +773,12 @@ export default function ZeniusPage() {
       localStorage.removeItem(BATCH_PREVIEW_SESSION_STORAGE_KEY);
       return;
     }
-    localStorage.setItem(BATCH_PREVIEW_SESSION_STORAGE_KEY, JSON.stringify({ previewRunId, batchSessionId }));
-  }, [previewRunId, batchSessionId]);
+    localStorage.setItem(BATCH_PREVIEW_SESSION_STORAGE_KEY, JSON.stringify({
+      previewRunId,
+      batchSessionId,
+      contextSignature: previewContextSignature || null
+    }));
+  }, [previewRunId, batchSessionId, previewContextSignature]);
 
   useEffect(() => {
     previewPollErrorCountRef.current = previewPollErrorCount;
@@ -774,6 +789,13 @@ export default function ZeniusPage() {
   const instanceValue = details?.value || null;
   const normalizedFolderPath = useMemo(() => normalizeFolderInput(folderId), [folderId]);
   const normalizedBatchFolderPrefix = useMemo(() => normalizeFolderInput(batchFolderPrefix), [batchFolderPrefix]);
+  const currentPreviewContextSignature = useMemo(() => buildPreviewContextSignature({
+    rootCgId: batchRootCgId,
+    targetCgSelector: batchTargetCgSelector,
+    parentContainerName: batchParentContainerName,
+    folderPrefix: normalizedBatchFolderPrefix,
+    providers: selectedProviders
+  }), [batchRootCgId, batchTargetCgSelector, batchParentContainerName, normalizedBatchFolderPrefix, selectedProviders]);
 
   const trackedPreviewRun = useMemo(() => {
     const runs = Array.isArray(queueStatus?.backgroundBatches) ? queueStatus.backgroundBatches : [];
@@ -823,11 +845,14 @@ export default function ZeniusPage() {
 
   useEffect(() => {
     if (trackedPreviewRun || !previewRunId || !Array.isArray(queueStatus?.backgroundBatches)) return;
-    const fallbackPreviewRun = queueStatus.backgroundBatches.find((item) => item.id === previewRunId || item.sessionId === batchSessionId) || null;
+    if (previewContextSignature && currentPreviewContextSignature && previewContextSignature !== currentPreviewContextSignature) {
+      return;
+    }
+    const fallbackPreviewRun = queueStatus.backgroundBatches.find((item) => item.id === previewRunId) || null;
     if (!fallbackPreviewRun) return;
     setPreviewRunId(fallbackPreviewRun.id || previewRunId);
     setBatchSessionId((prev) => fallbackPreviewRun.sessionId || prev || null);
-  }, [queueStatus, trackedPreviewRun, previewRunId, batchSessionId]);
+  }, [queueStatus, trackedPreviewRun, previewRunId, batchSessionId, previewContextSignature, currentPreviewContextSignature]);
 
   useEffect(() => {
     if (!trackedDownloadRun) return;
@@ -930,6 +955,13 @@ export default function ZeniusPage() {
 
   const handleGetBatchChain = async () => {
     try {
+      const nextPreviewContextSignature = buildPreviewContextSignature({
+        rootCgId: batchRootCgId,
+        targetCgSelector: batchTargetCgSelector,
+        parentContainerName: batchParentContainerName,
+        folderPrefix: normalizedBatchFolderPrefix,
+        providers: selectedProviders
+      });
       if (batchChainPollRef.current) {
         window.clearInterval(batchChainPollRef.current);
         batchChainPollRef.current = null;
@@ -940,6 +972,7 @@ export default function ZeniusPage() {
       setDownloadRunId(null);
       setPreviewRunId(null);
       setBatchSessionId(null);
+      setPreviewContextSignature(nextPreviewContextSignature);
       setBatchQueueProgress(null);
       setBatchBuildProgress({ processed: 0, total: null });
       setPreviewPollErrorCount(0);

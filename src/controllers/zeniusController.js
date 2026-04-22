@@ -545,6 +545,7 @@ function createBatchChainSession({ rootCgId, targetCgSelector, parentContainerNa
     planSelectedProviders: null,
     planFolderCache: new Map(),
     planExistingFolderMap: null,
+    planPrefetchContext: null,
     instanceMetadataByShortId: new Map(),
     instanceMetadataPromisesByShortId: new Map(),
     cgPathById: new Map([[rootCgId, []]]),
@@ -580,6 +581,7 @@ function resetBatchPlanState(session, planningContext) {
   session.planReady = false;
   session.planFolderCache = new Map();
   session.planExistingFolderMap = null;
+  session.planPrefetchContext = null;
 }
 
 function ensureBatchPlanContext(session, planningContext) {
@@ -977,6 +979,66 @@ function serializeBatchPreviewSession(session) {
   };
 }
 
+function serializeBatchChainSessionState(session, overrides = {}) {
+  if (!session) {
+    return null;
+  }
+
+  const mergedContainers = Array.from(session.containerByShortId.values());
+  const totalContainers = mergedContainers.length;
+  const containerDetails = session.containerDetailsByShortId instanceof Map
+    ? Array.from(session.containerDetailsByShortId.values())
+    : [];
+  const plannedItems = Array.isArray(session.plannedItems) ? [...session.plannedItems] : [];
+  const normalizedOffset = Math.min(normalizeChunkOffset(overrides.containerOffset), totalContainers);
+  const normalizedLimit = normalizeChunkLimit(overrides.containerLimit) || clampPositiveInt(DEFAULT_BATCH_CHAIN_CHUNK_SIZE, 8);
+  const nextContainerOffset = Number.isFinite(Number(overrides.nextContainerOffset))
+    ? Number(overrides.nextContainerOffset)
+    : (session.discoveryDone && session.planCursor >= totalContainers ? null : session.planCursor);
+  const hasMoreContainers = typeof overrides.hasMoreContainers === 'boolean'
+    ? overrides.hasMoreContainers
+    : Boolean(nextContainerOffset !== null || !session.discoveryDone);
+
+  return {
+    sessionId: session.id,
+    rootCgId: session.rootCgId,
+    rootCgName: session.rootCgName,
+    targetCgSelector: session.targetCgSelector,
+    targetCgId: session.targetCgId,
+    parentContainerName: resolveBatchParentContainerName(session),
+    leafCgId: session.leafCgIds.length === 1 ? session.leafCgIds[0] : null,
+    leafCgIds: Array.isArray(session.leafCgIds) ? [...session.leafCgIds] : [],
+    traversal: Array.isArray(session.traversal) ? [...session.traversal] : [],
+    discoveredLeafCount: session.leafCgIds.length,
+    discoveryQueueRemaining: session.queueCgIds.length,
+    discoveryDone: session.discoveryDone,
+    totalContainers,
+    containerOffset: normalizedOffset,
+    containerLimit: normalizedLimit,
+    processedContainerCount: Number(overrides.processedContainerCount || 0),
+    hasMoreContainers,
+    nextContainerOffset,
+    planReady: Boolean(session.planReady),
+    plannedItemCount: plannedItems.length,
+    containerList: {
+      urlShortId: session.leafCgIds.length === 1 ? session.leafCgIds[0] : null,
+      urlShortIds: Array.isArray(session.leafCgIds) ? [...session.leafCgIds] : [],
+      totalContainers,
+      items: mergedContainers.slice(normalizedOffset, Math.min(totalContainers, normalizedOffset + normalizedLimit))
+    },
+    containerDetails,
+    plannedItems,
+    skipped: Array.isArray(overrides.skipped) ? overrides.skipped : [],
+    prefetch: overrides.prefetch || {
+      folderCount: 0,
+      missingFolderCount: 0,
+      providerFileCount: 0
+    },
+    errors: Array.isArray(session.errors) ? [...session.errors] : [],
+    timeBudgetMs: null
+  };
+}
+
 function summarizePreviewChain(chainPreview = null) {
   const containerDetails = Array.isArray(chainPreview?.containerDetails) ? chainPreview.containerDetails : [];
   const plannedItems = Array.isArray(chainPreview?.plannedItems) ? chainPreview.plannedItems : [];
@@ -1213,6 +1275,8 @@ async function continueBackgroundBatchPreviewRun(run, { requestContext, refererP
   run.status = 'running';
   touchBackgroundBatchRun(run);
 
+  const boundSessionId = normalizeSessionId(run.sessionId);
+
     const previewRequestContext = run.sessionContext?.headersRaw
       ? buildRequestContext({ headersRaw: run.sessionContext.headersRaw }, null)
       : requestContext;
@@ -1239,11 +1303,16 @@ async function continueBackgroundBatchPreviewRun(run, { requestContext, refererP
       refererPath: previewRefererPath,
       baseFolderInput: run.sessionContext?.baseFolderInput || run.baseFolderInput,
       selectedProviders: run.sessionContext?.selectedProviders || run.selectedProviders,
-      sessionId: run.sessionId || null,
+      sessionId: boundSessionId,
       containerOffset: nextOffset,
       containerLimit,
-      timeBudgetMs: null
+      timeBudgetMs: null,
+      allowSessionReuse: Boolean(boundSessionId)
     });
+
+    if (boundSessionId && chain.sessionId !== boundSessionId) {
+      throw new Error(`Preview session mismatch: expected ${boundSessionId}, got ${chain.sessionId}`);
+    }
 
     totalProcessedThisPoll += Number(chain.processedContainerCount || 0);
     latestDiscoveredVideos = Number(chain.plannedItemCount || latestDiscoveredVideos || 0);
@@ -1260,21 +1329,16 @@ async function continueBackgroundBatchPreviewRun(run, { requestContext, refererP
     run.lastSuccessfulOffset = run.scannedContainerCount;
     run.lastProgressAt = Date.now();
     run.chainErrors = Array.isArray(chain.errors) ? [...chain.errors] : [];
-    run.chainPreview = {
-      ...chain,
-      containerDetails: Array.isArray(chain.containerDetails)
-        ? [
-            ...((run.chainPreview?.containerDetails || []).filter((existing) => !chain.containerDetails.some((incoming) => incoming?.containerUrlShortId === existing?.containerUrlShortId))),
-            ...chain.containerDetails
-          ]
-        : (run.chainPreview?.containerDetails || []),
-      plannedItems: Array.isArray(chain.plannedItems)
-        ? [
-            ...((run.chainPreview?.plannedItems || []).filter((existing) => !chain.plannedItems.some((incoming) => incoming?.planKey && incoming.planKey === existing?.planKey))),
-            ...chain.plannedItems
-          ]
-        : (run.chainPreview?.plannedItems || [])
-    };
+    const activeSession = run.sessionId ? batchChainSessions.get(run.sessionId) || null : null;
+    run.chainPreview = serializeBatchChainSessionState(activeSession, {
+      containerOffset: chain.containerOffset,
+      containerLimit: chain.containerLimit,
+      processedContainerCount: chain.processedContainerCount,
+      hasMoreContainers: chain.hasMoreContainers,
+      nextContainerOffset: chain.nextContainerOffset,
+      skipped: chain.skipped,
+      prefetch: chain.prefetch
+    }) || chain;
     rebuildPreviewRunSamples(run);
 
     hasMore = Boolean(chain.hasMoreContainers);
@@ -2341,6 +2405,55 @@ async function buildExistingFileLookup(containers, baseFolderInput, chunkSize = 
   };
 }
 
+function collectPlannedNamesByFolderInput(containers, baseFolderInput) {
+  const plannedByFolderInput = new Map();
+
+  for (const container of containers || []) {
+    for (const instance of container.videoInstances || []) {
+      const urlShortId = normalizeNumericShortId(instance.urlShortId);
+      if (!urlShortId) continue;
+
+      const outputBaseName = sanitizeOutputName(instance.outputName || instance.name || `zenius-${urlShortId}`, `zenius-${urlShortId}`);
+      const outputFileName = `${outputBaseName}.mp4`;
+      const chainPath = String(instance.path || container.path || '').trim();
+      const finalFolderInput = joinFolderPaths(baseFolderInput, chainPath) || 'root';
+
+      if (!plannedByFolderInput.has(finalFolderInput)) {
+        plannedByFolderInput.set(finalFolderInput, new Set());
+      }
+      plannedByFolderInput.get(finalFolderInput).add(outputFileName);
+    }
+  }
+
+  return plannedByFolderInput;
+}
+
+function ensureBatchPlanPrefetchContext(session, planningContext) {
+  if (!session) {
+    return null;
+  }
+
+  if (session.planPrefetchContext && session.planPrefetchContext.key === planningContext.key) {
+    return session.planPrefetchContext;
+  }
+
+  session.planPrefetchContext = {
+    key: planningContext.key,
+    folderIdByInput: new Map(),
+    existingByFolderId: new Map(),
+    providerStatusByFileId: new Map(),
+    loadedFileIds: new Set(),
+    selectedProviders: null,
+    stats: {
+      plannedFolderCount: 0,
+      missingFolderCount: 0,
+      providerFileCount: 0
+    }
+  };
+
+  return session.planPrefetchContext;
+}
+
 function collectExistingFileIds(existingByFolderId) {
   const fileIds = [];
   for (const byName of existingByFolderId.values()) {
@@ -2759,7 +2872,8 @@ async function buildBatchChain({
   sessionId,
   containerOffset,
   containerLimit,
-  timeBudgetMs
+  timeBudgetMs,
+  allowSessionReuse = true
 }) {
   cleanupExpiredBatchChainSessions();
 
@@ -2769,7 +2883,7 @@ async function buildBatchChain({
 
   let session = null;
   const normalizedSessionId = normalizeSessionId(sessionId);
-  if (normalizedSessionId && batchChainSessions.has(normalizedSessionId)) {
+  if (allowSessionReuse && normalizedSessionId && batchChainSessions.has(normalizedSessionId)) {
     const existingSession = batchChainSessions.get(normalizedSessionId);
     const sameContext = existingSession
       && existingSession.rootCgId === normalizedRootCgId
@@ -2814,8 +2928,6 @@ async function buildBatchChain({
   const totalContainers = mergedContainers.length;
   const normalizedOffset = Math.min(normalizeChunkOffset(containerOffset), totalContainers);
   const normalizedLimit = normalizeChunkLimit(containerLimit) || clampPositiveInt(DEFAULT_BATCH_CHAIN_CHUNK_SIZE, 8);
-  const pathParentName = resolveBatchParentContainerName(session);
-
   const details = [];
   const plannedItems = [];
   const skipped = [];
@@ -2914,40 +3026,15 @@ async function buildBatchChain({
   const hasMoreContainers = hasMoreKnownContainers || !session.discoveryDone;
   const nextContainerOffset = hasMoreContainers ? cursor : null;
 
-  return {
-    sessionId: session.id,
-    rootCgId: session.rootCgId,
-    rootCgName: session.rootCgName,
-    targetCgSelector: session.targetCgSelector,
-    targetCgId: session.targetCgId,
-    parentContainerName: pathParentName,
-    leafCgId: session.leafCgIds.length === 1 ? session.leafCgIds[0] : null,
-    leafCgIds: session.leafCgIds,
-    traversal: session.traversal,
-    discoveredLeafCount: session.leafCgIds.length,
-    discoveryQueueRemaining: session.queueCgIds.length,
-    discoveryDone: session.discoveryDone,
-    totalContainers,
+  return serializeBatchChainSessionState(session, {
     containerOffset: normalizedOffset,
     containerLimit: normalizedLimit,
     processedContainerCount: details.length,
     hasMoreContainers,
     nextContainerOffset,
-    planReady: Boolean(session.planReady),
-    plannedItemCount: session.plannedItems.length,
-    containerList: {
-      urlShortId: session.leafCgIds.length === 1 ? session.leafCgIds[0] : null,
-      urlShortIds: session.leafCgIds,
-      totalContainers,
-      items: mergedContainers.slice(normalizedOffset, cursor)
-    },
-    containerDetails: details,
-    plannedItems,
     skipped,
-    prefetch,
-    errors: session.errors,
-    timeBudgetMs: null
-  };
+    prefetch
+  });
 }
 
 function joinFolderPaths(prefix, suffix) {
@@ -3057,30 +3144,151 @@ function queueDownload(task) {
 }
 
 async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, selectedProviders, session = null }) {
-  const existingLookup = await buildExistingFileLookup(
-    containerDetails,
-    baseFolderInput,
-    clampPositiveInt(BATCH_FOLDER_PREFETCH_CHUNK_SIZE, 80),
-    session
-  );
-
-  const providerLookup = await buildProviderStatusLookup(
-    existingLookup.existingByFolderId,
-    clampPositiveInt(BATCH_PROVIDER_PREFETCH_CHUNK_SIZE, 200)
-  );
-
   const activeProviders = Array.isArray(selectedProviders) && selectedProviders.length > 0
     ? selectedProviders
     : await getEnabledProviderIds();
 
+  if (!session) {
+    const existingLookup = await buildExistingFileLookup(
+      containerDetails,
+      baseFolderInput,
+      clampPositiveInt(BATCH_FOLDER_PREFETCH_CHUNK_SIZE, 80),
+      session
+    );
+
+    const providerLookup = await buildProviderStatusLookup(
+      existingLookup.existingByFolderId,
+      clampPositiveInt(BATCH_PROVIDER_PREFETCH_CHUNK_SIZE, 200)
+    );
+
+    return {
+      folderIdByInput: existingLookup.folderIdByInput,
+      existingByFolderId: existingLookup.existingByFolderId,
+      providerStatusByFileId: providerLookup.providerStatusByFileId,
+      selectedProviders: activeProviders,
+      prefetchFolderCount: existingLookup.plannedFolderCount,
+      prefetchMissingFolderCount: existingLookup.missingFolderCount,
+      prefetchProviderFileCount: providerLookup.fileCount
+    };
+  }
+
+  const planningContext = normalizePlanningContext(baseFolderInput, selectedProviders);
+  const cache = ensureBatchPlanPrefetchContext(session, planningContext);
+  cache.selectedProviders = activeProviders;
+  const plannedByFolderInput = collectPlannedNamesByFolderInput(containerDetails, baseFolderInput);
+  const existingFolderMap = await loadExistingFolderMap(session);
+  let missingFolderCount = Number(cache.stats.missingFolderCount || 0);
+
+  for (const [folderInput, plannedNames] of plannedByFolderInput.entries()) {
+    const folderKey = normalizeFolderInputKey(folderInput);
+    const folderId = existingFolderMap.get(folderKey) || null;
+
+    if (!cache.folderIdByInput.has(folderInput)) {
+      cache.folderIdByInput.set(folderInput, folderId);
+      cache.stats.plannedFolderCount = Number(cache.stats.plannedFolderCount || 0) + 1;
+      if (!folderId) {
+        missingFolderCount += 1;
+      }
+    }
+
+    if (!folderId) {
+      continue;
+    }
+
+    if (!cache.existingByFolderId.has(folderId)) {
+      cache.existingByFolderId.set(folderId, new Map());
+    }
+
+    const knownByName = cache.existingByFolderId.get(folderId);
+    const missingNames = [];
+    for (const plannedName of plannedNames) {
+      if (!knownByName.has(plannedName)) {
+        missingNames.push(plannedName);
+      }
+    }
+
+    if (missingNames.length === 0) {
+      continue;
+    }
+
+    const placeholders = missingNames.map(() => '?').join(', ');
+    const rows = await runDbQuery(
+      `SELECT id, folder_id, name, status, local_path
+         FROM files
+        WHERE folder_id = ?
+          AND name IN (${placeholders})
+        ORDER BY created_at DESC`,
+      [folderId, ...missingNames]
+    );
+
+    for (const row of rows || []) {
+      const nameKey = String(row?.name || '').trim();
+      if (!nameKey || knownByName.has(nameKey)) {
+        continue;
+      }
+
+      knownByName.set(nameKey, {
+        id: row.id,
+        name: row.name,
+        folder_id: row.folder_id,
+        status: row.status,
+        localPath: row.local_path || null
+      });
+    }
+  }
+
+  cache.stats.missingFolderCount = missingFolderCount;
+
+  const newFileIds = [];
+  for (const byName of cache.existingByFolderId.values()) {
+    for (const file of byName.values()) {
+      const fileId = String(file?.id || '').trim();
+      if (!fileId || cache.loadedFileIds.has(fileId)) {
+        continue;
+      }
+      cache.loadedFileIds.add(fileId);
+      newFileIds.push(fileId);
+    }
+  }
+
+  for (const fileIdChunk of chunkArray(newFileIds, clampPositiveInt(BATCH_PROVIDER_PREFETCH_CHUNK_SIZE, 200))) {
+    if (fileIdChunk.length === 0) {
+      continue;
+    }
+
+    const placeholders = fileIdChunk.map(() => '?').join(', ');
+    const rows = await runDbQuery(
+      `SELECT file_id, provider, status
+         FROM file_providers
+        WHERE file_id IN (${placeholders})`,
+      fileIdChunk
+    );
+
+    for (const row of rows || []) {
+      const fileId = String(row?.file_id || '').trim();
+      const provider = String(row?.provider || '').trim();
+      const status = String(row?.status || '').trim().toLowerCase() || 'pending';
+      if (!fileId || !provider) {
+        continue;
+      }
+
+      if (!cache.providerStatusByFileId.has(fileId)) {
+        cache.providerStatusByFileId.set(fileId, new Map());
+      }
+      cache.providerStatusByFileId.get(fileId).set(provider, status);
+    }
+  }
+
+  cache.stats.providerFileCount = cache.loadedFileIds.size;
+
   return {
-    folderIdByInput: existingLookup.folderIdByInput,
-    existingByFolderId: existingLookup.existingByFolderId,
-    providerStatusByFileId: providerLookup.providerStatusByFileId,
+    folderIdByInput: cache.folderIdByInput,
+    existingByFolderId: cache.existingByFolderId,
+    providerStatusByFileId: cache.providerStatusByFileId,
     selectedProviders: activeProviders,
-    prefetchFolderCount: existingLookup.plannedFolderCount,
-    prefetchMissingFolderCount: existingLookup.missingFolderCount,
-    prefetchProviderFileCount: providerLookup.fileCount
+    prefetchFolderCount: Number(cache.stats.plannedFolderCount || 0),
+    prefetchMissingFolderCount: Number(cache.stats.missingFolderCount || 0),
+    prefetchProviderFileCount: Number(cache.stats.providerFileCount || 0)
   };
 }
 
@@ -3851,7 +4059,8 @@ const zeniusController = {
         sessionId: req.body?.sessionId,
         containerOffset: req.body?.containerOffset,
         containerLimit: req.body?.containerLimit,
-        timeBudgetMs: req.body?.timeBudgetMs
+        timeBudgetMs: req.body?.timeBudgetMs,
+        allowSessionReuse: true
       });
 
       res.json({
@@ -3883,6 +4092,14 @@ const zeniusController = {
         refererPath: req.body?.refererPath || ''
       });
 
+      const previewSession = createBatchChainSession({
+        rootCgId: run.rootCgId,
+        targetCgSelector: run.targetCgSelector,
+        parentContainerName: run.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME
+      });
+      batchChainSessions.set(previewSession.id, previewSession);
+      run.sessionId = previewSession.id;
+
       backgroundBatchRuns.set(run.id, run);
       ensureBackgroundBatchKeepalive(keepaliveUrl);
 
@@ -3903,7 +4120,7 @@ const zeniusController = {
           hasMore: true,
           sessionData: {
             type: 'preview',
-            sessionId: run.id,
+            sessionId: run.sessionId,
             baseFolderInput: baseFolderInput || '',
             selectedProviders,
             chainPreview: null,
