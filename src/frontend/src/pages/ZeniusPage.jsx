@@ -1158,6 +1158,14 @@ export default function ZeniusPage() {
   const batchPreviewContainerCount = Number(batchChain?.containerDetails?.length || 0);
   const batchDiscoveredContainerCount = Number(batchChain?.containerList?.totalContainers || 0);
   const isBatchChainReady = Boolean(batchChain?.planReady);
+  const isPreviewRunning = Boolean(
+    previewRunId && (
+      batchChainMutation.isLoading
+      || batchBuildProgress
+      || trackedPreviewRun?.status === 'running'
+    )
+  );
+  const previewCancelRunId = trackedPreviewRun?.id || previewRunId || null;
   const previewItemsSummary = trackedPreviewRun?.previewItemsSummary || null;
   const previewStatusTone = trackedPreviewRun?.status === 'failed'
     ? 'text-red-300'
@@ -1754,20 +1762,20 @@ export default function ZeniusPage() {
                 )}
               </button>
 
-              {trackedPreviewRun?.status === 'running' && (
-                <button
-                  type="button"
-                  onClick={() => handleCancelTrackedRun(trackedPreviewRun.id, 'preview')}
-                  disabled={cancelBatchRunMutation.isLoading}
-                  className="btn flex items-center justify-center gap-2 sm:w-auto rounded-lg px-5 py-2.5 font-medium transition-colors bg-red-500/15 text-red-300 hover:bg-red-500/25 border border-red-500/30 disabled:opacity-40"
-                >
-                  {cancelBatchRunMutation.isLoading ? (
-                    <><Loader2 className="w-4 h-4 animate-spin" /> Cancelling Preview...</>
-                  ) : (
-                    <><XCircle className="w-4 h-4" /> Cancel Preview</>
-                  )}
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => handleCancelTrackedRun(previewCancelRunId, 'preview')}
+                disabled={cancelBatchRunMutation.isLoading || !previewCancelRunId || !isPreviewRunning}
+                className="btn flex items-center justify-center gap-2 sm:w-auto rounded-lg px-5 py-2.5 font-medium transition-colors bg-red-500/15 text-red-300 hover:bg-red-500/25 border border-red-500/30 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {cancelBatchRunMutation.isLoading ? (
+                  <><Loader2 className="w-4 h-4 animate-spin" /> Cancelling Preview...</>
+                ) : isPreviewRunning ? (
+                  <><XCircle className="w-4 h-4" /> Cancel Preview</>
+                ) : (
+                  <><XCircle className="w-4 h-4" /> Cancel Preview</>
+                )}
+              </button>
             </div>
 
             {!batchChain && !batchChainMutation.isLoading && (
