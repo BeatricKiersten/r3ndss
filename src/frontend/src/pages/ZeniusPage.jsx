@@ -1165,7 +1165,7 @@ export default function ZeniusPage() {
       || trackedPreviewRun?.status === 'running'
     )
   );
-  const previewCancelRunId = trackedPreviewRun?.id || previewRunId || null;
+  const previewCancelRunId = trackedPreviewRun?.id || previewRunId || batchSessionId || null;
   const previewItemsSummary = trackedPreviewRun?.previewItemsSummary || null;
   const previewStatusTone = trackedPreviewRun?.status === 'failed'
     ? 'text-red-300'

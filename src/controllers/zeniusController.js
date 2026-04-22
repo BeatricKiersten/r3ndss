@@ -1399,13 +1399,72 @@ function markBackgroundBatchRunsCancelled(reason = 'Cancelled by user') {
 
 async function cancelBackgroundBatchRun(runId, reason = 'Cancelled by user') {
   const normalizedRunId = normalizeSessionId(runId);
-  if (!normalizedRunId || !backgroundBatchRuns.has(normalizedRunId)) {
+  if (!normalizedRunId) {
     return null;
   }
 
-  const run = backgroundBatchRuns.get(normalizedRunId);
+  let resolvedRunId = normalizedRunId;
+  let run = backgroundBatchRuns.get(normalizedRunId) || null;
   if (!run) {
-    return null;
+    for (const [candidateRunId, candidateRun] of backgroundBatchRuns.entries()) {
+      if (!candidateRun) continue;
+      if (candidateRun.sessionId === normalizedRunId) {
+        resolvedRunId = candidateRunId;
+        run = candidateRun;
+        break;
+      }
+    }
+  }
+
+  if (!run) {
+    const existingSession = await db.getBatchSession(normalizedRunId).catch(() => null);
+    if (!existingSession) {
+      return null;
+    }
+
+    await withDbRetry(
+      () => db.updateBatchSession(normalizedRunId, {
+        status: 'cancelled',
+        error: reason,
+        hasMore: false
+      }),
+      `batch-session-cancel-db-only[${normalizedRunId}]`
+    );
+
+    return {
+      id: normalizedRunId,
+      type: existingSession.sessionData?.type || 'download',
+      status: 'cancelled',
+      error: reason,
+      sessionId: existingSession.sessionData?.sessionId || normalizedRunId,
+      rootCgId: existingSession.rootCgId,
+      rootCgName: existingSession.rootCgName,
+      parentContainerName: existingSession.parentContainerName,
+      totalContainers: existingSession.totalContainers,
+      processedContainers: existingSession.processedContainers,
+      scannedContainerCount: existingSession.processedContainers,
+      queuedCount: existingSession.queuedCount,
+      skippedCount: existingSession.skippedCount,
+      downloadCompletedCount: 0,
+      downloadFailedCount: 0,
+      discoveredVideoCount: Number(existingSession.sessionData?.discoveredVideoCount || 0),
+      hasMoreContainers: false,
+      nextContainerOffset: Number(existingSession.nextContainerOffset || 0),
+      chainErrors: Array.isArray(existingSession.chainErrors) ? existingSession.chainErrors : [],
+      chainPreview: existingSession.sessionData?.chainPreview || null,
+      previewItems: Array.isArray(existingSession.sessionData?.previewItems) ? existingSession.sessionData.previewItems : [],
+      newItems: Array.isArray(existingSession.sessionData?.newItems) ? existingSession.sessionData.newItems : [],
+      skippedPreviewItems: Array.isArray(existingSession.sessionData?.skippedPreviewItems) ? existingSession.sessionData.skippedPreviewItems : [],
+      retryItems: Array.isArray(existingSession.sessionData?.retryItems) ? existingSession.sessionData.retryItems : [],
+      finalizeItems: Array.isArray(existingSession.sessionData?.finalizeItems) ? existingSession.sessionData.finalizeItems : [],
+      previewItemsSummary: existingSession.sessionData?.previewItemsSummary || null,
+      previewSummary: existingSession.sessionData?.previewSummary || null,
+      lastError: reason,
+      lastProgressAt: existingSession.updatedAt,
+      startedAt: existingSession.createdAt,
+      finishedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
   }
 
   if (run.status === 'running') {
@@ -1416,10 +1475,10 @@ async function cancelBackgroundBatchRun(runId, reason = 'Cancelled by user') {
     touchBackgroundBatchRun(run);
   }
 
-  const existingSession = await db.getBatchSession(normalizedRunId).catch(() => null);
+  const existingSession = await db.getBatchSession(resolvedRunId).catch(() => null);
   if (existingSession) {
     await withDbRetry(
-      () => db.updateBatchSession(normalizedRunId, {
+      () => db.updateBatchSession(resolvedRunId, {
         status: run.status,
         error: run.error,
         rootCgName: run.rootCgName,
@@ -1434,7 +1493,7 @@ async function cancelBackgroundBatchRun(runId, reason = 'Cancelled by user') {
         skippedItems: Array.isArray(run.skipped) ? run.skipped : [],
         chainErrors: Array.isArray(run.chainErrors) ? run.chainErrors : []
       }),
-      `batch-session-cancel[${normalizedRunId}]`
+      `batch-session-cancel[${resolvedRunId}]`
     );
   }
 
