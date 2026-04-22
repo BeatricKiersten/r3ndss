@@ -1,5 +1,6 @@
 const pLimit = require('p-limit');
 const { db, uploaderService } = require('../services/runtime');
+const { success } = require('../utils/apiResponse');
 
 const BULK_FILE_DELETE_CONCURRENCY = Math.max(1, Number(process.env.BULK_FILE_DELETE_CONCURRENCY || 10));
 
@@ -25,9 +26,9 @@ async function deleteFilesInBulk(files, options = {}) {
 const fileController = {
   async list(req, res) {
     try {
-      const { folderId, status } = req.query;
-      const files = await db.listFiles(folderId, status);
-      res.json({ success: true, data: files });
+      const { folderId, status, limit, offset } = req.query;
+      const result = await db.listFilesPage({ folderId, status, limit, offset });
+      res.json(success(result.items, { pagination: result.pagination }));
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
     }

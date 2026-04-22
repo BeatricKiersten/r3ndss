@@ -168,19 +168,31 @@ export const useDeleteAllFolders = () => {
 };
 
 // File hooks
-export const useFiles = (folderId, status) => {
+export const useFiles = (folderId, status, options = {}) => {
+  const {
+    limit = 50,
+    offset = 0,
+    enabled = true,
+    refetchInterval = 15000,
+    refetchIntervalInBackground = false
+  } = options;
+
   return useQuery(
-    ['files', folderId, status],
+    ['files', folderId, status, limit, offset],
     async () => {
       const params = {};
       if (folderId) params.folderId = folderId;
       if (status) params.status = status;
+      if (limit) params.limit = limit;
+      if (offset) params.offset = offset;
       
       const response = await api.get('/api/files', { params });
-      return response.data.data;
+      return response.data;
     },
     {
-      refetchInterval: 3000,
+      enabled,
+      refetchInterval,
+      refetchIntervalInBackground,
       keepPreviousData: true
     }
   );
@@ -556,8 +568,8 @@ export const useFailedFiles = () => {
   return useQuery(
     ['files', null, 'failed'],
     async () => {
-      const response = await api.get('/api/files', { params: { status: 'failed' } });
-      return response.data.data;
+      const response = await api.get('/api/files', { params: { status: 'failed', limit: 200 } });
+      return response.data;
     },
     {
       refetchInterval: false,
@@ -570,8 +582,13 @@ export const useProblemFiles = () => {
   return useQuery(
     ['files', null, 'problem'],
     async () => {
-      const response = await api.get('/api/files');
-      return (response.data.data || []).filter((file) => ['processing', 'failed', 'cancelled'].includes(String(file.status || '').toLowerCase()));
+      const response = await api.get('/api/files', {
+        params: {
+          status: 'processing,failed,cancelled',
+          limit: 200
+        }
+      });
+      return response.data;
     },
     {
       refetchInterval: false,
@@ -657,7 +674,7 @@ export const useDashboard = () => {
       const response = await api.get('/api/dashboard');
       return response.data.data;
     },
-    { refetchInterval: 2000 }
+    { refetchInterval: 15000, refetchIntervalInBackground: false }
   );
 };
 
@@ -668,7 +685,7 @@ export const useStats = () => {
       const response = await api.get('/api/stats');
       return response.data.data;
     },
-    { refetchInterval: 5000 }
+    { refetchInterval: 30000, refetchIntervalInBackground: false }
   );
 };
 
@@ -679,7 +696,7 @@ export const useProcesses = () => {
       const response = await api.get('/api/processes');
       return response.data.data;
     },
-    { refetchInterval: 1000 }
+    { refetchInterval: 5000, refetchIntervalInBackground: false }
   );
 };
 
@@ -690,7 +707,7 @@ export const useProviders = () => {
       const response = await api.get('/api/providers');
       return response.data.data;
     },
-    { refetchInterval: 5000 }
+    { refetchInterval: 30000, refetchIntervalInBackground: false }
   );
 };
 
@@ -900,9 +917,10 @@ export const useJobs = (filters = {}, options = {}) => {
       if (filters.type) params.type = filters.type;
       if (filters.fileId) params.fileId = filters.fileId;
       if (filters.limit) params.limit = filters.limit;
+      if (filters.offset) params.offset = filters.offset;
 
       const response = await api.get('/api/jobs', { params });
-      return response.data.data;
+      return response.data;
     },
     {
       enabled,

@@ -629,10 +629,10 @@ export default function FileListPage() {
   const [showRemoveFailedModal, setShowRemoveFailedModal] = useState(false);
 
   const {
-    data: files,
+    data: filesResponse,
     isLoading: isFilesLoading,
     isFetching: isFilesFetching
-  } = useFiles(currentFolderId);
+  } = useFiles(currentFolderId, undefined, { limit: 100, refetchInterval: 15000 });
   const {
     data: currentFolder,
     isLoading: isFolderLoading,
@@ -650,6 +650,8 @@ export default function FileListPage() {
   const checkFileCompleteness = useCheckFileCompleteness();
   const [moveFolderTarget, setMoveFolderTarget] = useState(null);
 
+  const files = filesResponse?.data || [];
+  const problemFiles = problemFilesQuery.data?.data || [];
   const allFolders = useMemo(() => {
     const result = [{ id: 'root', name: 'Root', path: '/', depth: 0 }];
 
@@ -783,7 +785,7 @@ export default function FileListPage() {
 
   const handleOpenRemoveFailedModal = async () => {
     const result = await problemFilesQuery.refetch();
-    if (!result.data || result.data.length === 0) {
+    if (!result.data?.data || result.data.data.length === 0) {
       toast.info('Tidak ada file dengan status processing, failed, atau cancelled');
       return;
     }
@@ -1461,7 +1463,7 @@ export default function FileListPage() {
 
       {showRemoveFailedModal && (
         <RemoveProblemFilesModal
-          files={problemFilesQuery.data || []}
+          files={problemFiles}
           isLoading={problemFilesQuery.isFetching}
           isDeleting={deleteAllProblemFiles.isLoading}
           onConfirm={handleConfirmRemoveFailed}

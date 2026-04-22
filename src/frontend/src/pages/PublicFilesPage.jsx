@@ -143,8 +143,10 @@ export default function PublicFilesPage() {
 
   const { data: folderTree } = useFolders();
   const { data: currentFolder } = useFolder(currentFolderId);
-  const { data: allFiles } = useFiles();
-  const { data: folderFiles } = useFiles(currentFolderId);
+  const { data: allFilesResponse } = useFiles(undefined, undefined, { limit: 200, refetchInterval: 30000 });
+  const { data: folderFilesResponse } = useFiles(currentFolderId, undefined, { limit: 200, refetchInterval: 30000 });
+  const allFiles = allFilesResponse?.data || [];
+  const folderFiles = folderFilesResponse?.data || [];
 
   const playableFiles = useMemo(
     () => (allFiles || []).filter((file) => getSources(file).length > 0),
@@ -166,7 +168,7 @@ export default function PublicFilesPage() {
   }, [selectedSources, activeSourceId]);
 
   const currentPlaylist = useMemo(() => {
-    const list = (folderFiles || []).filter((file) => getSources(file).length > 0);
+    const list = folderFiles.filter((file) => getSources(file).length > 0);
     if (list.length) return list;
     return playableFiles;
   }, [folderFiles, playableFiles]);
@@ -204,9 +206,9 @@ export default function PublicFilesPage() {
 
   const handleSelectFolder = (folderId) => {
     setCurrentFolderId(folderId);
-    const nextFile = (allFiles || []).find(
-      (file) => String(file.folderId || 'root') === String(folderId) && getSources(file).length > 0
-    );
+      const nextFile = allFiles.find(
+        (file) => String(file.folderId || 'root') === String(folderId) && getSources(file).length > 0
+      );
 
     if (nextFile) {
       navigate(`/public/${nextFile.id}`);

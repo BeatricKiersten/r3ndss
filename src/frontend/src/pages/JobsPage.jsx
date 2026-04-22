@@ -88,7 +88,8 @@ export default function JobsPage() {
     limit: 200
   }), [statusFilter, typeFilter]);
 
-  const { data: jobs = [], isLoading, refetch, isFetching } = useJobs(filters, { enabled: false });
+  const { data: jobsResponse, isLoading, refetch, isFetching } = useJobs(filters, { enabled: false });
+  const jobs = jobsResponse?.data || [];
 
   useEffect(() => {
     refetch();

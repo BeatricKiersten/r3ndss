@@ -20,14 +20,15 @@ function isActiveJob(job) {
 
 const jobController = {
   async list(req, res) {
-    const { status, type, fileId, limit } = req.query;
-    const jobs = await uploaderService.listJobs({
+    const { status, type, fileId, limit, offset } = req.query;
+    const jobs = await db.listJobsPage({
       status: status || null,
       type: type || null,
       fileId: fileId || null,
-      limit: normalizeListLimit(limit)
+      limit: normalizeListLimit(limit),
+      offset
     });
-    res.json(success(jobs));
+    res.json(success(jobs.items, { pagination: jobs.pagination }));
   },
 
   async cancel(req, res) {

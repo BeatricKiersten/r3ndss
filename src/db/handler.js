@@ -31,6 +31,7 @@ const DB_INIT_RETRY_DELAY_MS = Math.max(250, Number(process.env.DB_INIT_RETRY_DE
 const DB_INIT_COOLDOWN_ON_CONN_ERROR_MS = Math.max(DB_INIT_RETRY_DELAY_MS, Number(process.env.DB_INIT_COOLDOWN_ON_CONN_ERROR_MS || 15000));
 const DB_METADATA_CACHE_TTL_MS = Math.max(250, Number(process.env.DB_METADATA_CACHE_TTL_MS || 1000));
 const DB_JOB_LIST_LIMIT = Math.max(1, Number(process.env.DB_JOB_LIST_LIMIT || 1000));
+const DB_FILE_LIST_LIMIT = Math.max(1, Number(process.env.DB_FILE_LIST_LIMIT || 200));
 const DB_STATS_CACHE_TTL_MS = Math.max(250, Number(process.env.DB_STATS_CACHE_TTL_MS || 5000));
 const DB_DASHBOARD_CACHE_TTL_MS = Math.max(250, Number(process.env.DB_DASHBOARD_CACHE_TTL_MS || 3000));
 
@@ -2133,6 +2134,65 @@ class DatabaseHandler {
     return this._hydrateFiles(rows);
   }
 
+  async listFilesPage(filters = {}) {
+    await this._ready();
+
+    const {
+      folderId = null,
+      status = null,
+      limit = 50,
+      offset = 0
+    } = filters;
+
+    const where = [];
+    const params = [];
+
+    if (folderId) {
+      where.push('folder_id = ?');
+      params.push(folderId);
+    }
+
+    const statusValues = Array.isArray(status)
+      ? status.filter(Boolean)
+      : String(status || '').split(',').map((value) => value.trim()).filter(Boolean);
+    if (statusValues.length === 1) {
+      where.push('status = ?');
+      params.push(statusValues[0]);
+    } else if (statusValues.length > 1) {
+      where.push(`status IN (${statusValues.map(() => '?').join(', ')})`);
+      params.push(...statusValues);
+    }
+
+    const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
+    const safeLimit = Math.min(DB_FILE_LIST_LIMIT, Math.max(1, toInt(limit, 50)));
+    const safeOffset = Math.max(0, toInt(offset, 0));
+    const baseParams = [...params];
+
+    const [countRows] = await this.pool.query(
+      `SELECT COUNT(*) AS count FROM files${whereSql}`,
+      baseParams
+    );
+    const [rows] = await this.pool.query(
+      `SELECT id, folder_id, name, original_url, local_path, size, duration, status,
+              progress_download, progress_processing, progress_upload, progress_extra,
+              sync_status, can_delete, created_at, updated_at
+         FROM files${whereSql}
+        ORDER BY created_at DESC
+        LIMIT ? OFFSET ?`,
+      [...baseParams, safeLimit, safeOffset]
+    );
+
+    return {
+      items: await this._hydrateFiles(rows),
+      pagination: {
+        total: toInt(countRows[0]?.count),
+        limit: safeLimit,
+        offset: safeOffset,
+        hasMore: safeOffset + rows.length < toInt(countRows[0]?.count)
+      }
+    };
+  }
+
   async refreshFileCompleteness(fileId, options = {}) {
     await this._ready();
 
@@ -2421,6 +2481,63 @@ class DatabaseHandler {
 
     const [rows] = await this.pool.query(sql, params);
     return rows.map((row) => this._mapJobRow(row));
+  }
+
+  async listJobsPage(filters = {}) {
+    await this._ready();
+
+    const {
+      status = null,
+      type = null,
+      fileId = null,
+      limit = 50,
+      offset = 0
+    } = filters;
+    const where = [];
+    const params = [];
+
+    if (status) {
+      where.push('status = ?');
+      params.push(status);
+    }
+
+    if (type) {
+      where.push('type = ?');
+      params.push(type);
+    }
+
+    if (fileId) {
+      where.push('file_id = ?');
+      params.push(fileId);
+    }
+
+    const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
+    const safeLimit = Math.min(DB_JOB_LIST_LIMIT, Math.max(1, toInt(limit, 50)));
+    const safeOffset = Math.max(0, toInt(offset, 0));
+    const baseParams = [...params];
+
+    const [countRows] = await this.pool.query(
+      `SELECT COUNT(*) AS count FROM jobs${whereSql}`,
+      baseParams
+    );
+    const [rows] = await this.pool.query(
+      `SELECT id, type, file_id, status, progress, attempts, max_attempts,
+              error, metadata, created_at, updated_at, started_at, completed_at, heartbeat_at
+         FROM jobs${whereSql}
+        ORDER BY created_at DESC
+        LIMIT ? OFFSET ?`,
+      [...baseParams, safeLimit, safeOffset]
+    );
+
+    return {
+      items: rows.map((row) => this._mapJobRow(row)),
+      pagination: {
+        total: toInt(countRows[0]?.count),
+        limit: safeLimit,
+        offset: safeOffset,
+        hasMore: safeOffset + rows.length < toInt(countRows[0]?.count)
+      }
+    };
   }
 
   async getJobsByFile(fileId) {
