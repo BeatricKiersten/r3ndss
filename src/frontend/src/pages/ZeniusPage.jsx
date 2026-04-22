@@ -62,8 +62,20 @@ import { useWebSocketStore } from '../store/websocketStore';
 
 const HEADERS_STORAGE_KEY = 'zenius-headers-raw';
 const PROVIDERS_STORAGE_KEY = 'zenius-selected-providers';
+const BATCH_PREVIEW_SESSION_STORAGE_KEY = 'zenius-batch-preview-session';
 const BATCH_DOWNLOAD_CHUNK_SIZE = 6;
 const BATCH_REQUEST_BUDGET_MS = 24000;
+
+function loadSavedBatchPreviewSession() {
+  try {
+    const saved = localStorage.getItem(BATCH_PREVIEW_SESSION_STORAGE_KEY);
+    if (!saved) return null;
+    const parsed = JSON.parse(saved);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
 
 function formatDuration(seconds) {
   if (!Number.isFinite(seconds) || seconds <= 0) return '-';
@@ -689,11 +701,13 @@ export default function ZeniusPage() {
   const [batchFolderPrefix, setBatchFolderPrefix] = useState('');
   const [batchChain, setBatchChain] = useState(null);
   const [batchResult, setBatchResult] = useState(null);
-  const [previewRunId, setPreviewRunId] = useState(null);
+  const savedPreviewSession = useMemo(() => loadSavedBatchPreviewSession(), []);
+  const [previewRunId, setPreviewRunId] = useState(savedPreviewSession?.previewRunId || null);
   const [downloadRunId, setDownloadRunId] = useState(null);
-  const [batchSessionId, setBatchSessionId] = useState(null);
+  const [batchSessionId, setBatchSessionId] = useState(savedPreviewSession?.batchSessionId || null);
   const [batchBuildProgress, setBatchBuildProgress] = useState(null);
   const [batchQueueProgress, setBatchQueueProgress] = useState(null);
+  const [previewPollErrorCount, setPreviewPollErrorCount] = useState(0);
   const [showHeadersHelp, setShowHeadersHelp] = useState(false);
   const [showBatchConfirm, setShowBatchConfirm] = useState(false);
   const [showFolderPrefixPicker, setShowFolderPrefixPicker] = useState(false);
@@ -728,6 +742,7 @@ export default function ZeniusPage() {
   const deleteAllFolders = useDeleteAllFolders();
   const batchRootCgRef = useRef(null);
   const batchChainPollRef = useRef(null);
+  const previewPollErrorCountRef = useRef(0);
 
   useEffect(() => {
     const savedHeaders = localStorage.getItem(HEADERS_STORAGE_KEY);
@@ -737,6 +752,19 @@ export default function ZeniusPage() {
   useEffect(() => {
     localStorage.setItem(HEADERS_STORAGE_KEY, headersRaw);
   }, [headersRaw]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!previewRunId && !batchSessionId) {
+      localStorage.removeItem(BATCH_PREVIEW_SESSION_STORAGE_KEY);
+      return;
+    }
+    localStorage.setItem(BATCH_PREVIEW_SESSION_STORAGE_KEY, JSON.stringify({ previewRunId, batchSessionId }));
+  }, [previewRunId, batchSessionId]);
+
+  useEffect(() => {
+    previewPollErrorCountRef.current = previewPollErrorCount;
+  }, [previewPollErrorCount]);
 
   const isBusy = detailsMutation.isLoading || downloadMutation.isLoading;
   const isBatchBusy = batchChainMutation.isLoading || batchDownloadMutation.isLoading;
@@ -759,22 +787,36 @@ export default function ZeniusPage() {
   useEffect(() => {
     if (!trackedPreviewRun) return;
     setBatchSessionId((prev) => trackedPreviewRun.sessionId || prev || null);
+    setPreviewRunId((prev) => trackedPreviewRun.id || prev || null);
+    setPreviewPollErrorCount(0);
 
     setBatchBuildProgress(trackedPreviewRun.status === 'running'
       ? {
           processed: Number(trackedPreviewRun.scannedContainerCount || trackedPreviewRun.processedContainers || 0),
           total: Number.isFinite(Number(trackedPreviewRun.totalContainers)) ? Number(trackedPreviewRun.totalContainers) : null,
           discoveredVideos: Number(trackedPreviewRun.discoveredVideoCount || 0),
-          previewContainers: Number(trackedPreviewRun.chainPreview?.containerDetails?.length || 0),
-          discoveredContainers: Number(trackedPreviewRun.chainPreview?.containerList?.totalContainers || trackedPreviewRun.totalContainers || 0),
+          previewContainers: Number(trackedPreviewRun.previewSummary?.previewContainerCount || 0),
+          discoveredContainers: Number(trackedPreviewRun.previewSummary?.discoveredContainerCount || trackedPreviewRun.totalContainers || 0),
           hasMore: Boolean(trackedPreviewRun.hasMoreContainers)
         }
       : null);
+
+    if (trackedPreviewRun.chainPreview) {
+      setBatchChain(trackedPreviewRun.chainPreview);
+    }
 
     if (trackedPreviewRun.status === 'completed' && trackedPreviewRun.chainPreview) {
       setBatchChain(trackedPreviewRun.chainPreview);
     }
   }, [trackedPreviewRun]);
+
+  useEffect(() => {
+    if (trackedPreviewRun || !previewRunId || !Array.isArray(queueStatus?.backgroundBatches)) return;
+    const fallbackPreviewRun = queueStatus.backgroundBatches.find((item) => item.id === previewRunId || item.sessionId === batchSessionId) || null;
+    if (!fallbackPreviewRun) return;
+    setPreviewRunId(fallbackPreviewRun.id || previewRunId);
+    setBatchSessionId((prev) => fallbackPreviewRun.sessionId || prev || null);
+  }, [queueStatus, trackedPreviewRun, previewRunId, batchSessionId]);
 
   useEffect(() => {
     if (!trackedDownloadRun) return;
@@ -889,6 +931,7 @@ export default function ZeniusPage() {
       setBatchSessionId(null);
       setBatchQueueProgress(null);
       setBatchBuildProgress({ processed: 0, total: null });
+      setPreviewPollErrorCount(0);
       const started = await batchChainMutation.mutateAsync({
         rootCgId: batchRootCgId,
         targetCgSelector: batchTargetCgSelector,
@@ -907,14 +950,15 @@ export default function ZeniusPage() {
       const poll = async () => {
         if (!startedSessionId) return;
         const status = await getZeniusBatchChainStatus(startedSessionId);
+        setPreviewPollErrorCount(0);
         setPreviewRunId(status.id || startedSessionId);
         setBatchSessionId(status.sessionId || startedSessionId);
         setBatchBuildProgress({
           processed: Number(status.containerProgress?.processed || status.processedContainers || 0),
           total: Number.isFinite(Number(status.containerProgress?.total)) ? Number(status.containerProgress.total) : null,
           discoveredVideos: Number(status.discoveredVideoCount || 0),
-          previewContainers: Number(status.chainPreview?.containerDetails?.length || 0),
-          discoveredContainers: Number(status.chainPreview?.containerList?.totalContainers || status.totalContainers || 0),
+          previewContainers: Number(status.previewSummary?.previewContainerCount || 0),
+          discoveredContainers: Number(status.previewSummary?.discoveredContainerCount || status.totalContainers || 0),
           hasMore: Boolean(status.hasMoreContainers)
         });
 
@@ -948,17 +992,6 @@ export default function ZeniusPage() {
       };
 
       await poll();
-      batchChainPollRef.current = window.setInterval(() => {
-        poll().catch((error) => {
-          if (batchChainPollRef.current) {
-            window.clearInterval(batchChainPollRef.current);
-            batchChainPollRef.current = null;
-          }
-          setBatchBuildProgress(null);
-          console.error('Failed to poll zenius batch chain status:', error);
-          toast.error('Chain Failed', error?.response?.data?.error || error.message);
-        });
-      }, 2000);
     } catch (error) {
       setBatchChain(null);
       setBatchBuildProgress(null);
@@ -973,6 +1006,58 @@ export default function ZeniusPage() {
       batchChainPollRef.current = null;
     }
   }, []);
+
+  useEffect(() => {
+    if (!previewRunId || trackedPreviewRun?.status === 'completed' || trackedPreviewRun?.status === 'failed') {
+      if (batchChainPollRef.current) {
+        window.clearInterval(batchChainPollRef.current);
+        batchChainPollRef.current = null;
+      }
+      return undefined;
+    }
+
+    if (batchChainPollRef.current) {
+      return undefined;
+    }
+
+    const poll = async () => {
+      const status = await getZeniusBatchChainStatus(previewRunId);
+      setPreviewPollErrorCount(0);
+      setPreviewRunId(status.id || previewRunId);
+      setBatchSessionId((prev) => status.sessionId || prev || previewRunId);
+      if (status.chainPreview) {
+        setBatchChain(status.chainPreview);
+      }
+      setBatchBuildProgress(status.status === 'running'
+        ? {
+            processed: Number(status.containerProgress?.processed || status.processedContainers || 0),
+            total: Number.isFinite(Number(status.containerProgress?.total)) ? Number(status.containerProgress.total) : null,
+            discoveredVideos: Number(status.discoveredVideoCount || 0),
+            previewContainers: Number(status.previewSummary?.previewContainerCount || 0),
+            discoveredContainers: Number(status.previewSummary?.discoveredContainerCount || status.totalContainers || 0),
+            hasMore: Boolean(status.hasMoreContainers)
+          }
+        : null);
+    };
+
+    batchChainPollRef.current = window.setInterval(() => {
+      poll().catch((error) => {
+        setPreviewPollErrorCount((count) => count + 1);
+        if (previewPollErrorCountRef.current >= 2 && trackedPreviewRun?.status !== 'running' && batchChainPollRef.current) {
+          window.clearInterval(batchChainPollRef.current);
+          batchChainPollRef.current = null;
+        }
+        console.error('Failed to recover zenius batch chain status:', error);
+      });
+    }, 4000);
+
+    return () => {
+      if (batchChainPollRef.current) {
+        window.clearInterval(batchChainPollRef.current);
+        batchChainPollRef.current = null;
+      }
+    };
+  }, [previewRunId, trackedPreviewRun]);
 
   const handleStartBatchDownload = () => {
     if (!batchChain?.planReady) {
@@ -1055,8 +1140,17 @@ export default function ZeniusPage() {
   const batchPreviewContainerCount = Number(batchChain?.containerDetails?.length || 0);
   const batchDiscoveredContainerCount = Number(batchChain?.containerList?.totalContainers || 0);
   const isBatchChainReady = Boolean(batchChain?.planReady);
+  const previewItemsSummary = trackedPreviewRun?.previewItemsSummary || null;
+  const previewStatusTone = trackedPreviewRun?.status === 'failed'
+    ? 'text-red-300'
+    : previewPollErrorCount > 0
+      ? 'text-amber-300'
+      : 'text-sky-300';
   const batchPreviewRows = useMemo(() => {
-    const plannedItems = Array.isArray(batchChain?.plannedItems) ? batchChain.plannedItems : [];
+    const trackedPreviewItems = Array.isArray(trackedPreviewRun?.previewItems) ? trackedPreviewRun.previewItems : [];
+    const plannedItems = trackedPreviewItems.length > 0
+      ? trackedPreviewItems
+      : (Array.isArray(batchChain?.plannedItems) ? batchChain.plannedItems : []);
     if (plannedItems.length > 0) {
       return plannedItems.map((item, index) => ({
         key: item.planKey || `${item.urlShortId || 'unknown'}-${index}`,
@@ -1068,7 +1162,9 @@ export default function ZeniusPage() {
         containerName: item.containerName || '-',
         reason: item.reason || '-',
         action: item.action || 'pending',
-        providers: Array.isArray(item.pendingProviders) ? item.pendingProviders : []
+        providers: Array.isArray(item.pendingProviders) ? item.pendingProviders : [],
+        selectedProviders: Array.isArray(item.selectedProviders) ? item.selectedProviders : [],
+        instanceName: item.instance?.name || item.instanceName || '-'
       }));
     }
 
@@ -1091,11 +1187,13 @@ export default function ZeniusPage() {
           containerName: container.containerName || '-',
           reason: 'Menunggu planning selesai',
           action: 'mapped',
-          providers: []
+          providers: [],
+          selectedProviders: [],
+          instanceName: item.metadata?.name || item.name || '-'
         };
       })
     );
-  }, [batchChain, normalizedBatchFolderPrefix]);
+  }, [batchChain, normalizedBatchFolderPrefix, trackedPreviewRun]);
   const batchActionSummary = useMemo(() => {
     return batchPreviewRows.reduce((summary, item) => {
       const key = item.action || 'pending';
@@ -1651,11 +1749,27 @@ export default function ZeniusPage() {
               </div>
             )}
 
+            {(previewPollErrorCount > 0 || trackedPreviewRun?.lastError) && (
+              <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-500/5 border border-amber-500/20">
+                <AlertCircle className="w-4 h-4 text-amber-300 mt-0.5 flex-shrink-0" />
+                <div className="text-xs text-amber-200 space-y-1">
+                  <p>
+                    {previewPollErrorCount > 0
+                      ? `Polling preview sempat gagal ${previewPollErrorCount}x. FE tetap mencoba reconnect tanpa menghapus session.`
+                      : 'Preview worker melaporkan error terakhir, namun session tetap dipertahankan.'}
+                  </p>
+                  {trackedPreviewRun?.lastError && <p className="text-amber-300/90">Last error: {trackedPreviewRun.lastError}</p>}
+                </div>
+              </div>
+            )}
+
             {/* Build Progress */}
             {batchBuildProgress && (
               <div className="space-y-2">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-sky-300">Building chain...</span>
+                  <span className={previewStatusTone}>
+                    {previewPollErrorCount > 0 ? 'Building chain... reconnecting status' : 'Building chain...'}
+                  </span>
                   <span className="text-[#888] font-mono">{batchBuildProgress.processed} / {batchBuildProgress.total ?? '?'}</span>
                 </div>
                 <div className="w-full bg-[#1a1a1a] rounded-full h-2 overflow-hidden">
@@ -1726,6 +1840,31 @@ export default function ZeniusPage() {
                   </div>
                 </div>
 
+                {previewItemsSummary && (
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
+                    <div className="bg-[#0d0d0d] p-3 rounded-lg">
+                      <p className="text-[#666] mb-1 text-xs">Tracked Preview Items</p>
+                      <p className="text-white">{Number(previewItemsSummary.totalTracked || 0)}</p>
+                    </div>
+                    <div className="bg-[#0d0d0d] p-3 rounded-lg">
+                      <p className="text-[#666] mb-1 text-xs">New / Download</p>
+                      <p className="text-emerald-300">{Number(previewItemsSummary.byAction?.download || 0)}</p>
+                    </div>
+                    <div className="bg-[#0d0d0d] p-3 rounded-lg">
+                      <p className="text-[#666] mb-1 text-xs">Retry</p>
+                      <p className="text-orange-300">{Number(previewItemsSummary.byAction?.retry || 0)}</p>
+                    </div>
+                    <div className="bg-[#0d0d0d] p-3 rounded-lg">
+                      <p className="text-[#666] mb-1 text-xs">Finalize</p>
+                      <p className="text-cyan-300">{Number(previewItemsSummary.byAction?.finalize || 0)}</p>
+                    </div>
+                    <div className="bg-[#0d0d0d] p-3 rounded-lg">
+                      <p className="text-[#666] mb-1 text-xs">Skip</p>
+                      <p className="text-amber-300">{Number(previewItemsSummary.byAction?.skip || 0)}</p>
+                    </div>
+                  </div>
+                )}
+
                 {Array.isArray(batchChain.errors) && batchChain.errors.length > 0 && (
                   <div className="p-3 rounded-lg bg-amber-500/5 border border-amber-500/20">
                     <p className="text-xs text-amber-300">
@@ -1741,7 +1880,7 @@ export default function ZeniusPage() {
                       Menampilkan nama file final dan folder tujuan yang akan dipakai batch downloader.
                     </p>
                   </div>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3 text-[11px]">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3 text-[11px]">
                     <div className="bg-[#0d0d0d] rounded px-2 py-1 border border-[#1f1f1f]">
                       <span className="text-[#666]">Download</span>
                       <p className="text-emerald-300 font-mono">{Number(batchActionSummary.download || 0)}</p>
@@ -1758,7 +1897,17 @@ export default function ZeniusPage() {
                       <span className="text-[#666]">Skip</span>
                       <p className="text-amber-300 font-mono">{Number(batchActionSummary.skip || 0)}</p>
                     </div>
-                  </div>
+                    </div>
+                  {previewItemsSummary && (previewItemsSummary.overflow > 0 || previewItemsSummary.newItemsOverflow > 0 || previewItemsSummary.skippedItemsOverflow > 0 || previewItemsSummary.retryItemsOverflow > 0 || previewItemsSummary.finalizeItemsOverflow > 0) && (
+                    <div className="mb-3 p-2 rounded border border-[#2a2a2a] bg-[#111] text-[11px] text-[#7f7f7f]">
+                      Sample list dibatasi untuk menjaga memory FE ringan.
+                      {previewItemsSummary.overflow > 0 ? ` Extra preview items: +${previewItemsSummary.overflow}.` : ''}
+                      {previewItemsSummary.newItemsOverflow > 0 ? ` New overflow: +${previewItemsSummary.newItemsOverflow}.` : ''}
+                      {previewItemsSummary.skippedItemsOverflow > 0 ? ` Skip overflow: +${previewItemsSummary.skippedItemsOverflow}.` : ''}
+                      {previewItemsSummary.retryItemsOverflow > 0 ? ` Retry overflow: +${previewItemsSummary.retryItemsOverflow}.` : ''}
+                      {previewItemsSummary.finalizeItemsOverflow > 0 ? ` Finalize overflow: +${previewItemsSummary.finalizeItemsOverflow}.` : ''}
+                    </div>
+                  )}
                   <div className="max-h-64 overflow-auto rounded-lg border border-[#222] bg-[#0d0d0d]">
                     <table className="w-full text-xs">
                       <thead className="bg-[#141414] text-[#8a8a8a] sticky top-0">
@@ -1766,6 +1915,7 @@ export default function ZeniusPage() {
                           <th className="text-left px-3 py-2">#</th>
                           <th className="text-left px-3 py-2">Status</th>
                           <th className="text-left px-3 py-2">ID</th>
+                          <th className="text-left px-3 py-2">Nama</th>
                           <th className="text-left px-3 py-2">Output File</th>
                           <th className="text-left px-3 py-2">Target Folder</th>
                           <th className="text-left px-3 py-2">Catatan</th>
@@ -1788,10 +1938,13 @@ export default function ZeniusPage() {
                                         : 'mapped'}
                               />
                             </td>
-                            <td className="px-3 py-2 text-[#c8c8c8] font-mono whitespace-nowrap">{item.urlShortId}</td>
-                            <td className="px-3 py-2 text-[#e2e2e2] min-w-[240px]">
-                              <div className="font-medium break-all">{item.outputName}</div>
-                              <div className="text-[11px] text-[#666] mt-1">Container: {item.containerName}</div>
+                             <td className="px-3 py-2 text-[#c8c8c8] font-mono whitespace-nowrap">{item.urlShortId}</td>
+                             <td className="px-3 py-2 text-[#cfd5df] min-w-[220px]">
+                               <div className="break-words">{item.instanceName || '-'}</div>
+                             </td>
+                             <td className="px-3 py-2 text-[#e2e2e2] min-w-[240px]">
+                               <div className="font-medium break-all">{item.outputName}</div>
+                               <div className="text-[11px] text-[#666] mt-1">Container: {item.containerName}</div>
                             </td>
                             <td className="px-3 py-2 text-[#8aa6d8] font-mono min-w-[260px] break-all">{item.folderInput || 'root'}</td>
                             <td className="px-3 py-2 text-[#9aa3af] min-w-[260px]">
@@ -1801,6 +1954,9 @@ export default function ZeniusPage() {
                               ) : null}
                               {item.providers.length > 0 ? (
                                 <div className="text-[11px] text-[#666] mt-1 break-all">Pending providers: {item.providers.join(', ')}</div>
+                              ) : null}
+                              {item.selectedProviders.length > 0 ? (
+                                <div className="text-[11px] text-[#666] mt-1 break-all">Selected providers: {item.selectedProviders.join(', ')}</div>
                               ) : null}
                             </td>
                           </tr>

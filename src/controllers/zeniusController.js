@@ -55,6 +55,11 @@ const BATCH_PROVIDER_PREFETCH_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BA
 const BATCH_PREVIEW_STEPS_PER_POLL = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_STEPS_PER_POLL || '12', 10);
 const BATCH_PREVIEW_CONTAINER_LIMIT = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_CONTAINER_LIMIT || '32', 10);
 const BATCH_PREVIEW_LOOP_DELAY_MS = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_LOOP_DELAY_MS || '40', 10);
+const BATCH_PREVIEW_RETRY_LIMIT = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_RETRY_LIMIT || '2', 10);
+const BATCH_PREVIEW_RETRY_DELAY_MS = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_RETRY_DELAY_MS || '750', 10);
+const PREVIEW_ITEMS_SAMPLE_LIMIT = Number.parseInt(process.env.ZENIUS_PREVIEW_ITEMS_SAMPLE_LIMIT || '500', 10);
+const PREVIEW_ACTION_ITEMS_SAMPLE_LIMIT = Number.parseInt(process.env.ZENIUS_PREVIEW_ACTION_ITEMS_SAMPLE_LIMIT || '300', 10);
+const PREVIEW_RUN_RECOVERY_GRACE_MS = Number.parseInt(process.env.ZENIUS_PREVIEW_RUN_RECOVERY_GRACE_MS || '300000', 10);
 // Caps for in-memory arrays to prevent unbounded memory growth
 const MAX_QUEUED_ITEMS_IN_MEMORY = Number.parseInt(process.env.ZENIUS_MAX_QUEUED_ITEMS_IN_MEMORY || '500', 10);
 const MAX_SKIPPED_ITEMS_IN_MEMORY = Number.parseInt(process.env.ZENIUS_MAX_SKIPPED_ITEMS_IN_MEMORY || '500', 10);
@@ -597,8 +602,16 @@ function cleanupExpiredBatchChainSessions() {
   const now = Date.now();
   const activeSessionIds = new Set();
   for (const run of backgroundBatchRuns.values()) {
-    if (run?.status === 'running' && run?.sessionId) {
+    if (run?.status !== 'running') {
+      continue;
+    }
+
+    if (run?.sessionId) {
       activeSessionIds.add(run.sessionId);
+    }
+
+    if (run?.type === 'preview' && run?.id) {
+      activeSessionIds.add(run.id);
     }
   }
 
@@ -661,10 +674,35 @@ function createBackgroundBatchPreviewRun({ rootCgId, targetCgSelector, parentCon
     selectedProviders,
     keepaliveUrl
   });
+  const now = Date.now();
 
   run.type = 'preview';
   run.status = 'running';
   run.parentContainerName = String(parentContainerName || '').trim() || null;
+  run.previewLoopStarted = false;
+  run.previewRetryCount = 0;
+  run.maxPreviewRetries = clampPositiveInt(BATCH_PREVIEW_RETRY_LIMIT, 2);
+  run.lastProgressAt = now;
+  run.lastSuccessfulOffset = 0;
+  run.previewItems = [];
+  run.previewItemsOverflow = 0;
+  run.previewItemsByKey = new Map();
+  run.newItems = [];
+  run.newItemsOverflow = 0;
+  run.skippedPreviewItems = [];
+  run.skippedPreviewItemsOverflow = 0;
+  run.retryItems = [];
+  run.retryItemsOverflow = 0;
+  run.finalizeItems = [];
+  run.finalizeItemsOverflow = 0;
+  run.previewStats = {
+    download: 0,
+    retry: 0,
+    finalize: 0,
+    skip: 0,
+    unknown: 0
+  };
+  run.lastError = null;
   run.sessionContext = {
     rootCgId,
     targetCgSelector: String(targetCgSelector || '').trim() || null,
@@ -682,6 +720,111 @@ function touchBackgroundBatchRun(run) {
   const now = Date.now();
   run.updatedAt = now;
   run.expiresAt = now + clampPositiveInt(BACKGROUND_BATCH_RUN_TTL_MS, 21600000);
+}
+
+function safeArrayClone(value) {
+  return Array.isArray(value) ? [...value] : [];
+}
+
+function pushPreviewSample(target, item, overflowKey, owner, maxItems = PREVIEW_ACTION_ITEMS_SAMPLE_LIMIT) {
+  pushCappedItem(target, item, Math.max(1, Number(maxItems) || PREVIEW_ACTION_ITEMS_SAMPLE_LIMIT), overflowKey, owner);
+}
+
+function createPreviewItemSnapshot(item = {}) {
+  return {
+    planKey: item.planKey || null,
+    urlShortId: item.urlShortId || null,
+    instanceName: item.instance?.name || item.instanceName || null,
+    containerUrlShortId: item.containerUrlShortId || null,
+    containerName: item.containerName || null,
+    outputName: item.outputName || null,
+    folderInput: item.folderInput || 'root',
+    folderId: item.folderId || null,
+    path: item.path || '',
+    action: item.action || 'unknown',
+    reason: item.reason || null,
+    fileId: item.fileId || null,
+    existingStatus: item.existingStatus || null,
+    pendingProviders: safeArrayClone(item.pendingProviders),
+    selectedProviders: safeArrayClone(item.selectedProviders),
+    availableProviders: safeArrayClone(item.availableProviders),
+    refererPath: item.refererPath || null
+  };
+}
+
+function resetPreviewRunSamples(run) {
+  run.previewItems = [];
+  run.previewItemsOverflow = 0;
+  run.previewItemsByKey = new Map();
+  run.newItems = [];
+  run.newItemsOverflow = 0;
+  run.skippedPreviewItems = [];
+  run.skippedPreviewItemsOverflow = 0;
+  run.retryItems = [];
+  run.retryItemsOverflow = 0;
+  run.finalizeItems = [];
+  run.finalizeItemsOverflow = 0;
+  run.previewStats = {
+    download: 0,
+    retry: 0,
+    finalize: 0,
+    skip: 0,
+    unknown: 0
+  };
+}
+
+function rebuildPreviewRunSamples(run) {
+  resetPreviewRunSamples(run);
+
+  const plannedItems = Array.isArray(run.chainPreview?.plannedItems) ? run.chainPreview.plannedItems : [];
+  for (const plannedItem of plannedItems) {
+    const snapshot = createPreviewItemSnapshot(plannedItem);
+    const key = snapshot.planKey || [snapshot.containerUrlShortId, snapshot.urlShortId, snapshot.outputName, snapshot.folderId].join('::');
+    if (key && run.previewItemsByKey.has(key)) {
+      continue;
+    }
+
+    if (key) {
+      run.previewItemsByKey.set(key, snapshot);
+    }
+    pushPreviewSample(run.previewItems, snapshot, 'previewItemsOverflow', run, PREVIEW_ITEMS_SAMPLE_LIMIT);
+
+    const action = String(snapshot.action || 'unknown').trim().toLowerCase() || 'unknown';
+    run.previewStats[action] = Number(run.previewStats[action] || 0) + 1;
+
+    if (action === 'skip') {
+      pushPreviewSample(run.skippedPreviewItems, snapshot, 'skippedPreviewItemsOverflow', run);
+    } else if (action === 'retry') {
+      pushPreviewSample(run.retryItems, snapshot, 'retryItemsOverflow', run);
+    } else if (action === 'finalize') {
+      pushPreviewSample(run.finalizeItems, snapshot, 'finalizeItemsOverflow', run);
+    } else {
+      pushPreviewSample(run.newItems, snapshot, 'newItemsOverflow', run);
+    }
+  }
+}
+
+function buildPreviewItemsSummary(run) {
+  return {
+    totalTracked: run.previewItemsByKey instanceof Map ? run.previewItemsByKey.size : Number(run.previewItems?.length || 0),
+    sampled: Array.isArray(run.previewItems) ? run.previewItems.length : 0,
+    overflow: Number(run.previewItemsOverflow || 0),
+    byAction: {
+      download: Number(run.previewStats?.download || 0),
+      retry: Number(run.previewStats?.retry || 0),
+      finalize: Number(run.previewStats?.finalize || 0),
+      skip: Number(run.previewStats?.skip || 0),
+      unknown: Number(run.previewStats?.unknown || 0)
+    },
+    newItemsTracked: Array.isArray(run.newItems) ? run.newItems.length : 0,
+    newItemsOverflow: Number(run.newItemsOverflow || 0),
+    skippedItemsTracked: Array.isArray(run.skippedPreviewItems) ? run.skippedPreviewItems.length : 0,
+    skippedItemsOverflow: Number(run.skippedPreviewItemsOverflow || 0),
+    retryItemsTracked: Array.isArray(run.retryItems) ? run.retryItems.length : 0,
+    retryItemsOverflow: Number(run.retryItemsOverflow || 0),
+    finalizeItemsTracked: Array.isArray(run.finalizeItems) ? run.finalizeItems.length : 0,
+    finalizeItemsOverflow: Number(run.finalizeItemsOverflow || 0)
+  };
 }
 
 function pushBatchItemError(runId, itemError) {
@@ -731,6 +874,8 @@ function pushCappedItem(target, item, maxItems, overflowKey, owner) {
 }
 
 function summarizeBackgroundBatchRun(run) {
+  const previewSummary = summarizePreviewChain(run.chainPreview || null);
+  const previewItemsSummary = buildPreviewItemsSummary(run);
   const scannedContainerCount = Number(run.scannedContainerCount || run.processedContainers || 0);
   const totalContainers = Number(run.totalContainers || 0);
   const discoveredVideoCount = Number(run.discoveredVideoCount || 0);
@@ -763,6 +908,13 @@ function summarizeBackgroundBatchRun(run) {
     downloadFailedCount: run.downloadFailedCount || 0,
     hasMoreContainers: run.hasMoreContainers,
     nextContainerOffset: run.nextContainerOffset,
+    lastSuccessfulOffset: Number(run.lastSuccessfulOffset || 0),
+    previewRetryCount: Number(run.previewRetryCount || 0),
+    maxPreviewRetries: Number(run.maxPreviewRetries || 0),
+    lastError: run.lastError || run.error || null,
+    lastProgressAt: run.lastProgressAt ? new Date(run.lastProgressAt).toISOString() : null,
+    previewSummary,
+    previewItemsSummary,
     containerProgress: {
       processed: scannedContainerCount,
       total: totalContainers,
@@ -777,11 +929,23 @@ function summarizeBackgroundBatchRun(run) {
       pending: Math.max(0, Number(run.queuedCount || 0) - Number(run.downloadCompletedCount || 0) - Number(run.downloadFailedCount || 0))
     },
     chainErrors: Array.isArray(run.chainErrors) ? run.chainErrors : [],
-    chainPreview: run.chainPreview || null,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
     updatedAt: new Date(run.updatedAt).toISOString()
   };
+}
+
+function serializeBackgroundBatchRun(run, { includePreview = false } = {}) {
+  const summary = summarizeBackgroundBatchRun(run);
+  if (includePreview) {
+    summary.chainPreview = run?.chainPreview || null;
+    summary.previewItems = Array.isArray(run?.previewItems) ? run.previewItems : [];
+    summary.newItems = Array.isArray(run?.newItems) ? run.newItems : [];
+    summary.skippedPreviewItems = Array.isArray(run?.skippedPreviewItems) ? run.skippedPreviewItems : [];
+    summary.retryItems = Array.isArray(run?.retryItems) ? run.retryItems : [];
+    summary.finalizeItems = Array.isArray(run?.finalizeItems) ? run.finalizeItems : [];
+  }
+  return summary;
 }
 
 function serializeBatchPreviewSession(session) {
@@ -848,9 +1012,18 @@ async function persistPreviewRunSnapshot(run) {
     nextContainerOffset: Number(run.nextContainerOffset || 0),
     hasMoreContainers: run.hasMoreContainers !== false,
     previewSummary,
+    previewItemsSummary: buildPreviewItemsSummary(run),
     chainPreview: run.chainPreview || null,
     previewItems: Array.isArray(run.chainPreview?.plannedItems) ? run.chainPreview.plannedItems : [],
     previewContainers: Array.isArray(run.chainPreview?.containerDetails) ? run.chainPreview.containerDetails : [],
+    newItems: Array.isArray(run.newItems) ? run.newItems : [],
+    skippedPreviewItems: Array.isArray(run.skippedPreviewItems) ? run.skippedPreviewItems : [],
+    retryItems: Array.isArray(run.retryItems) ? run.retryItems : [],
+    finalizeItems: Array.isArray(run.finalizeItems) ? run.finalizeItems : [],
+    previewRetryCount: Number(run.previewRetryCount || 0),
+    lastError: run.lastError || run.error || null,
+    lastProgressAt: run.lastProgressAt || null,
+    lastSuccessfulOffset: Number(run.lastSuccessfulOffset || 0),
     itemErrors: Array.isArray(run.itemErrors) ? run.itemErrors : [],
     itemErrorsOverflow: Number(run._itemErrorsOverflow || 0)
   };
@@ -881,6 +1054,7 @@ function summarizePersistedPreviewRun(dbSession) {
   const sessionData = dbSession?.sessionData || {};
   const chainPreview = sessionData.chainPreview || null;
   const previewSummary = sessionData.previewSummary || summarizePreviewChain(chainPreview);
+  const previewItemsSummary = sessionData.previewItemsSummary || null;
   const scannedContainerCount = Number(sessionData.scannedContainerCount || dbSession?.processedContainers || 0);
   const totalContainers = Number(dbSession?.totalContainers || previewSummary.discoveredContainerCount || 0);
   const discoveredVideoCount = Number(sessionData.discoveredVideoCount || previewSummary.previewVideoCount || 0);
@@ -913,6 +1087,11 @@ function summarizePersistedPreviewRun(dbSession) {
     downloadFailedCount: 0,
     hasMoreContainers: dbSession.hasMore !== false,
     nextContainerOffset: Number(sessionData.nextContainerOffset || dbSession.nextContainerOffset || 0),
+    lastSuccessfulOffset: Number(sessionData.lastSuccessfulOffset || 0),
+    previewRetryCount: Number(sessionData.previewRetryCount || 0),
+    maxPreviewRetries: clampPositiveInt(BATCH_PREVIEW_RETRY_LIMIT, 2),
+    lastError: sessionData.lastError || dbSession.error || null,
+    lastProgressAt: sessionData.lastProgressAt || dbSession.updatedAt,
     containerProgress: {
       processed: scannedContainerCount,
       total: totalContainers,
@@ -927,72 +1106,86 @@ function summarizePersistedPreviewRun(dbSession) {
       pending: 0
     },
     chainErrors: Array.isArray(dbSession.chainErrors) ? dbSession.chainErrors : [],
-    chainPreview,
+    previewSummary,
+    previewItemsSummary,
     startedAt: dbSession.createdAt,
     finishedAt: dbSession.finishedAt,
     updatedAt: dbSession.updatedAt
   };
 }
 
-async function continueBackgroundBatchPreviewRun(run, { requestContext, refererPath }) {
+function serializePersistedPreviewRun(dbSession, { includePreview = false } = {}) {
+  const summary = summarizePersistedPreviewRun(dbSession);
+  if (includePreview) {
+    summary.chainPreview = dbSession?.sessionData?.chainPreview || null;
+    summary.previewItems = Array.isArray(dbSession?.sessionData?.previewItems) ? dbSession.sessionData.previewItems : [];
+    summary.newItems = Array.isArray(dbSession?.sessionData?.newItems) ? dbSession.sessionData.newItems : [];
+    summary.skippedPreviewItems = Array.isArray(dbSession?.sessionData?.skippedPreviewItems) ? dbSession.sessionData.skippedPreviewItems : [];
+    summary.retryItems = Array.isArray(dbSession?.sessionData?.retryItems) ? dbSession.sessionData.retryItems : [];
+    summary.finalizeItems = Array.isArray(dbSession?.sessionData?.finalizeItems) ? dbSession.sessionData.finalizeItems : [];
+  }
+  return summary;
+}
+
+function shouldContinuePreviewAfterError(run, error) {
+  const maxRetries = Math.max(0, Number(run?.maxPreviewRetries || 0));
+  if (Number(run?.previewRetryCount || 0) >= maxRetries) {
+    return false;
+  }
+
+  const message = String(error?.message || '').toLowerCase();
+  if (!message) {
+    return true;
+  }
+
+  const fatalPatterns = ['cgroup id is required', 'must be numeric', 'preview plan is not ready'];
+  return !fatalPatterns.some((pattern) => message.includes(pattern));
+}
+
+async function sleepPreviewRetry(attemptNumber) {
+  const delayMs = Math.max(100, clampPositiveInt(BATCH_PREVIEW_RETRY_DELAY_MS, 750) * Math.max(1, attemptNumber));
+  await sleep(delayMs);
+}
+
+async function runBackgroundBatchPreviewLoop(run, { requestContext, refererPath }) {
+  if (!run || run.previewLoopStarted) {
+    return;
+  }
+
+  run.previewLoopStarted = true;
+  touchBackgroundBatchRun(run);
+
   try {
-    run.status = 'running';
-    touchBackgroundBatchRun(run);
+    let iteration = 0;
+    while (run.status === 'running') {
+      iteration += 1;
+      if (iteration > BACKGROUND_BATCH_MAX_ITERATIONS) {
+        throw new Error(`Background preview iteration limit reached (${BACKGROUND_BATCH_MAX_ITERATIONS}). Increase ZENIUS_BACKGROUND_BATCH_MAX_ITERATIONS if needed.`);
+      }
 
-    const previewRequestContext = run.sessionContext?.headersRaw
-      ? buildRequestContext({ headersRaw: run.sessionContext.headersRaw }, null)
-      : requestContext;
-    const previewRefererPath = run.sessionContext?.refererPath || refererPath || '';
+      try {
+        await continueBackgroundBatchPreviewRun(run, { requestContext, refererPath });
+        run.previewRetryCount = 0;
+        run.lastError = null;
+      } catch (error) {
+        run.lastError = error.message;
+        if (!shouldContinuePreviewAfterError(run, error)) {
+          run.status = 'failed';
+          run.error = error.message;
+          run.finishedAt = new Date().toISOString();
+          await persistPreviewRunSnapshot(run);
+          touchBackgroundBatchRun(run);
+          break;
+        }
 
-    const startedAt = Date.now();
-    const stepsPerPoll = clampPositiveInt(BATCH_PREVIEW_STEPS_PER_POLL, 12);
-    const containerLimit = clampPositiveInt(BATCH_PREVIEW_CONTAINER_LIMIT, clampPositiveInt(DEFAULT_BATCH_CHAIN_CHUNK_SIZE, 32));
-    let nextOffset = Number.isFinite(Number(run.nextContainerOffset)) ? Number(run.nextContainerOffset) : 0;
-    let hasMore = true;
-    let totalProcessedThisPoll = 0;
-    let latestDiscoveredVideos = Number(run.discoveredVideoCount || 0);
+        run.previewRetryCount = Number(run.previewRetryCount || 0) + 1;
+        run.chainErrors = Array.isArray(run.chainErrors) ? [...run.chainErrors, error.message] : [error.message];
+        await persistPreviewRunSnapshot(run);
+        touchBackgroundBatchRun(run);
+        await sleepPreviewRetry(run.previewRetryCount);
+      }
 
-    for (let step = 0; step < stepsPerPoll && hasMore; step += 1) {
-      const chain = await buildBatchChain({
-        rootCgId: run.sessionContext?.rootCgId || run.rootCgId,
-        targetCgSelector: run.sessionContext?.targetCgSelector || run.targetCgSelector,
-        parentContainerName: run.sessionContext?.parentContainerName || run.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
-        requestContext: previewRequestContext,
-        refererPath: previewRefererPath,
-        baseFolderInput: run.sessionContext?.baseFolderInput || run.baseFolderInput,
-        selectedProviders: run.sessionContext?.selectedProviders || run.selectedProviders,
-        sessionId: run.sessionId || null,
-        containerOffset: nextOffset,
-        containerLimit,
-        timeBudgetMs: null
-      });
-
-      totalProcessedThisPoll += Number(chain.processedContainerCount || 0);
-      latestDiscoveredVideos = Number(chain.plannedItemCount || latestDiscoveredVideos || 0);
-
-      run.sessionId = chain.sessionId || run.sessionId || null;
-      run.rootCgName = chain.rootCgName || run.rootCgName;
-      run.parentContainerName = chain.parentContainerName || run.parentContainerName;
-      run.totalContainers = Number(chain.totalContainers || 0);
-      run.scannedContainerCount = Number(chain.nextContainerOffset ?? chain.totalContainers ?? 0);
-      run.processedContainers = run.scannedContainerCount;
-      run.discoveredVideoCount = Number(chain.plannedItemCount || run.discoveredVideoCount || 0);
-      run.hasMoreContainers = Boolean(chain.hasMoreContainers);
-      run.nextContainerOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : 0;
-      run.chainErrors = Array.isArray(chain.errors) ? [...chain.errors] : [];
-      run.chainPreview = {
-        ...chain,
-        containerDetails: Array.isArray(chain.containerDetails)
-          ? [
-              ...((run.chainPreview?.containerDetails || []).filter((existing) => !chain.containerDetails.some((incoming) => incoming?.containerUrlShortId === existing?.containerUrlShortId))),
-              ...chain.containerDetails
-            ]
-          : (run.chainPreview?.containerDetails || [])
-      };
-
-      hasMore = Boolean(chain.hasMoreContainers);
-      nextOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : nextOffset;
-      if (!hasMore) {
+      if (run.status !== 'running' || run.finishedAt) {
         break;
       }
 
@@ -1000,26 +1193,99 @@ async function continueBackgroundBatchPreviewRun(run, { requestContext, refererP
         await sleep(clampPositiveInt(BATCH_PREVIEW_LOOP_DELAY_MS, 40));
       }
     }
-
-    const elapsedMs = Math.max(1, Date.now() - startedAt);
-    const throughput = (totalProcessedThisPoll / (elapsedMs / 1000)).toFixed(2);
-    console.log(`[Zenius][Preview] processed=${totalProcessedThisPoll} discoveredVideos=${latestDiscoveredVideos} offset=${run.nextContainerOffset}/${run.totalContainers} hasMore=${hasMore} throughput=${throughput}/s elapsed=${elapsedMs}ms`);
-
-    if (!hasMore) {
-      run.status = 'completed';
-      run.finishedAt = new Date().toISOString();
-    }
-
-    await persistPreviewRunSnapshot(run);
-
-    touchBackgroundBatchRun(run);
-  } catch (error) {
-    run.error = error.message;
-    run.status = 'failed';
-    run.finishedAt = new Date().toISOString();
-    await persistPreviewRunSnapshot(run);
+  } finally {
+    run.previewLoopStarted = false;
     touchBackgroundBatchRun(run);
   }
+}
+
+async function continueBackgroundBatchPreviewRun(run, { requestContext, refererPath }) {
+  run.status = 'running';
+  touchBackgroundBatchRun(run);
+
+    const previewRequestContext = run.sessionContext?.headersRaw
+      ? buildRequestContext({ headersRaw: run.sessionContext.headersRaw }, null)
+      : requestContext;
+    const previewRefererPath = run.sessionContext?.refererPath || refererPath || '';
+
+  const startedAt = Date.now();
+  const stepsPerPoll = clampPositiveInt(BATCH_PREVIEW_STEPS_PER_POLL, 12);
+  const containerLimit = clampPositiveInt(BATCH_PREVIEW_CONTAINER_LIMIT, clampPositiveInt(DEFAULT_BATCH_CHAIN_CHUNK_SIZE, 32));
+  let nextOffset = Number.isFinite(Number(run.nextContainerOffset)) ? Number(run.nextContainerOffset) : 0;
+  let hasMore = true;
+  let totalProcessedThisPoll = 0;
+  let latestDiscoveredVideos = Number(run.discoveredVideoCount || 0);
+
+  for (let step = 0; step < stepsPerPoll && hasMore; step += 1) {
+    const chain = await buildBatchChain({
+      rootCgId: run.sessionContext?.rootCgId || run.rootCgId,
+      targetCgSelector: run.sessionContext?.targetCgSelector || run.targetCgSelector,
+      parentContainerName: run.sessionContext?.parentContainerName || run.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
+      requestContext: previewRequestContext,
+      refererPath: previewRefererPath,
+      baseFolderInput: run.sessionContext?.baseFolderInput || run.baseFolderInput,
+      selectedProviders: run.sessionContext?.selectedProviders || run.selectedProviders,
+      sessionId: run.sessionId || null,
+      containerOffset: nextOffset,
+      containerLimit,
+      timeBudgetMs: null
+    });
+
+    totalProcessedThisPoll += Number(chain.processedContainerCount || 0);
+    latestDiscoveredVideos = Number(chain.plannedItemCount || latestDiscoveredVideos || 0);
+
+    run.sessionId = chain.sessionId || run.sessionId || null;
+    run.rootCgName = chain.rootCgName || run.rootCgName;
+    run.parentContainerName = chain.parentContainerName || run.parentContainerName;
+    run.totalContainers = Number(chain.totalContainers || 0);
+    run.scannedContainerCount = Number(chain.nextContainerOffset ?? chain.totalContainers ?? 0);
+    run.processedContainers = run.scannedContainerCount;
+    run.discoveredVideoCount = Number(chain.plannedItemCount || run.discoveredVideoCount || 0);
+    run.hasMoreContainers = Boolean(chain.hasMoreContainers);
+    run.nextContainerOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : 0;
+    run.lastSuccessfulOffset = run.scannedContainerCount;
+    run.lastProgressAt = Date.now();
+    run.chainErrors = Array.isArray(chain.errors) ? [...chain.errors] : [];
+    run.chainPreview = {
+      ...chain,
+      containerDetails: Array.isArray(chain.containerDetails)
+        ? [
+            ...((run.chainPreview?.containerDetails || []).filter((existing) => !chain.containerDetails.some((incoming) => incoming?.containerUrlShortId === existing?.containerUrlShortId))),
+            ...chain.containerDetails
+          ]
+        : (run.chainPreview?.containerDetails || []),
+      plannedItems: Array.isArray(chain.plannedItems)
+        ? [
+            ...((run.chainPreview?.plannedItems || []).filter((existing) => !chain.plannedItems.some((incoming) => incoming?.planKey && incoming.planKey === existing?.planKey))),
+            ...chain.plannedItems
+          ]
+        : (run.chainPreview?.plannedItems || [])
+    };
+    rebuildPreviewRunSamples(run);
+
+    hasMore = Boolean(chain.hasMoreContainers);
+    nextOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : nextOffset;
+    if (!hasMore) {
+      break;
+    }
+
+    if (BATCH_PREVIEW_LOOP_DELAY_MS > 0) {
+      await sleep(clampPositiveInt(BATCH_PREVIEW_LOOP_DELAY_MS, 40));
+    }
+  }
+
+  const elapsedMs = Math.max(1, Date.now() - startedAt);
+  const throughput = (totalProcessedThisPoll / (elapsedMs / 1000)).toFixed(2);
+  console.log(`[Zenius][Preview] processed=${totalProcessedThisPoll} discoveredVideos=${latestDiscoveredVideos} offset=${run.nextContainerOffset}/${run.totalContainers} hasMore=${hasMore} throughput=${throughput}/s elapsed=${elapsedMs}ms`);
+
+  if (!hasMore) {
+    run.status = 'completed';
+    run.finishedAt = new Date().toISOString();
+  }
+
+  await persistPreviewRunSnapshot(run);
+
+  touchBackgroundBatchRun(run);
 }
 
 function cleanupExpiredBackgroundBatchRuns() {
@@ -1035,7 +1301,7 @@ function getBackgroundBatchRunsSummary() {
   cleanupExpiredBackgroundBatchRuns();
   return Array.from(backgroundBatchRuns.values())
     .sort((left, right) => right.updatedAt - left.updatedAt)
-    .map((run) => summarizeBackgroundBatchRun(run));
+    .map((run) => serializeBackgroundBatchRun(run));
 }
 
 function hasActiveBackgroundBatchRuns() {
@@ -3529,8 +3795,16 @@ const zeniusController = {
         message: 'Zenius batch chain session started',
         data: {
           sessionId: run.id,
-          status: summarizeBackgroundBatchRun(run)
+          status: serializeBackgroundBatchRun(run)
         }
+      });
+
+      const requestContext = buildRequestContext(req.body || {}, req);
+      void runBackgroundBatchPreviewLoop(run, {
+        requestContext,
+        refererPath: req.body?.refererPath || ''
+      }).catch((error) => {
+        console.error(`[Zenius] Background preview run ${run.id} crashed:`, error.message);
       });
     } catch (error) {
       res.status(400).json({ success: false, error: error.message });
@@ -3550,24 +3824,16 @@ const zeniusController = {
         if (dbSession?.sessionData?.type === 'preview') {
           return res.json({
             success: true,
-            data: summarizePersistedPreviewRun(dbSession)
+            data: serializePersistedPreviewRun(dbSession, { includePreview: true })
           });
         }
 
         return res.status(404).json({ success: false, error: 'Batch preview build not found' });
       }
 
-      if (run.status === 'running' && !run.finishedAt) {
-        const requestContext = buildRequestContext(req.query || {}, req);
-        await continueBackgroundBatchPreviewRun(run, {
-          requestContext,
-          refererPath: req.query?.refererPath || ''
-        });
-      }
-
       res.json({
         success: true,
-        data: summarizeBackgroundBatchRun(run)
+        data: serializeBackgroundBatchRun(run, { includePreview: true })
       });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
@@ -3653,7 +3919,7 @@ const zeniusController = {
         message: 'Zenius batch download started in background',
         data: {
           batchRunId: run.id,
-          status: summarizeBackgroundBatchRun(run),
+          status: serializeBackgroundBatchRun(run, { includePreview: true }),
           providers: selectedProviders,
           preview: previewResult,
           cleanupLocalFile: true,
@@ -3833,7 +4099,7 @@ const zeniusController = {
         success: true,
         data: {
           dbSession,
-          inMemoryRun: inMemoryRun ? summarizeBackgroundBatchRun(inMemoryRun) : null
+          inMemoryRun: inMemoryRun ? serializeBackgroundBatchRun(inMemoryRun, { includePreview: true }) : null
         }
       });
     } catch (error) {
