@@ -505,6 +505,14 @@ function normalizeChunkLimit(rawValue) {
   return Math.min(parsed, clampPositiveInt(MAX_BATCH_CHAIN_CHUNK_SIZE, 20));
 }
 
+function normalizeFastPreviewContainerLimit(rawValue) {
+  if (rawValue === null || rawValue === undefined || rawValue === '') {
+    return null;
+  }
+
+  return clampPositiveInt(rawValue, clampPositiveInt(BATCH_PREVIEW_CONTAINER_LIMIT, 48));
+}
+
 function normalizeBatchRequestBudgetMs(rawValue) {
   const fallback = clampPositiveInt(DEFAULT_BATCH_REQUEST_BUDGET_MS, 24000);
   const parsed = clampPositiveInt(rawValue, fallback);
@@ -1418,8 +1426,9 @@ async function continueBackgroundBatchPreviewRun(run, { requestContext, refererP
     const previewRefererPath = run.sessionContext?.refererPath || refererPath || '';
 
   const startedAt = Date.now();
-  const stepsPerPoll = clampPositiveInt(BATCH_PREVIEW_STEPS_PER_POLL, 12);
-  const containerLimit = clampPositiveInt(BATCH_PREVIEW_CONTAINER_LIMIT, clampPositiveInt(DEFAULT_BATCH_CHAIN_CHUNK_SIZE, 32));
+  const fastPreview = Boolean(run.fastPreview || run.sessionContext?.fastPreview);
+  const stepsPerPoll = fastPreview ? Number.MAX_SAFE_INTEGER : clampPositiveInt(BATCH_PREVIEW_STEPS_PER_POLL, 12);
+  const containerLimit = fastPreview ? null : clampPositiveInt(BATCH_PREVIEW_CONTAINER_LIMIT, clampPositiveInt(DEFAULT_BATCH_CHAIN_CHUNK_SIZE, 32));
   let nextOffset = Number.isFinite(Number(run.nextContainerOffset)) ? Number(run.nextContainerOffset) : 0;
   let hasMore = true;
   let totalProcessedThisPoll = 0;
@@ -1459,7 +1468,7 @@ async function continueBackgroundBatchPreviewRun(run, { requestContext, refererP
       + `offset=${stepOffset}->${chain.nextContainerOffset ?? 'done'} processed=${stepProcessed} `
       + `plannedVideos=${Number(chain.plannedItemCount || 0)} previewContainers=${Number(chain.previewSummary?.previewContainerCount || chain.containerDetails?.length || 0)} `
       + `discoveredContainers=${Number(chain.totalContainers || chain.containerList?.totalContainers || 0)} hasMore=${Boolean(chain.hasMoreContainers)} `
-      + `durationMs=${stepElapsedMs} throughput=${stepThroughput}/s errors=${Array.isArray(chain.errors) ? chain.errors.length : 0}`
+      + `fastPreview=${fastPreview} durationMs=${stepElapsedMs} throughput=${stepThroughput}/s errors=${Array.isArray(chain.errors) ? chain.errors.length : 0}`
     );
 
     totalProcessedThisPoll += Number(chain.processedContainerCount || 0);
@@ -1499,7 +1508,7 @@ async function continueBackgroundBatchPreviewRun(run, { requestContext, refererP
       break;
     }
 
-    if (BATCH_PREVIEW_LOOP_DELAY_MS > 0) {
+    if (!fastPreview && BATCH_PREVIEW_LOOP_DELAY_MS > 0) {
       await sleep(clampPositiveInt(BATCH_PREVIEW_LOOP_DELAY_MS, 40));
     }
   }
@@ -3108,7 +3117,9 @@ async function buildBatchChain({
   const mergedContainers = Array.from(session.containerByShortId.values());
   const totalContainers = mergedContainers.length;
   const normalizedOffset = Math.min(normalizeChunkOffset(containerOffset), totalContainers);
-  const normalizedLimit = normalizeChunkLimit(containerLimit) || clampPositiveInt(DEFAULT_BATCH_CHAIN_CHUNK_SIZE, 8);
+  const normalizedLimit = session.fastPreview
+    ? (normalizeFastPreviewContainerLimit(containerLimit) || Math.max(1, totalContainers - normalizedOffset))
+    : (normalizeChunkLimit(containerLimit) || clampPositiveInt(DEFAULT_BATCH_CHAIN_CHUNK_SIZE, 8));
   const details = [];
   const plannedItems = [];
   const skipped = [];
