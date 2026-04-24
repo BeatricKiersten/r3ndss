@@ -987,16 +987,17 @@ export default function ZeniusPage() {
         folderId: normalizedBatchFolderPrefix || null
       });
 
-      const startedSessionId = started?.sessionId || started?.status?.sessionId || started?.status?.id || null;
-      setPreviewRunId(startedSessionId);
-      setBatchSessionId(startedSessionId);
+      const startedPreviewRunId = started?.previewRunId || started?.sessionId || started?.status?.id || null;
+      const startedPlanSessionId = started?.planSessionId || started?.status?.sessionId || null;
+      setPreviewRunId(startedPreviewRunId);
+      setBatchSessionId(startedPlanSessionId || null);
 
       const poll = async () => {
-        if (!startedSessionId) return;
-        const status = await getZeniusBatchChainStatus(startedSessionId);
+        if (!startedPreviewRunId) return;
+        const status = await getZeniusBatchChainStatus(startedPreviewRunId);
         setPreviewPollErrorCount(0);
-        setPreviewRunId(status.id || startedSessionId);
-        setBatchSessionId(status.sessionId || startedSessionId);
+        setPreviewRunId(status.id || startedPreviewRunId);
+        setBatchSessionId(status.chainPreview?.sessionId || status.sessionId || startedPlanSessionId || null);
         setBatchBuildProgress({
           processed: Number(status.containerProgress?.processed || status.processedContainers || 0),
           total: Number.isFinite(Number(status.containerProgress?.total)) ? Number(status.containerProgress.total) : null,
@@ -1061,7 +1062,9 @@ export default function ZeniusPage() {
   }, []);
 
   useEffect(() => {
-    if (!previewRunId || trackedPreviewRun?.status === 'completed' || trackedPreviewRun?.status === 'failed' || trackedPreviewRun?.status === 'cancelled') {
+    const hasFinalPreviewChain = Boolean(batchChain?.planReady);
+    const previewEnded = trackedPreviewRun?.status === 'completed' || trackedPreviewRun?.status === 'failed' || trackedPreviewRun?.status === 'cancelled';
+    if (!previewRunId || (previewEnded && hasFinalPreviewChain)) {
       if (batchChainPollRef.current) {
         window.clearInterval(batchChainPollRef.current);
         batchChainPollRef.current = null;
@@ -1077,9 +1080,17 @@ export default function ZeniusPage() {
       const status = await getZeniusBatchChainStatus(previewRunId);
       setPreviewPollErrorCount(0);
       setPreviewRunId(status.id || previewRunId);
-      setBatchSessionId((prev) => status.sessionId || prev || previewRunId);
+      setBatchSessionId((prev) => status.chainPreview?.sessionId || status.sessionId || prev || null);
       if (status.chainPreview) {
         setBatchChain(status.chainPreview);
+      }
+      if (status.status === 'completed' && status.chainPreview?.planReady) {
+        setBatchBuildProgress(null);
+        if (batchChainPollRef.current) {
+          window.clearInterval(batchChainPollRef.current);
+          batchChainPollRef.current = null;
+        }
+        return;
       }
       if (status.status === 'cancelled') {
         setBatchBuildProgress(null);
@@ -1105,7 +1116,7 @@ export default function ZeniusPage() {
     batchChainPollRef.current = window.setInterval(() => {
       poll().catch((error) => {
         setPreviewPollErrorCount((count) => count + 1);
-        if (previewPollErrorCountRef.current >= 2 && trackedPreviewRun?.status !== 'running' && batchChainPollRef.current) {
+        if (previewPollErrorCountRef.current >= 2 && trackedPreviewRun?.status !== 'running' && batchChain?.planReady && batchChainPollRef.current) {
           window.clearInterval(batchChainPollRef.current);
           batchChainPollRef.current = null;
         }
@@ -1119,7 +1130,7 @@ export default function ZeniusPage() {
         batchChainPollRef.current = null;
       }
     };
-  }, [previewRunId, trackedPreviewRun]);
+  }, [previewRunId, trackedPreviewRun, batchChain?.planReady]);
 
   const handleStartBatchDownload = () => {
     if (!batchChain?.planReady) {
@@ -1156,7 +1167,8 @@ export default function ZeniusPage() {
         refererPath,
         folderId: normalizedBatchFolderPrefix || null,
         providers: selectedProviders.length > 0 ? selectedProviders : null,
-        sessionId: batchSessionId || batchChain?.sessionId || null,
+        previewRunId,
+        sessionId: batchChain?.sessionId || batchSessionId || null,
         containerLimit: BATCH_DOWNLOAD_CHUNK_SIZE,
         timeBudgetMs: BATCH_REQUEST_BUDGET_MS
       });
@@ -1164,7 +1176,7 @@ export default function ZeniusPage() {
       const data = result?.data || {};
       const status = data.status || {};
       setDownloadRunId(data.batchRunId || null);
-      setBatchSessionId(status.sessionId || batchSessionId || batchChain?.sessionId || null);
+      setBatchSessionId(status.sessionId || batchChain?.sessionId || batchSessionId || null);
       setBatchResult({
         ...status,
         batchRunId: data.batchRunId || null,

@@ -1189,6 +1189,100 @@ function serializePersistedPreviewRun(dbSession, { includePreview = false } = {}
   return summary;
 }
 
+function hydrateBatchChainSessionFromPersistedPreview(dbSession, requestedPlanSessionId = null) {
+  const sessionData = dbSession?.sessionData || {};
+  const chainPreview = sessionData.chainPreview || null;
+  const planSessionId = normalizeSessionId(chainPreview?.sessionId || sessionData.sessionId || requestedPlanSessionId);
+
+  if (!planSessionId || !chainPreview?.planReady || !Array.isArray(chainPreview.plannedItems)) {
+    return null;
+  }
+
+  const session = createBatchChainSession({
+    rootCgId: normalizeCgId(chainPreview.rootCgId || sessionData.rootCgId || dbSession.rootCgId, DEFAULT_BATCH_ROOT_CGROUP_ID),
+    targetCgSelector: chainPreview.targetCgSelector || sessionData.targetCgSelector || dbSession.targetCgSelector,
+    parentContainerName: chainPreview.parentContainerName || sessionData.parentContainerName || dbSession.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME
+  });
+
+  session.id = planSessionId;
+  session.rootCgName = chainPreview.rootCgName || sessionData.rootCgName || dbSession.rootCgName || null;
+  session.discoveryInitialized = true;
+  session.discoveryDone = true;
+  session.leafCgIds = Array.isArray(chainPreview.leafCgIds) ? [...chainPreview.leafCgIds] : [];
+  session.leafCgIdSet = new Set(session.leafCgIds);
+  session.traversal = Array.isArray(chainPreview.traversal) ? [...chainPreview.traversal] : [];
+  session.queueCgIds = [];
+  session.leafCursor = session.leafCgIds.length;
+
+  session.containerByShortId = new Map();
+  session.containerDetailsByShortId = new Map();
+  const containerDetails = Array.isArray(chainPreview.containerDetails) ? chainPreview.containerDetails : [];
+  for (const containerDetail of containerDetails) {
+    const containerShortId = normalizeNumericShortId(containerDetail?.containerUrlShortId);
+    if (!containerShortId) continue;
+
+    session.containerByShortId.set(containerShortId, {
+      'url-short-id': containerShortId,
+      name: containerDetail.containerName || containerShortId,
+      type: containerDetail.containerType || null,
+      'path-url': containerDetail.containerPathUrl || null,
+      sourceLeafCgId: containerDetail.sourceLeafCgId || null,
+      parentPathSegments: []
+    });
+    session.containerDetailsByShortId.set(containerShortId, containerDetail);
+    if (Array.isArray(containerDetail.videoInstances)) {
+      session.containerVideoInstancesByShortId.set(containerShortId, containerDetail.videoInstances);
+    }
+  }
+
+  const planningContext = normalizePlanningContext(sessionData.baseFolderInput || chainPreview.baseFolderInput || '', sessionData.selectedProviders || chainPreview.selectedProviders || null);
+  session.planContextKey = chainPreview.planContextKey || planningContext.key;
+  session.planBaseFolderInput = planningContext.baseFolderInput;
+  session.planSelectedProviders = planningContext.selectedProviders;
+  session.plannedItems = [...chainPreview.plannedItems];
+  session.plannedItemByKey = new Map();
+  for (const plannedItem of session.plannedItems) {
+    if (plannedItem?.planKey && !session.plannedItemByKey.has(plannedItem.planKey)) {
+      session.plannedItemByKey.set(plannedItem.planKey, plannedItem);
+    }
+  }
+  session.plannedContainers = containerDetails;
+  session.planCursor = session.plannedItems.length;
+  session.planReady = true;
+  session.errors = Array.isArray(chainPreview.errors)
+    ? [...chainPreview.errors]
+    : (Array.isArray(dbSession.chainErrors) ? [...dbSession.chainErrors] : []);
+
+  touchBatchChainSession(session);
+  batchChainSessions.set(session.id, session);
+  return session;
+}
+
+async function hydrateBatchChainSessionForDownload({ sessionId, previewRunId }) {
+  const normalizedSessionId = normalizeSessionId(sessionId);
+  const normalizedPreviewRunId = normalizeSessionId(previewRunId);
+
+  if (normalizedSessionId && batchChainSessions.has(normalizedSessionId)) {
+    return batchChainSessions.get(normalizedSessionId);
+  }
+
+  const candidates = [];
+  if (normalizedPreviewRunId) candidates.push(normalizedPreviewRunId);
+  if (normalizedSessionId) candidates.push(normalizedSessionId);
+
+  for (const candidateId of unique(candidates)) {
+    const dbSession = await db.getBatchSession(candidateId).catch(() => null);
+    if (dbSession?.sessionData?.type !== 'preview') continue;
+
+    const hydratedSession = hydrateBatchChainSessionFromPersistedPreview(dbSession, normalizedSessionId);
+    if (hydratedSession) {
+      return hydratedSession;
+    }
+  }
+
+  return null;
+}
+
 function shouldContinuePreviewAfterError(run, error) {
   const maxRetries = Math.max(0, Number(run?.maxPreviewRetries || 0));
   if (Number(run?.previewRetryCount || 0) >= maxRetries) {
@@ -4139,6 +4233,8 @@ const zeniusController = {
         message: 'Zenius batch chain session started',
         data: {
           sessionId: run.id,
+          previewRunId: run.id,
+          planSessionId: run.sessionId,
           status: serializeBackgroundBatchRun(run)
         }
       });
@@ -4187,18 +4283,22 @@ const zeniusController = {
   async downloadBatch(req, res) {
     try {
       const sessionId = normalizeSessionId(req.body?.sessionId);
-      if (!sessionId || !batchChainSessions.has(sessionId)) {
+      const previewRunId = normalizeSessionId(req.body?.previewRunId);
+      const session = await hydrateBatchChainSessionForDownload({ sessionId, previewRunId });
+      if (!session) {
         return res.status(400).json({
           success: false,
-          error: 'Preview chain required before batch download. Call /batch-chain first to build a preview session, then pass the sessionId here.'
+          error: 'Preview chain required before batch download. Call /batch-chain first to build a preview session, then pass the plan sessionId here.',
+          details: {
+            receivedSessionId: sessionId,
+            receivedPreviewRunId: previewRunId,
+            sessionInMemory: sessionId ? batchChainSessions.has(sessionId) : false
+          }
         });
       }
 
       // Touch the session BEFORE cleanup to ensure it won't be expired
-      const session = batchChainSessions.get(sessionId);
-      if (session) {
-        touchBatchChainSession(session);
-      }
+      touchBatchChainSession(session);
 
       cleanupExpiredBatchChainSessions();
       cleanupExpiredBackgroundBatchRuns();
@@ -4211,7 +4311,16 @@ const zeniusController = {
       if (!session || session.planContextKey !== planningContext.key || !session.planReady) {
         return res.status(400).json({
           success: false,
-          error: 'Preview plan is not ready for this folder/providers context. Call /batch-chain until hasMoreContainers=false and planReady=true, then start batch download.'
+          error: 'Preview plan is not ready for this folder/providers context. Call /batch-chain until hasMoreContainers=false and planReady=true, then start batch download.',
+          details: {
+            receivedSessionId: sessionId,
+            actualSessionId: session?.id || null,
+            planReady: Boolean(session?.planReady),
+            expectedContextKey: session?.planContextKey || null,
+            requestedContextKey: planningContext.key,
+            requestedFolder: baseFolderInput,
+            requestedProviders: selectedProviders
+          }
         });
       }
 
@@ -4230,14 +4339,14 @@ const zeniusController = {
         keepaliveUrl
       });
 
-      run.sessionId = sessionId;
+      run.sessionId = session.id;
 
       backgroundBatchRuns.set(run.id, run);
       ensureBackgroundBatchKeepalive(keepaliveUrl);
 
       eventEmitter.emit('zenius:batch:started', {
         batchRunId: run.id,
-        sessionId,
+        sessionId: session.id,
         rootCgId: run.rootCgId,
         targetCgSelector: run.targetCgSelector,
         baseFolderInput,
@@ -4547,3 +4656,12 @@ async function persistAllBatchRunsToDb() {
 
 module.exports = zeniusController;
 module.exports.persistAllBatchRunsToDb = persistAllBatchRunsToDb;
+if (process.env.NODE_ENV === 'test') {
+  module.exports.__test = {
+    batchChainSessions,
+    hydrateBatchChainSessionFromPersistedPreview,
+    hydrateBatchChainSessionForDownload,
+    normalizePlanningContext,
+    serializeBatchPreviewSession
+  };
+}
