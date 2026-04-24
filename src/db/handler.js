@@ -1455,12 +1455,13 @@ class DatabaseHandler {
     }
 
     const [childrenRows] = await this.pool.query('SELECT * FROM folders WHERE parent_id = ? ORDER BY name ASC', [folderId]);
-    const files = await this.listFiles(folderId);
+    const [fileCountRows] = await this.pool.query('SELECT COUNT(*) AS count FROM files WHERE folder_id = ?', [folderId]);
 
     return {
       ...this._mapFolderRow(folder),
       children: childrenRows.map((row) => this._mapFolderRow(row)),
-      files
+      files: [],
+      fileCount: toInt(fileCountRows[0]?.count)
     };
   }
 
@@ -1468,12 +1469,11 @@ class DatabaseHandler {
     await this._ready();
 
     const [folderRows] = await this.pool.query('SELECT * FROM folders ORDER BY created_at ASC');
-    const [fileRows] = await this.pool.query('SELECT * FROM files ORDER BY created_at DESC');
-    const files = await this._hydrateFiles(fileRows);
+    const [fileCountRows] = await this.pool.query('SELECT folder_id, COUNT(*) AS count FROM files GROUP BY folder_id');
 
     const folders = folderRows.map((row) => this._mapFolderRow(row));
     const foldersByParent = new Map();
-    const filesByFolder = new Map();
+    const fileCountByFolder = new Map();
 
     for (const folder of folders) {
       const key = folder.parentId || '__root__';
@@ -1481,20 +1481,21 @@ class DatabaseHandler {
       foldersByParent.get(key).push(folder);
     }
 
-    for (const file of files) {
-      if (!filesByFolder.has(file.folderId)) filesByFolder.set(file.folderId, []);
-      filesByFolder.get(file.folderId).push(file);
+    for (const row of fileCountRows) {
+      fileCountByFolder.set(row.folder_id, toInt(row.count));
     }
 
     const buildTree = (parentId) => {
       const childFolders = (foldersByParent.get(parentId) || []).map((folder) => ({
         ...folder,
+        fileCount: fileCountByFolder.get(folder.id) || 0,
         children: buildTree(folder.id)
       }));
 
       return {
         folders: childFolders,
-        files: filesByFolder.get(parentId) || []
+        files: [],
+        fileCount: fileCountByFolder.get(parentId) || 0
       };
     };
 

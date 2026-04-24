@@ -677,7 +677,7 @@ export default function FileListPage() {
         const childNode = folder.children || { folders: [], files: [] };
         map.set(folder.id, {
           folderCount: (childNode.folders || []).length,
-          fileCount: (childNode.files || []).length
+          fileCount: Number(folder.fileCount ?? childNode.fileCount ?? (childNode.files || []).length)
         });
         walk(childNode);
       });
