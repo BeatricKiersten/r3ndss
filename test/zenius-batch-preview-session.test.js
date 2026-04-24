@@ -35,6 +35,7 @@ const {
   batchChainSessions,
   hydrateBatchChainSessionFromPersistedPreview,
   hydrateBatchChainSessionForDownload,
+  buildBatchChain,
   normalizePlanningContext,
   serializeBatchPreviewSession
 } = controller.__test;
@@ -169,5 +170,24 @@ describe('Zenius batch preview session contract', () => {
 
     expect(session).toBeNull();
     expect(batchChainSessions.has('plan-session-1')).toBe(false);
+  });
+
+  test('recreates a missing preview plan session using the bound sessionId', async () => {
+    const chain = await buildBatchChain({
+      rootCgId: '34',
+      targetCgSelector: '99',
+      parentContainerName: 'Parent',
+      requestContext: {},
+      refererPath: '',
+      baseFolderInput: 'kelas-10',
+      selectedProviders: ['catbox'],
+      sessionId: 'bound-plan-session',
+      containerOffset: 0,
+      containerLimit: 1,
+      allowSessionReuse: true
+    });
+
+    expect(chain.sessionId).toBe('bound-plan-session');
+    expect(batchChainSessions.has('bound-plan-session')).toBe(true);
   });
 });

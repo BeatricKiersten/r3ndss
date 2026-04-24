@@ -512,10 +512,10 @@ function normalizeSessionId(rawValue) {
   return value || null;
 }
 
-function createBatchChainSession({ rootCgId, targetCgSelector, parentContainerName }) {
+function createBatchChainSession({ id = null, rootCgId, targetCgSelector, parentContainerName }) {
   const now = Date.now();
   return {
-    id: randomUUID(),
+    id: normalizeSessionId(id) || randomUUID(),
     createdAt: now,
     updatedAt: now,
     expiresAt: now + clampPositiveInt(BATCH_SESSION_TTL_MS, 900000),
@@ -2991,6 +2991,7 @@ async function buildBatchChain({
 
   if (!session) {
     session = createBatchChainSession({
+      id: allowSessionReuse ? normalizedSessionId : null,
       rootCgId: normalizedRootCgId,
       targetCgSelector: normalizedTargetSelector,
       parentContainerName: normalizedParentContainerName
@@ -4661,6 +4662,7 @@ if (process.env.NODE_ENV === 'test') {
     batchChainSessions,
     hydrateBatchChainSessionFromPersistedPreview,
     hydrateBatchChainSessionForDownload,
+    buildBatchChain,
     normalizePlanningContext,
     serializeBatchPreviewSession
   };
