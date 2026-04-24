@@ -64,8 +64,10 @@ import { useWebSocketStore } from '../store/websocketStore';
 const HEADERS_STORAGE_KEY = 'zenius-headers-raw';
 const PROVIDERS_STORAGE_KEY = 'zenius-selected-providers';
 const BATCH_PREVIEW_SESSION_STORAGE_KEY = 'zenius-batch-preview-session';
-const BATCH_DOWNLOAD_CHUNK_SIZE = 6;
+const BATCH_DOWNLOAD_CHUNK_SIZE = 24;
 const BATCH_REQUEST_BUDGET_MS = 24000;
+const BATCH_PREVIEW_POLL_INTERVAL_MS = 2000;
+const BATCH_PREVIEW_ROW_RENDER_LIMIT = 300;
 
 function loadSavedBatchPreviewSession() {
   try {
@@ -1122,7 +1124,7 @@ export default function ZeniusPage() {
         }
         console.error('Failed to recover zenius batch chain status:', error);
       });
-    }, 4000);
+    }, BATCH_PREVIEW_POLL_INTERVAL_MS);
 
     return () => {
       if (batchChainPollRef.current) {
@@ -1248,7 +1250,7 @@ export default function ZeniusPage() {
     : previewPollErrorCount > 0
       ? 'text-amber-300'
       : 'text-sky-300';
-  const batchPreviewRows = useMemo(() => {
+  const allBatchPreviewRows = useMemo(() => {
     const trackedPreviewItems = Array.isArray(trackedPreviewRun?.previewItems) ? trackedPreviewRun.previewItems : [];
     const plannedItems = trackedPreviewItems.length > 0
       ? trackedPreviewItems
@@ -1296,13 +1298,15 @@ export default function ZeniusPage() {
       })
     );
   }, [batchChain, normalizedBatchFolderPrefix, trackedPreviewRun]);
+  const batchPreviewRows = useMemo(() => allBatchPreviewRows.slice(0, BATCH_PREVIEW_ROW_RENDER_LIMIT), [allBatchPreviewRows]);
+  const hiddenBatchPreviewRowCount = Math.max(0, allBatchPreviewRows.length - batchPreviewRows.length);
   const batchActionSummary = useMemo(() => {
-    return batchPreviewRows.reduce((summary, item) => {
+    return allBatchPreviewRows.reduce((summary, item) => {
       const key = item.action || 'pending';
       summary[key] = (summary[key] || 0) + 1;
       return summary;
     }, {});
-  }, [batchPreviewRows]);
+  }, [allBatchPreviewRows]);
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
@@ -2035,6 +2039,11 @@ export default function ZeniusPage() {
                       {previewItemsSummary.skippedItemsOverflow > 0 ? ` Skip overflow: +${previewItemsSummary.skippedItemsOverflow}.` : ''}
                       {previewItemsSummary.retryItemsOverflow > 0 ? ` Retry overflow: +${previewItemsSummary.retryItemsOverflow}.` : ''}
                       {previewItemsSummary.finalizeItemsOverflow > 0 ? ` Finalize overflow: +${previewItemsSummary.finalizeItemsOverflow}.` : ''}
+                    </div>
+                  )}
+                  {hiddenBatchPreviewRowCount > 0 && (
+                    <div className="mb-3 p-2 rounded border border-[#2a2a2a] bg-[#111] text-[11px] text-[#7f7f7f]">
+                      Tabel hanya merender {BATCH_PREVIEW_ROW_RENDER_LIMIT} baris pertama agar UI tetap responsif. {hiddenBatchPreviewRowCount} baris lain tetap masuk plan batch download.
                     </div>
                   )}
                   <div className="max-h-64 overflow-auto rounded-lg border border-[#222] bg-[#0d0d0d]">

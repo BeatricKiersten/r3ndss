@@ -41,7 +41,8 @@ const BATCH_SESSION_TTL_MS = Number.parseInt(process.env.ZENIUS_BATCH_SESSION_TT
 const BATCH_UPSTREAM_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_BATCH_UPSTREAM_TIMEOUT_MS || '7000', 10);
 const BATCH_UPSTREAM_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_BATCH_UPSTREAM_MAX_RETRIES || '1', 10);
 const BATCH_DEADLINE_GUARD_MS = Number.parseInt(process.env.ZENIUS_BATCH_DEADLINE_GUARD_MS || '1200', 10);
-const BACKGROUND_BATCH_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BACKGROUND_BATCH_CHUNK_SIZE || '6', 10);
+const BACKGROUND_BATCH_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BACKGROUND_BATCH_CHUNK_SIZE || '24', 10);
+const BATCH_DOWNLOAD_MAX_QUEUED_MULTIPLIER = Number.parseInt(process.env.ZENIUS_BATCH_DOWNLOAD_MAX_QUEUED_MULTIPLIER || '4', 10);
 const BACKGROUND_BATCH_RUN_TTL_MS = Number.parseInt(process.env.ZENIUS_BACKGROUND_BATCH_RUN_TTL_MS || '21600000', 10);
 const BACKGROUND_BATCH_KEEPALIVE_INTERVAL_MS = Number.parseInt(process.env.ZENIUS_BACKGROUND_BATCH_KEEPALIVE_INTERVAL_MS || '20000', 10);
 const BACKGROUND_BATCH_KEEPALIVE_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_BACKGROUND_BATCH_KEEPALIVE_TIMEOUT_MS || '10000', 10);
@@ -96,7 +97,7 @@ async function withDbRetry(fn, label = 'db-write') {
 }
 
 // Download concurrency control
-const DEFAULT_MAX_CONCURRENT_DOWNLOADS = Number.parseInt(process.env.ZENIUS_MAX_CONCURRENT_DOWNLOADS || '4', 10);
+const DEFAULT_MAX_CONCURRENT_DOWNLOADS = Number.parseInt(process.env.ZENIUS_MAX_CONCURRENT_DOWNLOADS || '6', 10);
 
 class DownloadQueue {
   constructor(maxConcurrent) {
@@ -457,6 +458,13 @@ async function waitForDownloadQueueCapacity({ cancelled = () => false, maxQueued
     }
     await sleep(pollMs);
   }
+}
+
+function getBatchDownloadMaxQueued() {
+  return Math.max(
+    downloadQueue.maxConcurrent,
+    downloadQueue.maxConcurrent * clampPositiveInt(BATCH_DOWNLOAD_MAX_QUEUED_MULTIPLIER, 4)
+  );
 }
 
 function bodyPreview(data) {
@@ -3429,6 +3437,14 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
       const existingFile = plannedItem.fileId ? await db.getFile(plannedItem.fileId).catch(() => null) : null;
       const hasLocalSource = Boolean(existingFile?.localPath && await fs.pathExists(existingFile.localPath));
       if (!hasLocalSource) {
+        await waitForDownloadQueueCapacity({
+          cancelled,
+          maxQueued: getBatchDownloadMaxQueued()
+        });
+        if (cancelled()) {
+          break;
+        }
+
         const requestedFilename = String(plannedItem.outputName || '').replace(/\.mp4$/i, '');
         const queuedDownloadPromise = queueDownload({
           urlShortId: plannedItem.urlShortId,
@@ -3520,6 +3536,14 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
     const uploadProviders = Array.isArray(plannedItem.pendingProviders) && plannedItem.pendingProviders.length > 0
       ? plannedItem.pendingProviders
       : plannedItem.selectedProviders;
+    await waitForDownloadQueueCapacity({
+      cancelled,
+      maxQueued: getBatchDownloadMaxQueued()
+    });
+    if (cancelled()) {
+      break;
+    }
+
     const queuedDownloadPromise = queueDownload({
       urlShortId: plannedItem.urlShortId,
       folderId: plannedItem.folderId,
@@ -4663,7 +4687,13 @@ if (process.env.NODE_ENV === 'test') {
     hydrateBatchChainSessionFromPersistedPreview,
     hydrateBatchChainSessionForDownload,
     buildBatchChain,
+    getBatchDownloadMaxQueued,
     normalizePlanningContext,
-    serializeBatchPreviewSession
+    serializeBatchPreviewSession,
+    constants: {
+      BACKGROUND_BATCH_CHUNK_SIZE,
+      BATCH_DOWNLOAD_MAX_QUEUED_MULTIPLIER,
+      DEFAULT_MAX_CONCURRENT_DOWNLOADS
+    }
   };
 }
