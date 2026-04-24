@@ -101,14 +101,14 @@ function normalizeFolderInput(rawValue) {
   return normalized.trim();
 }
 
-function buildPreviewContextSignature({ rootCgId, targetCgSelector, parentContainerName, folderPrefix, providers, fastPreview }) {
+function buildPreviewContextSignature({ rootCgId, targetCgSelector, parentContainerName, folderPrefix, providers, previewMode }) {
   return JSON.stringify({
     rootCgId: String(rootCgId || '').trim(),
     targetCgSelector: String(targetCgSelector || '').trim(),
     parentContainerName: String(parentContainerName || '').trim(),
     folderPrefix: normalizeFolderInput(folderPrefix),
     providers: Array.isArray(providers) ? [...providers].sort() : [],
-    fastPreview: Boolean(fastPreview)
+    previewMode: previewMode || 'fast'
   });
 }
 
@@ -714,7 +714,7 @@ export default function ZeniusPage() {
   const [batchTargetCgSelector, setBatchTargetCgSelector] = useState('');
   const [batchParentContainerName, setBatchParentContainerName] = useState('');
   const [batchFolderPrefix, setBatchFolderPrefix] = useState('');
-  const [batchFastPreview, setBatchFastPreview] = useState(true);
+  const [batchPreviewMode, setBatchPreviewMode] = useState('fast');
   const [batchChain, setBatchChain] = useState(null);
   const [batchResult, setBatchResult] = useState(null);
   const savedPreviewSession = useMemo(() => loadSavedBatchPreviewSession(), []);
@@ -799,8 +799,8 @@ export default function ZeniusPage() {
     parentContainerName: batchParentContainerName,
     folderPrefix: normalizedBatchFolderPrefix,
     providers: selectedProviders,
-    fastPreview: batchFastPreview
-  }), [batchRootCgId, batchTargetCgSelector, batchParentContainerName, normalizedBatchFolderPrefix, selectedProviders, batchFastPreview]);
+    previewMode: batchPreviewMode
+  }), [batchRootCgId, batchTargetCgSelector, batchParentContainerName, normalizedBatchFolderPrefix, selectedProviders, batchPreviewMode]);
 
   const trackedPreviewRun = useMemo(() => {
     const runs = Array.isArray(queueStatus?.backgroundBatches) ? queueStatus.backgroundBatches : [];
@@ -966,7 +966,7 @@ export default function ZeniusPage() {
         parentContainerName: batchParentContainerName,
         folderPrefix: normalizedBatchFolderPrefix,
         providers: selectedProviders,
-        fastPreview: batchFastPreview
+        previewMode: batchPreviewMode
       });
       if (batchChainPollRef.current) {
         window.clearInterval(batchChainPollRef.current);
@@ -991,7 +991,8 @@ export default function ZeniusPage() {
         timeBudgetMs: BATCH_REQUEST_BUDGET_MS,
         providers: selectedProviders.length > 0 ? selectedProviders : null,
         folderId: normalizedBatchFolderPrefix || null,
-        fastPreview: batchFastPreview
+        fastPreview: batchPreviewMode !== 'full',
+        ultraFastPreview: batchPreviewMode === 'ultra'
       });
 
       const startedPreviewRunId = started?.previewRunId || started?.sessionId || started?.status?.id || null;
@@ -1822,23 +1823,32 @@ export default function ZeniusPage() {
                 <div>
                   <p className="text-sm text-[#ddd]">Preview Mode</p>
                   <p className="text-xs text-[#666]">
-                    {batchFastPreview
-                      ? 'Fast: hanya cek file exists/missing, provider dicek saat batch download.'
-                      : 'Full: preview cek status provider, action summary lebih presisi.'}
+                    {batchPreviewMode === 'ultra'
+                      ? 'Ultra: preview tidak cek duplicate/provider; semua validasi dilakukan saat batch download.'
+                      : batchPreviewMode === 'fast'
+                        ? 'Fast: cek duplicate file efisien, provider dicek saat batch download.'
+                        : 'Full: preview cek duplicate file dan status provider, summary paling presisi.'}
                   </p>
                 </div>
                 <div className="flex rounded-lg border border-[#333] bg-[#111] p-1 text-xs">
                   <button
                     type="button"
-                    onClick={() => setBatchFastPreview(true)}
-                    className={`px-3 py-1.5 rounded-md transition-colors ${batchFastPreview ? 'bg-amber-500/20 text-amber-300' : 'text-[#777] hover:text-[#ddd]'}`}
+                    onClick={() => setBatchPreviewMode('ultra')}
+                    className={`px-3 py-1.5 rounded-md transition-colors ${batchPreviewMode === 'ultra' ? 'bg-violet-500/20 text-violet-300' : 'text-[#777] hover:text-[#ddd]'}`}
+                  >
+                    Ultra
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBatchPreviewMode('fast')}
+                    className={`px-3 py-1.5 rounded-md transition-colors ${batchPreviewMode === 'fast' ? 'bg-amber-500/20 text-amber-300' : 'text-[#777] hover:text-[#ddd]'}`}
                   >
                     Fast
                   </button>
                   <button
                     type="button"
-                    onClick={() => setBatchFastPreview(false)}
-                    className={`px-3 py-1.5 rounded-md transition-colors ${!batchFastPreview ? 'bg-emerald-500/20 text-emerald-300' : 'text-[#777] hover:text-[#ddd]'}`}
+                    onClick={() => setBatchPreviewMode('full')}
+                    className={`px-3 py-1.5 rounded-md transition-colors ${batchPreviewMode === 'full' ? 'bg-emerald-500/20 text-emerald-300' : 'text-[#777] hover:text-[#ddd]'}`}
                   >
                     Full
                   </button>

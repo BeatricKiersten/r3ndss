@@ -59,6 +59,7 @@ const BATCH_PREVIEW_LOOP_DELAY_MS = Number.parseInt(process.env.ZENIUS_BATCH_PRE
 const BATCH_PREVIEW_RETRY_LIMIT = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_RETRY_LIMIT || '5', 10);
 const BATCH_PREVIEW_RETRY_DELAY_MS = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_RETRY_DELAY_MS || '1500', 10);
 const BATCH_FAST_PREVIEW = parseBoolean(process.env.ZENIUS_BATCH_FAST_PREVIEW) === true;
+const BATCH_ULTRA_FAST_PREVIEW = parseBoolean(process.env.ZENIUS_BATCH_ULTRA_FAST_PREVIEW) === true;
 const PREVIEW_ITEMS_SAMPLE_LIMIT = Number.parseInt(process.env.ZENIUS_PREVIEW_ITEMS_SAMPLE_LIMIT || '500', 10);
 const PREVIEW_ACTION_ITEMS_SAMPLE_LIMIT = Number.parseInt(process.env.ZENIUS_PREVIEW_ACTION_ITEMS_SAMPLE_LIMIT || '300', 10);
 const PREVIEW_RUN_RECOVERY_GRACE_MS = Number.parseInt(process.env.ZENIUS_PREVIEW_RUN_RECOVERY_GRACE_MS || '300000', 10);
@@ -685,7 +686,7 @@ function createBackgroundBatchRun({ rootCgId, targetCgSelector, baseFolderInput,
   };
 }
 
-function createBackgroundBatchPreviewRun({ rootCgId, targetCgSelector, parentContainerName, baseFolderInput, selectedProviders, keepaliveUrl, headersRaw, refererPath, fastPreview = BATCH_FAST_PREVIEW }) {
+function createBackgroundBatchPreviewRun({ rootCgId, targetCgSelector, parentContainerName, baseFolderInput, selectedProviders, keepaliveUrl, headersRaw, refererPath, fastPreview = BATCH_FAST_PREVIEW, ultraFastPreview = BATCH_ULTRA_FAST_PREVIEW }) {
   const run = createBackgroundBatchRun({
     rootCgId,
     targetCgSelector,
@@ -697,6 +698,7 @@ function createBackgroundBatchPreviewRun({ rootCgId, targetCgSelector, parentCon
 
   run.type = 'preview';
   run.fastPreview = Boolean(fastPreview);
+  run.ultraFastPreview = Boolean(ultraFastPreview);
   run.status = 'running';
   run.parentContainerName = String(parentContainerName || '').trim() || null;
   run.previewLoopStarted = false;
@@ -730,6 +732,7 @@ function createBackgroundBatchPreviewRun({ rootCgId, targetCgSelector, parentCon
     baseFolderInput: String(baseFolderInput || '').trim() || '',
     selectedProviders: Array.isArray(selectedProviders) ? [...selectedProviders] : null,
     fastPreview: Boolean(fastPreview),
+    ultraFastPreview: Boolean(ultraFastPreview),
     headersRaw: String(headersRaw || ''),
     refererPath: String(refererPath || '').trim() || ''
   };
@@ -1052,6 +1055,7 @@ function serializeBatchPreviewSession(session) {
     sessionId: session.id,
     type: session.type || null,
     fastPreview: Boolean(session.fastPreview),
+    ultraFastPreview: Boolean(session.ultraFastPreview),
     rootCgId: session.rootCgId,
     rootCgName: session.rootCgName,
     targetCgSelector: session.targetCgSelector,
@@ -1111,6 +1115,7 @@ function serializeBatchChainSessionState(session, overrides = {}) {
     sessionId: session.id,
     type: session.type || null,
     fastPreview: Boolean(session.fastPreview),
+    ultraFastPreview: Boolean(session.ultraFastPreview),
     rootCgId: session.rootCgId,
     rootCgName: session.rootCgName,
     targetCgSelector: session.targetCgSelector,
@@ -1317,6 +1322,7 @@ function hydrateBatchChainSessionFromPersistedPreview(dbSession, requestedPlanSe
   session.id = planSessionId;
   session.type = sessionData.type || chainPreview.type || null;
   session.fastPreview = Boolean(sessionData.fastPreview || chainPreview.fastPreview);
+  session.ultraFastPreview = Boolean(sessionData.ultraFastPreview || chainPreview.ultraFastPreview);
   session.rootCgName = chainPreview.rootCgName || sessionData.rootCgName || dbSession.rootCgName || null;
   session.discoveryInitialized = true;
   session.discoveryDone = true;
@@ -2529,6 +2535,71 @@ async function loadExistingFolderMap(session = null) {
   return folderIdByInputKey;
 }
 
+function putExistingFileRow(existingByFolderId, row) {
+  const folderId = String(row?.folder_id || '').trim();
+  const nameKey = String(row?.name || '').trim();
+  if (!folderId || !nameKey) {
+    return false;
+  }
+
+  if (!existingByFolderId.has(folderId)) {
+    existingByFolderId.set(folderId, new Map());
+  }
+
+  const byName = existingByFolderId.get(folderId);
+  if (byName.has(nameKey)) {
+    return false;
+  }
+
+  byName.set(nameKey, {
+    id: row.id,
+    name: row.name,
+    folder_id: row.folder_id,
+    status: row.status,
+    localPath: row.local_path || null
+  });
+  return true;
+}
+
+async function queryExistingFilesByFolderNames(plannedNamesByFolderId, chunkSize = BATCH_FOLDER_PREFETCH_CHUNK_SIZE) {
+  const existingByFolderId = new Map();
+  const entries = Array.from(plannedNamesByFolderId.entries())
+    .map(([folderId, names]) => [String(folderId || '').trim(), Array.from(names || []).filter(Boolean)])
+    .filter(([folderId, names]) => folderId && names.length > 0);
+  const chunks = chunkArray(entries, chunkSize);
+  let queryCount = 0;
+  let rowCount = 0;
+
+  for (const chunk of chunks) {
+    const params = [];
+    const clauses = [];
+    for (const [folderId, names] of chunk) {
+      clauses.push(`(folder_id = ? AND name IN (${names.map(() => '?').join(', ')}))`);
+      params.push(folderId, ...names);
+    }
+
+    if (clauses.length === 0) {
+      continue;
+    }
+
+    const rows = await runDbQuery(
+      `SELECT id, folder_id, name, status, local_path
+         FROM files
+        WHERE ${clauses.join(' OR ')}
+        ORDER BY folder_id, name, created_at DESC`,
+      params
+    );
+    queryCount += 1;
+    rowCount += Array.isArray(rows) ? rows.length : 0;
+
+    for (const row of rows || []) {
+      putExistingFileRow(existingByFolderId, row);
+    }
+  }
+
+  return { existingByFolderId, queryCount, rowCount };
+}
+
 async function buildExistingFileLookup(containers, baseFolderInput, chunkSize = BATCH_FOLDER_PREFETCH_CHUNK_SIZE, session = null) {
   const plannedByFolderInput = new Map();
 
@@ -2562,7 +2633,6 @@ async function buildExistingFileLookup(containers, baseFolderInput, chunkSize = 
     }
   }
 
-  const existingByFolderId = new Map();
   const plannedNamesByFolderId = new Map();
   for (const [folderInput, plannedNames] of plannedByFolderInput.entries()) {
     const folderId = folderIdByInput.get(folderInput);
@@ -2580,53 +2650,7 @@ async function buildExistingFileLookup(containers, baseFolderInput, chunkSize = 
     }
   }
 
-  const resolvableFolderIds = Array.from(plannedNamesByFolderId.keys());
-  const folderIdChunks = chunkArray(resolvableFolderIds, chunkSize);
-
-  for (const folderIdChunk of folderIdChunks) {
-    if (folderIdChunk.length === 0) {
-      continue;
-    }
-
-    const placeholders = folderIdChunk.map(() => '?').join(', ');
-    const rows = await runDbQuery(
-      `SELECT id, folder_id, name, status, local_path
-         FROM files
-        WHERE folder_id IN (${placeholders})
-        ORDER BY created_at DESC`,
-      folderIdChunk
-    );
-
-    for (const row of rows || []) {
-      const folderId = String(row?.folder_id || '').trim();
-      const nameKey = String(row?.name || '').trim();
-      if (!folderId || !nameKey) {
-        continue;
-      }
-
-      const plannedNames = plannedNamesByFolderId.get(folderId);
-      if (!plannedNames || !plannedNames.has(nameKey)) {
-        continue;
-      }
-
-      if (!existingByFolderId.has(folderId)) {
-        existingByFolderId.set(folderId, new Map());
-      }
-
-      const byName = existingByFolderId.get(folderId);
-      if (byName.has(nameKey)) {
-        continue;
-      }
-
-      byName.set(nameKey, {
-        id: row.id,
-        name: row.name,
-        folder_id: row.folder_id,
-        status: row.status,
-        localPath: row.local_path || null
-      });
-    }
-  }
+  const { existingByFolderId } = await queryExistingFilesByFolderNames(plannedNamesByFolderId, chunkSize);
 
   return {
     folderIdByInput,
@@ -2752,7 +2776,8 @@ async function buildPlannedBatchItem({
   existingByFolderId,
   providerStatusByFileId,
   includeLocalSourceCheck = false,
-  fastPreview = false
+  fastPreview = false,
+  ultraFastPreview = false
 }) {
   const metadata = instance.metadata && typeof instance.metadata === 'object'
     ? { ...instance.metadata }
@@ -2806,6 +2831,17 @@ async function buildPlannedBatchItem({
       outputName
     }
   };
+
+  if (ultraFastPreview) {
+    plannedItem.action = 'download';
+    plannedItem.reason = 'Duplicate/provider validation deferred until execution';
+    plannedItem.pendingProviders = [];
+    plannedItem.executionDuplicateValidation = true;
+    return {
+      counted: true,
+      planned: plannedItem
+    };
+  }
 
   if (!existingFile) {
     return {
@@ -2922,7 +2958,8 @@ async function buildBatchPlanForContainer({
   existingByFolderId,
   providerStatusByFileId,
   includeLocalSourceCheck = false,
-  fastPreview = false
+  fastPreview = false,
+  ultraFastPreview = false
 }) {
   const plannedItems = [];
   const skipped = [];
@@ -2938,7 +2975,8 @@ async function buildBatchPlanForContainer({
       existingByFolderId,
       providerStatusByFileId,
       includeLocalSourceCheck,
-      fastPreview
+      fastPreview,
+      ultraFastPreview
     });
 
     if (result?.planned) {
@@ -2955,6 +2993,21 @@ async function buildBatchPlanForContainer({
     plannedItems,
     skipped
   };
+}
+
+function appendPlannedItemsToSession(session, plannedItems) {
+  if (!session || !Array.isArray(plannedItems)) {
+    return;
+  }
+
+  for (const plannedItem of plannedItems) {
+    if (!plannedItem?.planKey || session.plannedItemByKey.has(plannedItem.planKey)) {
+      continue;
+    }
+
+    session.plannedItemByKey.set(plannedItem.planKey, plannedItem);
+    session.plannedItems.push(plannedItem);
+  }
 }
 
 async function queueBatchDownloadItem({
@@ -3248,17 +3301,23 @@ async function buildBatchChain({
 
     const planLimit = pLimit(clampPositiveInt(BATCH_INSTANCE_METADATA_CONCURRENCY, 12));
     const planResults = await Promise.all(
-      details.map((containerDetail) => planLimit(async () => buildBatchPlanForContainer({
-        containerDetail,
-        baseFolderInput: planningContext.baseFolderInput,
-        selectedProviders: prefetchContext.selectedProviders,
-        folderCache: session.planFolderCache,
-        folderIdByInput: prefetchContext.folderIdByInput,
-        existingByFolderId: prefetchContext.existingByFolderId,
-        providerStatusByFileId: prefetchContext.providerStatusByFileId,
-        includeLocalSourceCheck: false,
-        fastPreview: Boolean(prefetchContext.fastPreview)
-      })))
+      details.map((containerDetail) => planLimit(async () => {
+        const resolved = await buildBatchPlanForContainer({
+          containerDetail,
+          baseFolderInput: planningContext.baseFolderInput,
+          selectedProviders: prefetchContext.selectedProviders,
+          folderCache: session.planFolderCache,
+          folderIdByInput: prefetchContext.folderIdByInput,
+          existingByFolderId: prefetchContext.existingByFolderId,
+          providerStatusByFileId: prefetchContext.providerStatusByFileId,
+          includeLocalSourceCheck: false,
+          fastPreview: Boolean(prefetchContext.fastPreview),
+          ultraFastPreview: Boolean(prefetchContext.ultraFastPreview)
+        });
+
+        appendPlannedItemsToSession(session, resolved?.plannedItems || []);
+        return resolved;
+      }))
     );
 
     for (const resolved of planResults) {
@@ -3273,15 +3332,6 @@ async function buildBatchChain({
   if (normalizedOffset === session.planCursor) {
     for (const containerDetail of details) {
       session.plannedContainers.push(containerDetail);
-    }
-
-    for (const plannedItem of plannedItems) {
-      if (!plannedItem?.planKey || session.plannedItemByKey.has(plannedItem.planKey)) {
-        continue;
-      }
-
-      session.plannedItemByKey.set(plannedItem.planKey, plannedItem);
-      session.plannedItems.push(plannedItem);
     }
 
     session.planCursor = cursor;
@@ -3413,6 +3463,7 @@ function queueDownload(task) {
 
 async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, selectedProviders, session = null }) {
   const fastPreview = Boolean(session?.fastPreview);
+  const ultraFastPreview = Boolean(session?.ultraFastPreview);
   const activeProviders = Array.isArray(selectedProviders) && selectedProviders.length > 0
     ? selectedProviders
     : await getEnabledProviderIds();
@@ -3455,6 +3506,7 @@ async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, sel
   let missingFolderCount = Number(cache.stats.missingFolderCount || 0);
   let folderQueryCount = 0;
   let fileRowCount = 0;
+  const missingNamesByFolderId = new Map();
 
   for (const [folderInput, plannedNames] of plannedByFolderInput.entries()) {
     const folderKey = normalizeFolderInputKey(folderInput);
@@ -3469,6 +3521,10 @@ async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, sel
     }
 
     if (!folderId) {
+      continue;
+    }
+
+    if (ultraFastPreview) {
       continue;
     }
 
@@ -3488,31 +3544,29 @@ async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, sel
       continue;
     }
 
-    const placeholders = missingNames.map(() => '?').join(', ');
-    const rows = await runDbQuery(
-      `SELECT id, folder_id, name, status, local_path
-         FROM files
-        WHERE folder_id = ?
-          AND name IN (${placeholders})
-        ORDER BY created_at DESC`,
-      [folderId, ...missingNames]
-    );
-    folderQueryCount += 1;
-    fileRowCount += Array.isArray(rows) ? rows.length : 0;
+    missingNamesByFolderId.set(folderId, new Set(missingNames));
+  }
 
-    for (const row of rows || []) {
-      const nameKey = String(row?.name || '').trim();
+  const fileLookup = ultraFastPreview
+    ? { existingByFolderId: new Map(), queryCount: 0, rowCount: 0 }
+    : await queryExistingFilesByFolderNames(
+      missingNamesByFolderId,
+      clampPositiveInt(BATCH_FOLDER_PREFETCH_CHUNK_SIZE, 80)
+    );
+  folderQueryCount = fileLookup.queryCount;
+  fileRowCount = fileLookup.rowCount;
+
+  for (const [folderId, byName] of fileLookup.existingByFolderId.entries()) {
+    if (!cache.existingByFolderId.has(folderId)) {
+      cache.existingByFolderId.set(folderId, new Map());
+    }
+
+    const knownByName = cache.existingByFolderId.get(folderId);
+    for (const [nameKey, file] of byName.entries()) {
       if (!nameKey || knownByName.has(nameKey)) {
         continue;
       }
-
-      knownByName.set(nameKey, {
-        id: row.id,
-        name: row.name,
-        folder_id: row.folder_id,
-        status: row.status,
-        localPath: row.local_path || null
-      });
+      knownByName.set(nameKey, file);
     }
   }
 
@@ -3530,7 +3584,7 @@ async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, sel
     }
   }
 
-  if (!fastPreview) {
+  if (!fastPreview && !ultraFastPreview) {
     for (const fileIdChunk of chunkArray(newFileIds, clampPositiveInt(BATCH_PROVIDER_PREFETCH_CHUNK_SIZE, 200))) {
       if (fileIdChunk.length === 0) {
         continue;
@@ -3566,7 +3620,7 @@ async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, sel
     `[Zenius][Preview][DupeCheck] containers=${containerDetails.length} folders=${plannedByFolderInput.size} `
     + `folderQueries=${folderQueryCount} fileRows=${fileRowCount} newProviderFiles=${newFileIds.length} `
     + `providerRows=${Number(cache.stats.providerRowCount || 0)} selectedProviders=${Array.isArray(activeProviders) ? activeProviders.join(',') : 'all'} `
-    + `fastPreview=${fastPreview} durationMs=${Date.now() - startedAt}`
+    + `fastPreview=${fastPreview} ultraFastPreview=${ultraFastPreview} durationMs=${Date.now() - startedAt}`
   );
 
   return {
@@ -3578,7 +3632,8 @@ async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, sel
     prefetchMissingFolderCount: Number(cache.stats.missingFolderCount || 0),
     prefetchProviderFileCount: Number(cache.stats.providerFileCount || 0),
     prefetchProviderRowCount: Number(cache.stats.providerRowCount || 0),
-    fastPreview
+    fastPreview,
+    ultraFastPreview
   };
 }
 
@@ -3648,6 +3703,69 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
       } else {
         plannedItem.action = 'retry';
         plannedItem.reason = 'Retrying failed file';
+      }
+    }
+
+    if (plannedItem.executionDuplicateValidation) {
+      const outputFileName = String(plannedItem.outputName || '').trim();
+      const existingFile = outputFileName
+        ? await db.findFileByNameInFolder(plannedItem.folderId, outputFileName).catch(() => null)
+        : null;
+
+      if (existingFile) {
+        const existingStatus = String(existingFile.status || '').trim().toLowerCase();
+        plannedItem.fileId = existingFile.id;
+        plannedItem.existingStatus = existingStatus || null;
+
+        if (existingStatus === 'processing' || existingStatus === 'uploading') {
+          skipped.push({
+            urlShortId: plannedItem.urlShortId,
+            reason: 'File is already being processed',
+            path: plannedItem.path,
+            fileId: existingFile.id,
+            outputName: plannedItem.outputName,
+            uploadQueue: null,
+            pendingProviders: []
+          });
+          continue;
+        }
+
+        if (existingStatus === 'failed') {
+          plannedItem.action = 'retry';
+          plannedItem.reason = 'Retrying failed file';
+        } else {
+          const pendingProviderInfo = await uploaderService.getPendingUploadProviders(existingFile.id, plannedItem.selectedProviders, {
+            verifyRemote: false
+          });
+
+          if (!pendingProviderInfo.hasPendingProviders) {
+            skipped.push({
+              urlShortId: plannedItem.urlShortId,
+              reason: 'File already exists on selected providers',
+              path: plannedItem.path,
+              fileId: existingFile.id,
+              outputName: plannedItem.outputName,
+              uploadQueue: null,
+              pendingProviders: []
+            });
+            continue;
+          }
+
+          plannedItem.pendingProviders = pendingProviderInfo.pendingProviders || [];
+          if (existingFile.localPath && await fs.pathExists(existingFile.localPath)) {
+            plannedItem.action = 'finalize';
+            plannedItem.reason = 'File already exists locally; queued missing providers only';
+          } else {
+            plannedItem.action = 'download';
+            plannedItem.reason = `Existing file ${existingFile.id} is missing local source; re-downloading missing providers`;
+          }
+        }
+      } else {
+        plannedItem.action = 'download';
+        plannedItem.reason = 'Ready to download';
+        plannedItem.fileId = null;
+        plannedItem.existingStatus = null;
+        plannedItem.pendingProviders = [];
       }
     }
 
@@ -4433,7 +4551,8 @@ const zeniusController = {
 
       const selectedProviders = await normalizeProviders(req.body?.providers);
       const baseFolderInput = stripWrappingQuotes(req.body?.folderId || '');
-      const fastPreview = parseBoolean(req.body?.fastPreview) === true;
+      const ultraFastPreview = parseBoolean(req.body?.ultraFastPreview) === true;
+      const fastPreview = ultraFastPreview || parseBoolean(req.body?.fastPreview) === true;
       const keepaliveUrl = resolveBackgroundKeepaliveUrl(req);
 
       const run = createBackgroundBatchPreviewRun({
@@ -4445,7 +4564,8 @@ const zeniusController = {
         keepaliveUrl,
         headersRaw: req.body?.headersRaw || '',
         refererPath: req.body?.refererPath || '',
-        fastPreview
+        fastPreview,
+        ultraFastPreview
       });
 
       const previewSession = createBatchChainSession({
@@ -4455,6 +4575,7 @@ const zeniusController = {
       });
       previewSession.type = 'preview';
       previewSession.fastPreview = fastPreview;
+      previewSession.ultraFastPreview = ultraFastPreview;
       batchChainSessions.set(previewSession.id, previewSession);
       run.sessionId = previewSession.id;
 
@@ -4480,6 +4601,7 @@ const zeniusController = {
             type: 'preview',
             sessionId: run.sessionId,
             fastPreview: run.fastPreview,
+            ultraFastPreview: run.ultraFastPreview,
             baseFolderInput: baseFolderInput || '',
             selectedProviders,
             chainPreview: null,

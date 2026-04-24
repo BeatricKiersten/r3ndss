@@ -826,6 +826,7 @@ class DatabaseHandler {
       'CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders (parent_id)',
       'CREATE INDEX IF NOT EXISTS idx_files_folder ON files (folder_id)',
       'CREATE INDEX IF NOT EXISTS idx_files_folder_name ON files (folder_id, name)',
+      'CREATE INDEX IF NOT EXISTS idx_files_folder_name_created ON files (folder_id, name, created_at DESC)',
       'CREATE INDEX IF NOT EXISTS idx_files_folder_created ON files (folder_id, created_at DESC)',
       'CREATE INDEX IF NOT EXISTS idx_files_status ON files (status)',
       'CREATE INDEX IF NOT EXISTS idx_files_status_created ON files (status, created_at DESC)',
@@ -1018,6 +1019,16 @@ class DatabaseHandler {
           return indexes.length === 0;
         },
         sql: 'CREATE INDEX IF NOT EXISTS idx_files_folder_created ON files (folder_id, created_at DESC)'
+      },
+      {
+        name: 'add_files_folder_name_created_index',
+        check: async () => {
+          const [indexes] = await this.pool.query(
+            "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'files' AND indexname = 'idx_files_folder_name_created'"
+          );
+          return indexes.length === 0;
+        },
+        sql: 'CREATE INDEX IF NOT EXISTS idx_files_folder_name_created ON files (folder_id, name, created_at DESC)'
       },
       {
         name: 'add_files_status_created_index',

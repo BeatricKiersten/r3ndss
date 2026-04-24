@@ -292,7 +292,8 @@ export const useZeniusBatchChain = () => {
     containerOffset,
     containerLimit,
     timeBudgetMs,
-    fastPreview
+    fastPreview,
+    ultraFastPreview
   }) => {
     const response = await api.post('/api/zenius/batch-chain/start', {
       rootCgId,
@@ -306,7 +307,8 @@ export const useZeniusBatchChain = () => {
       containerOffset,
       containerLimit,
       timeBudgetMs,
-      fastPreview
+      fastPreview,
+      ultraFastPreview
     });
 
     return response.data.data;
