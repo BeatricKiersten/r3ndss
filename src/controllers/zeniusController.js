@@ -956,10 +956,69 @@ function summarizeBackgroundBatchRun(run) {
   };
 }
 
+function buildLivePreviewChain(run) {
+  if (!run?.sessionId) {
+    return null;
+  }
+
+  const session = batchChainSessions.get(run.sessionId);
+  if (!session) {
+    return null;
+  }
+
+  const processedContainerCount = session.containerDetailsByShortId instanceof Map
+    ? session.containerDetailsByShortId.size
+    : 0;
+
+  return serializeBatchChainSessionState(session, {
+    containerOffset: 0,
+    containerLimit: session.containerByShortId instanceof Map ? session.containerByShortId.size : null,
+    processedContainerCount,
+    hasMoreContainers: run.hasMoreContainers,
+    nextContainerOffset: run.nextContainerOffset,
+    skipped: run.chainPreview?.skipped || [],
+    prefetch: run.chainPreview?.prefetch || null
+  });
+}
+
+function applyLivePreviewSummary(summary, liveChain) {
+  if (!summary || !liveChain) {
+    return summary;
+  }
+
+  const livePreviewSummary = summarizePreviewChain(liveChain);
+  const processedContainers = Array.isArray(liveChain.containerDetails) ? liveChain.containerDetails.length : 0;
+  const totalContainers = Number(liveChain.totalContainers || summary.totalContainers || 0);
+  const discoveredVideoCount = Math.max(
+    Number(summary.discoveredVideoCount || 0),
+    Number(livePreviewSummary.plannedItemCount || 0),
+    Number(livePreviewSummary.previewVideoCount || 0)
+  );
+
+  summary.totalContainers = totalContainers;
+  summary.scannedContainerCount = Math.max(Number(summary.scannedContainerCount || 0), processedContainers);
+  summary.processedContainers = summary.scannedContainerCount;
+  summary.discoveredVideoCount = discoveredVideoCount;
+  summary.previewSummary = livePreviewSummary;
+  summary.containerProgress = {
+    processed: summary.scannedContainerCount,
+    total: totalContainers,
+    percent: totalContainers > 0 ? Math.round((summary.scannedContainerCount / totalContainers) * 100) : 0
+  };
+  summary.videoProgress = {
+    ...(summary.videoProgress || {}),
+    discovered: discoveredVideoCount
+  };
+
+  return summary;
+}
+
 function serializeBackgroundBatchRun(run, { includePreview = false } = {}) {
   const summary = summarizeBackgroundBatchRun(run);
+  const liveChain = run?.type === 'preview' ? buildLivePreviewChain(run) : null;
+  applyLivePreviewSummary(summary, liveChain);
   if (includePreview) {
-    summary.chainPreview = run?.chainPreview || null;
+    summary.chainPreview = liveChain || run?.chainPreview || null;
     summary.previewItems = Array.isArray(run?.previewItems) ? run.previewItems : [];
     summary.newItems = Array.isArray(run?.newItems) ? run.newItems : [];
     summary.skippedPreviewItems = Array.isArray(run?.skippedPreviewItems) ? run.skippedPreviewItems : [];
@@ -3145,6 +3204,11 @@ async function buildBatchChain({
           session
         });
 
+        const containerShortId = String(containerDetail?.containerUrlShortId || '').trim();
+        if (containerShortId) {
+          session.containerDetailsByShortId.set(containerShortId, containerDetail);
+        }
+
         return containerDetail || null;
       }))
     );
@@ -3154,10 +3218,6 @@ async function buildBatchChain({
         continue;
       }
 
-      const containerShortId = String(containerDetail.containerUrlShortId || '').trim();
-      if (containerShortId) {
-        session.containerDetailsByShortId.set(containerShortId, containerDetail);
-      }
       details.push(containerDetail);
     }
 
