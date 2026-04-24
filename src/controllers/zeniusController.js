@@ -969,16 +969,26 @@ function buildLivePreviewChain(run) {
   const processedContainerCount = session.containerDetailsByShortId instanceof Map
     ? session.containerDetailsByShortId.size
     : 0;
+  const totalContainers = session.containerByShortId instanceof Map ? session.containerByShortId.size : 0;
+  const livePlanReady = Boolean(session.planReady || (session.discoveryDone && totalContainers > 0 && processedContainerCount >= totalContainers));
 
-  return serializeBatchChainSessionState(session, {
+  const liveChain = serializeBatchChainSessionState(session, {
     containerOffset: 0,
-    containerLimit: session.containerByShortId instanceof Map ? session.containerByShortId.size : null,
+    containerLimit: totalContainers || null,
     processedContainerCount,
-    hasMoreContainers: run.hasMoreContainers,
-    nextContainerOffset: run.nextContainerOffset,
+    hasMoreContainers: livePlanReady ? false : run.hasMoreContainers,
+    nextContainerOffset: livePlanReady ? null : run.nextContainerOffset,
     skipped: run.chainPreview?.skipped || [],
     prefetch: run.chainPreview?.prefetch || null
   });
+
+  if (livePlanReady) {
+    liveChain.planReady = true;
+    liveChain.hasMoreContainers = false;
+    liveChain.nextContainerOffset = null;
+  }
+
+  return liveChain;
 }
 
 function applyLivePreviewSummary(summary, liveChain) {
@@ -1009,6 +1019,11 @@ function applyLivePreviewSummary(summary, liveChain) {
     ...(summary.videoProgress || {}),
     discovered: discoveredVideoCount
   };
+  if (liveChain.planReady) {
+    summary.status = 'completed';
+    summary.hasMoreContainers = false;
+    summary.nextContainerOffset = 0;
+  }
 
   return summary;
 }

@@ -1140,7 +1140,7 @@ export default function ZeniusPage() {
   }, [previewRunId, trackedPreviewRun, batchChain?.planReady]);
 
   const handleStartBatchDownload = () => {
-    if (!batchChain?.planReady) {
+    if (!isBatchChainReady) {
       toast.info('Preview belum selesai', 'Tunggu hingga chain preview selesai diproses sebelum start batch.');
       return;
     }
@@ -1240,7 +1240,11 @@ export default function ZeniusPage() {
   }, [batchChain]);
   const batchPreviewContainerCount = Number(batchChain?.containerDetails?.length || 0);
   const batchDiscoveredContainerCount = Number(batchChain?.containerList?.totalContainers || 0);
-  const isBatchChainReady = Boolean(batchChain?.planReady);
+  const isBatchChainReady = Boolean(batchChain?.planReady || (
+    batchChain?.discoveryDone
+    && Number(batchChain?.containerList?.totalContainers || 0) > 0
+    && Number(batchChain?.containerDetails?.length || 0) >= Number(batchChain?.containerList?.totalContainers || 0)
+  ));
   const isPreviewRunning = Boolean(
     previewRunId && (
       batchChainMutation.isLoading
