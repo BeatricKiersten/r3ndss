@@ -58,6 +58,7 @@ const BATCH_PREVIEW_CONTAINER_LIMIT = Number.parseInt(process.env.ZENIUS_BATCH_P
 const BATCH_PREVIEW_LOOP_DELAY_MS = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_LOOP_DELAY_MS || '40', 10);
 const BATCH_PREVIEW_RETRY_LIMIT = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_RETRY_LIMIT || '5', 10);
 const BATCH_PREVIEW_RETRY_DELAY_MS = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_RETRY_DELAY_MS || '1500', 10);
+const BATCH_FAST_PREVIEW = parseBoolean(process.env.ZENIUS_BATCH_FAST_PREVIEW) === true;
 const PREVIEW_ITEMS_SAMPLE_LIMIT = Number.parseInt(process.env.ZENIUS_PREVIEW_ITEMS_SAMPLE_LIMIT || '500', 10);
 const PREVIEW_ACTION_ITEMS_SAMPLE_LIMIT = Number.parseInt(process.env.ZENIUS_PREVIEW_ACTION_ITEMS_SAMPLE_LIMIT || '300', 10);
 const PREVIEW_RUN_RECOVERY_GRACE_MS = Number.parseInt(process.env.ZENIUS_PREVIEW_RUN_RECOVERY_GRACE_MS || '300000', 10);
@@ -676,7 +677,7 @@ function createBackgroundBatchRun({ rootCgId, targetCgSelector, baseFolderInput,
   };
 }
 
-function createBackgroundBatchPreviewRun({ rootCgId, targetCgSelector, parentContainerName, baseFolderInput, selectedProviders, keepaliveUrl, headersRaw, refererPath }) {
+function createBackgroundBatchPreviewRun({ rootCgId, targetCgSelector, parentContainerName, baseFolderInput, selectedProviders, keepaliveUrl, headersRaw, refererPath, fastPreview = BATCH_FAST_PREVIEW }) {
   const run = createBackgroundBatchRun({
     rootCgId,
     targetCgSelector,
@@ -687,6 +688,7 @@ function createBackgroundBatchPreviewRun({ rootCgId, targetCgSelector, parentCon
   const now = Date.now();
 
   run.type = 'preview';
+  run.fastPreview = Boolean(fastPreview);
   run.status = 'running';
   run.parentContainerName = String(parentContainerName || '').trim() || null;
   run.previewLoopStarted = false;
@@ -719,6 +721,7 @@ function createBackgroundBatchPreviewRun({ rootCgId, targetCgSelector, parentCon
     parentContainerName: String(parentContainerName || '').trim() || DEFAULT_BATCH_PARENT_CONTAINER_NAME,
     baseFolderInput: String(baseFolderInput || '').trim() || '',
     selectedProviders: Array.isArray(selectedProviders) ? [...selectedProviders] : null,
+    fastPreview: Boolean(fastPreview),
     headersRaw: String(headersRaw || ''),
     refererPath: String(refererPath || '').trim() || ''
   };
@@ -965,6 +968,8 @@ function serializeBatchPreviewSession(session) {
 
   return {
     sessionId: session.id,
+    type: session.type || null,
+    fastPreview: Boolean(session.fastPreview),
     rootCgId: session.rootCgId,
     rootCgName: session.rootCgName,
     targetCgSelector: session.targetCgSelector,
@@ -985,6 +990,19 @@ function serializeBatchPreviewSession(session) {
       : [],
     errors: Array.isArray(session.errors) ? [...session.errors] : []
   };
+}
+
+function prepareBatchPlanForExecution(session) {
+  if (!session || !Array.isArray(session.plannedItems)) {
+    return;
+  }
+
+  for (const plannedItem of session.plannedItems) {
+    if (plannedItem?.fastPreviewProviderValidation) {
+      plannedItem.action = 'pending-provider-validation';
+      plannedItem.reason = 'Provider validation deferred until execution';
+    }
+  }
 }
 
 function serializeBatchChainSessionState(session, overrides = {}) {
@@ -1009,6 +1027,8 @@ function serializeBatchChainSessionState(session, overrides = {}) {
 
   return {
     sessionId: session.id,
+    type: session.type || null,
+    fastPreview: Boolean(session.fastPreview),
     rootCgId: session.rootCgId,
     rootCgName: session.rootCgName,
     targetCgSelector: session.targetCgSelector,
@@ -1213,6 +1233,8 @@ function hydrateBatchChainSessionFromPersistedPreview(dbSession, requestedPlanSe
   });
 
   session.id = planSessionId;
+  session.type = sessionData.type || chainPreview.type || null;
+  session.fastPreview = Boolean(sessionData.fastPreview || chainPreview.fastPreview);
   session.rootCgName = chainPreview.rootCgName || sessionData.rootCgName || dbSession.rootCgName || null;
   session.discoveryInitialized = true;
   session.discoveryDone = true;
@@ -2593,23 +2615,31 @@ function collectExistingFileIds(existingByFolderId) {
   return unique(fileIds);
 }
 
-async function buildProviderStatusLookup(existingByFolderId, chunkSize = BATCH_PROVIDER_PREFETCH_CHUNK_SIZE) {
+async function buildProviderStatusLookup(existingByFolderId, chunkSize = BATCH_PROVIDER_PREFETCH_CHUNK_SIZE, selectedProviders = null) {
   const fileIds = collectExistingFileIds(existingByFolderId);
   const providerStatusByFileId = new Map();
+  const providerFilter = Array.isArray(selectedProviders) && selectedProviders.length > 0
+    ? unique(selectedProviders.map((provider) => String(provider || '').trim()).filter(Boolean))
+    : [];
 
   if (fileIds.length === 0) {
-    return { providerStatusByFileId, fileCount: 0 };
+    return { providerStatusByFileId, fileCount: 0, providerRowCount: 0 };
   }
 
+  let providerRowCount = 0;
   const chunks = chunkArray(fileIds, chunkSize);
   for (const fileIdChunk of chunks) {
     const placeholders = fileIdChunk.map(() => '?').join(', ');
+    const providerWhereSql = providerFilter.length > 0
+      ? ` AND provider IN (${providerFilter.map(() => '?').join(', ')})`
+      : '';
     const rows = await runDbQuery(
       `SELECT file_id, provider, status
          FROM file_providers
-        WHERE file_id IN (${placeholders})`,
-      fileIdChunk
+        WHERE file_id IN (${placeholders})${providerWhereSql}`,
+      providerFilter.length > 0 ? [...fileIdChunk, ...providerFilter] : fileIdChunk
     );
+    providerRowCount += Array.isArray(rows) ? rows.length : 0;
 
     for (const row of rows || []) {
       const fileId = String(row?.file_id || '').trim();
@@ -2626,7 +2656,7 @@ async function buildProviderStatusLookup(existingByFolderId, chunkSize = BATCH_P
     }
   }
 
-  return { providerStatusByFileId, fileCount: fileIds.length };
+  return { providerStatusByFileId, fileCount: fileIds.length, providerRowCount };
 }
 
 async function buildPlannedBatchItem({
@@ -2638,7 +2668,8 @@ async function buildPlannedBatchItem({
   folderIdByInput,
   existingByFolderId,
   providerStatusByFileId,
-  includeLocalSourceCheck = false
+  includeLocalSourceCheck = false,
+  fastPreview = false
 }) {
   const metadata = instance.metadata && typeof instance.metadata === 'object'
     ? { ...instance.metadata }
@@ -2731,6 +2762,27 @@ async function buildPlannedBatchItem({
     };
   }
 
+  if (fastPreview) {
+    plannedItem.action = 'skip';
+    plannedItem.reason = 'File exists; provider validation deferred until execution';
+    plannedItem.pendingProviders = [];
+    plannedItem.fastPreviewProviderValidation = true;
+    return {
+      counted: true,
+      planned: plannedItem,
+      skipped: {
+        urlShortId,
+        reason: plannedItem.reason,
+        path: chainPath,
+        fileId: existingFile.id,
+        outputName: outputFileName,
+        uploadQueue: null,
+        pendingProviders: [],
+        fastPreviewProviderValidation: true
+      }
+    };
+  }
+
   const targetProviders = Array.isArray(selectedProviders) ? selectedProviders : [];
   const fileProviderStatus = providerStatusByFileId?.get(existingFile.id) || new Map();
   const pendingProviders = targetProviders.filter((provider) => {
@@ -2786,7 +2838,8 @@ async function buildBatchPlanForContainer({
   folderIdByInput,
   existingByFolderId,
   providerStatusByFileId,
-  includeLocalSourceCheck = false
+  includeLocalSourceCheck = false,
+  fastPreview = false
 }) {
   const plannedItems = [];
   const skipped = [];
@@ -2801,7 +2854,8 @@ async function buildBatchPlanForContainer({
       folderIdByInput,
       existingByFolderId,
       providerStatusByFileId,
-      includeLocalSourceCheck
+      includeLocalSourceCheck,
+      fastPreview
     });
 
     if (result?.planned) {
@@ -3116,7 +3170,8 @@ async function buildBatchChain({
         folderIdByInput: prefetchContext.folderIdByInput,
         existingByFolderId: prefetchContext.existingByFolderId,
         providerStatusByFileId: prefetchContext.providerStatusByFileId,
-        includeLocalSourceCheck: false
+        includeLocalSourceCheck: false,
+        fastPreview: Boolean(prefetchContext.fastPreview)
       })))
     );
 
@@ -3271,6 +3326,7 @@ function queueDownload(task) {
 }
 
 async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, selectedProviders, session = null }) {
+  const fastPreview = Boolean(session?.fastPreview);
   const activeProviders = Array.isArray(selectedProviders) && selectedProviders.length > 0
     ? selectedProviders
     : await getEnabledProviderIds();
@@ -3283,10 +3339,13 @@ async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, sel
       session
     );
 
-    const providerLookup = await buildProviderStatusLookup(
-      existingLookup.existingByFolderId,
-      clampPositiveInt(BATCH_PROVIDER_PREFETCH_CHUNK_SIZE, 200)
-    );
+    const providerLookup = fastPreview
+      ? { providerStatusByFileId: new Map(), fileCount: 0, providerRowCount: 0 }
+      : await buildProviderStatusLookup(
+        existingLookup.existingByFolderId,
+        clampPositiveInt(BATCH_PROVIDER_PREFETCH_CHUNK_SIZE, 200),
+        activeProviders
+      );
 
     return {
       folderIdByInput: existingLookup.folderIdByInput,
@@ -3295,7 +3354,9 @@ async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, sel
       selectedProviders: activeProviders,
       prefetchFolderCount: existingLookup.plannedFolderCount,
       prefetchMissingFolderCount: existingLookup.missingFolderCount,
-      prefetchProviderFileCount: providerLookup.fileCount
+      prefetchProviderFileCount: providerLookup.fileCount,
+      prefetchProviderRowCount: providerLookup.providerRowCount,
+      fastPreview
     };
   }
 
@@ -3304,7 +3365,10 @@ async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, sel
   cache.selectedProviders = activeProviders;
   const plannedByFolderInput = collectPlannedNamesByFolderInput(containerDetails, baseFolderInput);
   const existingFolderMap = await loadExistingFolderMap(session);
+  const startedAt = Date.now();
   let missingFolderCount = Number(cache.stats.missingFolderCount || 0);
+  let folderQueryCount = 0;
+  let fileRowCount = 0;
 
   for (const [folderInput, plannedNames] of plannedByFolderInput.entries()) {
     const folderKey = normalizeFolderInputKey(folderInput);
@@ -3347,6 +3411,8 @@ async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, sel
         ORDER BY created_at DESC`,
       [folderId, ...missingNames]
     );
+    folderQueryCount += 1;
+    fileRowCount += Array.isArray(rows) ? rows.length : 0;
 
     for (const row of rows || []) {
       const nameKey = String(row?.name || '').trim();
@@ -3378,35 +3444,44 @@ async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, sel
     }
   }
 
-  for (const fileIdChunk of chunkArray(newFileIds, clampPositiveInt(BATCH_PROVIDER_PREFETCH_CHUNK_SIZE, 200))) {
-    if (fileIdChunk.length === 0) {
-      continue;
-    }
-
-    const placeholders = fileIdChunk.map(() => '?').join(', ');
-    const rows = await runDbQuery(
-      `SELECT file_id, provider, status
-         FROM file_providers
-        WHERE file_id IN (${placeholders})`,
-      fileIdChunk
-    );
-
-    for (const row of rows || []) {
-      const fileId = String(row?.file_id || '').trim();
-      const provider = String(row?.provider || '').trim();
-      const status = String(row?.status || '').trim().toLowerCase() || 'pending';
-      if (!fileId || !provider) {
+  if (!fastPreview) {
+    for (const fileIdChunk of chunkArray(newFileIds, clampPositiveInt(BATCH_PROVIDER_PREFETCH_CHUNK_SIZE, 200))) {
+      if (fileIdChunk.length === 0) {
         continue;
       }
 
-      if (!cache.providerStatusByFileId.has(fileId)) {
-        cache.providerStatusByFileId.set(fileId, new Map());
+      const placeholders = fileIdChunk.map(() => '?').join(', ');
+      const rows = await runDbQuery(
+        `SELECT file_id, provider, status
+           FROM file_providers
+          WHERE file_id IN (${placeholders})${cache.selectedProviders?.length ? ` AND provider IN (${cache.selectedProviders.map(() => '?').join(', ')})` : ''}`,
+        cache.selectedProviders?.length ? [...fileIdChunk, ...cache.selectedProviders] : fileIdChunk
+      );
+      cache.stats.providerRowCount = Number(cache.stats.providerRowCount || 0) + (Array.isArray(rows) ? rows.length : 0);
+
+      for (const row of rows || []) {
+        const fileId = String(row?.file_id || '').trim();
+        const provider = String(row?.provider || '').trim();
+        const status = String(row?.status || '').trim().toLowerCase() || 'pending';
+        if (!fileId || !provider) {
+          continue;
+        }
+
+        if (!cache.providerStatusByFileId.has(fileId)) {
+          cache.providerStatusByFileId.set(fileId, new Map());
+        }
+        cache.providerStatusByFileId.get(fileId).set(provider, status);
       }
-      cache.providerStatusByFileId.get(fileId).set(provider, status);
     }
   }
 
   cache.stats.providerFileCount = cache.loadedFileIds.size;
+  console.log(
+    `[Zenius][Preview][DupeCheck] containers=${containerDetails.length} folders=${plannedByFolderInput.size} `
+    + `folderQueries=${folderQueryCount} fileRows=${fileRowCount} newProviderFiles=${newFileIds.length} `
+    + `providerRows=${Number(cache.stats.providerRowCount || 0)} selectedProviders=${Array.isArray(activeProviders) ? activeProviders.join(',') : 'all'} `
+    + `fastPreview=${fastPreview} durationMs=${Date.now() - startedAt}`
+  );
 
   return {
     folderIdByInput: cache.folderIdByInput,
@@ -3415,7 +3490,9 @@ async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, sel
     selectedProviders: activeProviders,
     prefetchFolderCount: Number(cache.stats.plannedFolderCount || 0),
     prefetchMissingFolderCount: Number(cache.stats.missingFolderCount || 0),
-    prefetchProviderFileCount: Number(cache.stats.providerFileCount || 0)
+    prefetchProviderFileCount: Number(cache.stats.providerFileCount || 0),
+    prefetchProviderRowCount: Number(cache.stats.providerRowCount || 0),
+    fastPreview
   };
 }
 
@@ -3439,6 +3516,54 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
     }
 
     totalInstances += 1;
+
+    if (plannedItem.fastPreviewProviderValidation && plannedItem.fileId) {
+      const existingFile = await db.getFile(plannedItem.fileId).catch(() => null);
+      const existingStatus = String(existingFile?.status || plannedItem.existingStatus || '').trim().toLowerCase();
+
+      if (existingStatus === 'processing' || existingStatus === 'uploading') {
+        skipped.push({
+          urlShortId: plannedItem.urlShortId,
+          reason: 'File is already being processed',
+          path: plannedItem.path,
+          fileId: plannedItem.fileId,
+          outputName: plannedItem.outputName,
+          uploadQueue: null,
+          pendingProviders: []
+        });
+        continue;
+      }
+
+      if (existingStatus !== 'failed') {
+        const pendingProviderInfo = await uploaderService.getPendingUploadProviders(plannedItem.fileId, plannedItem.selectedProviders, {
+          verifyRemote: false
+        });
+
+        if (!pendingProviderInfo.hasPendingProviders) {
+          skipped.push({
+            urlShortId: plannedItem.urlShortId,
+            reason: 'File already exists on selected providers',
+            path: plannedItem.path,
+            fileId: plannedItem.fileId,
+            outputName: plannedItem.outputName,
+            uploadQueue: null,
+            pendingProviders: []
+          });
+          continue;
+        }
+
+        plannedItem.action = 'finalize';
+        plannedItem.reason = 'File already exists locally; queued missing providers only';
+        plannedItem.pendingProviders = pendingProviderInfo.pendingProviders || [];
+        if (!existingFile?.localPath || !await fs.pathExists(existingFile.localPath)) {
+          plannedItem.action = 'download';
+          plannedItem.reason = `Existing file ${plannedItem.fileId} is missing local source; re-downloading missing providers`;
+        }
+      } else {
+        plannedItem.action = 'retry';
+        plannedItem.reason = 'Retrying failed file';
+      }
+    }
 
     if (plannedItem.action === 'skip') {
       skipped.push({
@@ -4222,6 +4347,7 @@ const zeniusController = {
 
       const selectedProviders = await normalizeProviders(req.body?.providers);
       const baseFolderInput = stripWrappingQuotes(req.body?.folderId || '');
+      const fastPreview = parseBoolean(req.body?.fastPreview) === true;
       const keepaliveUrl = resolveBackgroundKeepaliveUrl(req);
 
       const run = createBackgroundBatchPreviewRun({
@@ -4232,7 +4358,8 @@ const zeniusController = {
         selectedProviders,
         keepaliveUrl,
         headersRaw: req.body?.headersRaw || '',
-        refererPath: req.body?.refererPath || ''
+        refererPath: req.body?.refererPath || '',
+        fastPreview
       });
 
       const previewSession = createBatchChainSession({
@@ -4240,6 +4367,8 @@ const zeniusController = {
         targetCgSelector: run.targetCgSelector,
         parentContainerName: run.parentContainerName || DEFAULT_BATCH_PARENT_CONTAINER_NAME
       });
+      previewSession.type = 'preview';
+      previewSession.fastPreview = fastPreview;
       batchChainSessions.set(previewSession.id, previewSession);
       run.sessionId = previewSession.id;
 
@@ -4264,6 +4393,7 @@ const zeniusController = {
           sessionData: {
             type: 'preview',
             sessionId: run.sessionId,
+            fastPreview: run.fastPreview,
             baseFolderInput: baseFolderInput || '',
             selectedProviders,
             chainPreview: null,
@@ -4374,6 +4504,7 @@ const zeniusController = {
       }
 
       const previewResult = serializeBatchPreviewSession(session);
+      prepareBatchPlanForExecution(session);
 
       const containerLimit = normalizeChunkLimit(req.body?.containerLimit)
         || clampPositiveInt(BACKGROUND_BATCH_CHUNK_SIZE, 6);
@@ -4711,6 +4842,7 @@ if (process.env.NODE_ENV === 'test') {
     hydrateBatchChainSessionFromPersistedPreview,
     hydrateBatchChainSessionForDownload,
     buildBatchChain,
+    buildProviderStatusLookup,
     getBatchDownloadMaxQueued,
     normalizePlanningContext,
     serializeBatchPreviewSession,
