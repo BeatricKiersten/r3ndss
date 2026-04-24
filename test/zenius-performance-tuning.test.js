@@ -32,6 +32,10 @@ describe('Zenius performance tuning defaults', () => {
     expect(controller.__test.constants.BACKGROUND_BATCH_CHUNK_SIZE).toBe(24);
     expect(controller.__test.constants.DEFAULT_MAX_CONCURRENT_DOWNLOADS).toBe(6);
     expect(controller.__test.constants.BATCH_DOWNLOAD_MAX_QUEUED_MULTIPLIER).toBe(4);
+    expect(controller.__test.constants.BATCH_CG_FETCH_CONCURRENCY).toBe(32);
+    expect(controller.__test.constants.BATCH_INSTANCE_METADATA_CONCURRENCY).toBe(48);
+    expect(controller.__test.constants.BATCH_PREVIEW_STEPS_PER_POLL).toBe(16);
+    expect(controller.__test.constants.BATCH_PREVIEW_CONTAINER_LIMIT).toBe(64);
   });
 
   test('computes adaptive queued download backpressure from concurrency', () => {

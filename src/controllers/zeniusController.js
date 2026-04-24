@@ -30,8 +30,8 @@ const DEFAULT_BATCH_PARENT_CONTAINER_NAME = '';
 const UPSTREAM_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_TIMEOUT_MS || '12000', 10);
 const UPSTREAM_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_UPSTREAM_MAX_RETRIES || '3', 10);
 const UPSTREAM_RETRY_BASE_DELAY_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_RETRY_BASE_DELAY_MS || '500', 10);
-const BATCH_CG_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CG_FETCH_CONCURRENCY || '16', 10);
-const BATCH_INSTANCE_METADATA_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_INSTANCE_METADATA_CONCURRENCY || '24', 10);
+const BATCH_CG_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CG_FETCH_CONCURRENCY || '32', 10);
+const BATCH_INSTANCE_METADATA_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_INSTANCE_METADATA_CONCURRENCY || '48', 10);
 const MAX_BATCH_ERRORS = Number.parseInt(process.env.ZENIUS_MAX_BATCH_ERRORS || '100', 10);
 const DEFAULT_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_CHUNK_SIZE || '32', 10);
 const MAX_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_MAX_CHUNK_SIZE || '128', 10);
@@ -53,8 +53,8 @@ const BATCH_METADATA_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_BATCH_METAD
 const BATCH_METADATA_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_BATCH_METADATA_MAX_RETRIES || '4', 10);
 const BATCH_FOLDER_PREFETCH_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_FOLDER_PREFETCH_CHUNK_SIZE || '80', 10);
 const BATCH_PROVIDER_PREFETCH_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_PROVIDER_PREFETCH_CHUNK_SIZE || '200', 10);
-const BATCH_PREVIEW_STEPS_PER_POLL = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_STEPS_PER_POLL || '12', 10);
-const BATCH_PREVIEW_CONTAINER_LIMIT = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_CONTAINER_LIMIT || '32', 10);
+const BATCH_PREVIEW_STEPS_PER_POLL = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_STEPS_PER_POLL || '16', 10);
+const BATCH_PREVIEW_CONTAINER_LIMIT = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_CONTAINER_LIMIT || '64', 10);
 const BATCH_PREVIEW_LOOP_DELAY_MS = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_LOOP_DELAY_MS || '40', 10);
 const BATCH_PREVIEW_RETRY_LIMIT = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_RETRY_LIMIT || '2', 10);
 const BATCH_PREVIEW_RETRY_DELAY_MS = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_RETRY_DELAY_MS || '750', 10);
@@ -1397,6 +1397,8 @@ async function continueBackgroundBatchPreviewRun(run, { requestContext, refererP
       break;
     }
 
+    const stepStartedAt = Date.now();
+    const stepOffset = nextOffset;
     const chain = await buildBatchChain({
       rootCgId: run.sessionContext?.rootCgId || run.rootCgId,
       targetCgSelector: run.sessionContext?.targetCgSelector || run.targetCgSelector,
@@ -1415,6 +1417,17 @@ async function continueBackgroundBatchPreviewRun(run, { requestContext, refererP
     if (boundSessionId && chain.sessionId !== boundSessionId) {
       throw new Error(`Preview session mismatch: expected ${boundSessionId}, got ${chain.sessionId}`);
     }
+
+    const stepElapsedMs = Math.max(1, Date.now() - stepStartedAt);
+    const stepProcessed = Number(chain.processedContainerCount || 0);
+    const stepThroughput = (stepProcessed / (stepElapsedMs / 1000)).toFixed(2);
+    console.log(
+      `[Zenius][Preview][Step] run=${run.id} session=${chain.sessionId} step=${step + 1}/${stepsPerPoll} `
+      + `offset=${stepOffset}->${chain.nextContainerOffset ?? 'done'} processed=${stepProcessed} `
+      + `plannedVideos=${Number(chain.plannedItemCount || 0)} previewContainers=${Number(chain.previewSummary?.previewContainerCount || chain.containerDetails?.length || 0)} `
+      + `discoveredContainers=${Number(chain.totalContainers || chain.containerList?.totalContainers || 0)} hasMore=${Boolean(chain.hasMoreContainers)} `
+      + `durationMs=${stepElapsedMs} throughput=${stepThroughput}/s errors=${Array.isArray(chain.errors) ? chain.errors.length : 0}`
+    );
 
     totalProcessedThisPoll += Number(chain.processedContainerCount || 0);
     latestDiscoveredVideos = Number(chain.plannedItemCount || latestDiscoveredVideos || 0);
@@ -4693,7 +4706,11 @@ if (process.env.NODE_ENV === 'test') {
     constants: {
       BACKGROUND_BATCH_CHUNK_SIZE,
       BATCH_DOWNLOAD_MAX_QUEUED_MULTIPLIER,
-      DEFAULT_MAX_CONCURRENT_DOWNLOADS
+      DEFAULT_MAX_CONCURRENT_DOWNLOADS,
+      BATCH_CG_FETCH_CONCURRENCY,
+      BATCH_INSTANCE_METADATA_CONCURRENCY,
+      BATCH_PREVIEW_STEPS_PER_POLL,
+      BATCH_PREVIEW_CONTAINER_LIMIT
     }
   };
 }
