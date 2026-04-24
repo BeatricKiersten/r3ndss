@@ -30,8 +30,8 @@ const DEFAULT_BATCH_PARENT_CONTAINER_NAME = '';
 const UPSTREAM_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_TIMEOUT_MS || '12000', 10);
 const UPSTREAM_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_UPSTREAM_MAX_RETRIES || '3', 10);
 const UPSTREAM_RETRY_BASE_DELAY_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_RETRY_BASE_DELAY_MS || '500', 10);
-const BATCH_CG_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CG_FETCH_CONCURRENCY || '32', 10);
-const BATCH_INSTANCE_METADATA_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_INSTANCE_METADATA_CONCURRENCY || '48', 10);
+const BATCH_CG_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CG_FETCH_CONCURRENCY || '20', 10);
+const BATCH_INSTANCE_METADATA_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_INSTANCE_METADATA_CONCURRENCY || '28', 10);
 const MAX_BATCH_ERRORS = Number.parseInt(process.env.ZENIUS_MAX_BATCH_ERRORS || '100', 10);
 const DEFAULT_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_CHUNK_SIZE || '32', 10);
 const MAX_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_MAX_CHUNK_SIZE || '128', 10);
@@ -53,11 +53,11 @@ const BATCH_METADATA_TIMEOUT_MS = Number.parseInt(process.env.ZENIUS_BATCH_METAD
 const BATCH_METADATA_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_BATCH_METADATA_MAX_RETRIES || '4', 10);
 const BATCH_FOLDER_PREFETCH_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_FOLDER_PREFETCH_CHUNK_SIZE || '80', 10);
 const BATCH_PROVIDER_PREFETCH_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_PROVIDER_PREFETCH_CHUNK_SIZE || '200', 10);
-const BATCH_PREVIEW_STEPS_PER_POLL = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_STEPS_PER_POLL || '16', 10);
-const BATCH_PREVIEW_CONTAINER_LIMIT = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_CONTAINER_LIMIT || '64', 10);
+const BATCH_PREVIEW_STEPS_PER_POLL = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_STEPS_PER_POLL || '12', 10);
+const BATCH_PREVIEW_CONTAINER_LIMIT = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_CONTAINER_LIMIT || '48', 10);
 const BATCH_PREVIEW_LOOP_DELAY_MS = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_LOOP_DELAY_MS || '40', 10);
-const BATCH_PREVIEW_RETRY_LIMIT = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_RETRY_LIMIT || '2', 10);
-const BATCH_PREVIEW_RETRY_DELAY_MS = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_RETRY_DELAY_MS || '750', 10);
+const BATCH_PREVIEW_RETRY_LIMIT = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_RETRY_LIMIT || '5', 10);
+const BATCH_PREVIEW_RETRY_DELAY_MS = Number.parseInt(process.env.ZENIUS_BATCH_PREVIEW_RETRY_DELAY_MS || '1500', 10);
 const PREVIEW_ITEMS_SAMPLE_LIMIT = Number.parseInt(process.env.ZENIUS_PREVIEW_ITEMS_SAMPLE_LIMIT || '500', 10);
 const PREVIEW_ACTION_ITEMS_SAMPLE_LIMIT = Number.parseInt(process.env.ZENIUS_PREVIEW_ACTION_ITEMS_SAMPLE_LIMIT || '300', 10);
 const PREVIEW_RUN_RECOVERY_GRACE_MS = Number.parseInt(process.env.ZENIUS_PREVIEW_RUN_RECOVERY_GRACE_MS || '300000', 10);
@@ -1339,16 +1339,27 @@ async function runBackgroundBatchPreviewLoop(run, { requestContext, refererPath 
           break;
         }
         run.lastError = error.message;
+        const nextRetryCount = Number(run.previewRetryCount || 0) + 1;
+        console.warn(
+          `[Zenius][Preview][Retry] run=${run.id} session=${run.sessionId || '-'} attempt=${nextRetryCount}/${run.maxPreviewRetries || BATCH_PREVIEW_RETRY_LIMIT} `
+          + `offset=${run.nextContainerOffset || 0}/${run.totalContainers || '?'} processed=${run.processedContainers || 0} `
+          + `plannedVideos=${run.discoveredVideoCount || 0} error=${error.message}`
+        );
         if (!shouldContinuePreviewAfterError(run, error)) {
           run.status = 'failed';
           run.error = error.message;
           run.finishedAt = new Date().toISOString();
+          console.error(
+            `[Zenius][Preview][Failed] run=${run.id} session=${run.sessionId || '-'} retries=${run.previewRetryCount || 0}/${run.maxPreviewRetries || BATCH_PREVIEW_RETRY_LIMIT} `
+            + `offset=${run.nextContainerOffset || 0}/${run.totalContainers || '?'} processed=${run.processedContainers || 0} `
+            + `plannedVideos=${run.discoveredVideoCount || 0} error=${error.message}`
+          );
           await persistPreviewRunSnapshot(run);
           touchBackgroundBatchRun(run);
           break;
         }
 
-        run.previewRetryCount = Number(run.previewRetryCount || 0) + 1;
+        run.previewRetryCount = nextRetryCount;
         run.chainErrors = Array.isArray(run.chainErrors) ? [...run.chainErrors, error.message] : [error.message];
         await persistPreviewRunSnapshot(run);
         touchBackgroundBatchRun(run);
@@ -4710,7 +4721,9 @@ if (process.env.NODE_ENV === 'test') {
       BATCH_CG_FETCH_CONCURRENCY,
       BATCH_INSTANCE_METADATA_CONCURRENCY,
       BATCH_PREVIEW_STEPS_PER_POLL,
-      BATCH_PREVIEW_CONTAINER_LIMIT
+      BATCH_PREVIEW_CONTAINER_LIMIT,
+      BATCH_PREVIEW_RETRY_LIMIT,
+      BATCH_PREVIEW_RETRY_DELAY_MS
     }
   };
 }
