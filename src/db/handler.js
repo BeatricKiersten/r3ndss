@@ -575,8 +575,8 @@ class DatabaseHandler {
       providers[providerRow.provider] = {
         providerName: providerNames.get(providerRow.provider) || providerRow.provider,
         status: providerRow.status || 'pending',
-        hasUrl: Boolean(providerRow.url || providerRow.embed_url),
-        hasEmbedUrl: Boolean(providerRow.embed_url),
+        hasUrl: toBool(providerRow.has_url) || Boolean(providerRow.url || providerRow.embed_url),
+        hasEmbedUrl: toBool(providerRow.has_embed_url) || Boolean(providerRow.embed_url),
         updatedAt: providerRow.updated_at || null
       };
     }
@@ -1282,16 +1282,23 @@ class DatabaseHandler {
     return state;
   }
 
-  async _getProviderRowsByFileIds(fileIds) {
+  async _getProviderRowsByFileIds(fileIds, options = {}) {
     if (!fileIds.length) {
       return new Map();
     }
 
     const placeholders = fileIds.map(() => '?').join(',');
-    const [rows] = await this.pool.query(
-      `SELECT * FROM file_providers WHERE file_id IN (${placeholders})`,
-      fileIds
-    );
+    const selectSql = options.summary
+      ? `SELECT file_id,
+                provider,
+                status,
+                updated_at,
+                CASE WHEN url IS NOT NULL OR embed_url IS NOT NULL THEN 1 ELSE 0 END AS has_url,
+                CASE WHEN embed_url IS NOT NULL THEN 1 ELSE 0 END AS has_embed_url
+           FROM file_providers
+          WHERE file_id IN (${placeholders})`
+      : `SELECT * FROM file_providers WHERE file_id IN (${placeholders})`;
+    const [rows] = await this.pool.query(selectSql, fileIds);
 
     const grouped = new Map();
     for (const row of rows) {
@@ -1306,7 +1313,7 @@ class DatabaseHandler {
 
   async _hydrateFiles(fileRows, options = {}) {
     const fileIds = fileRows.map((row) => row.id);
-    const providerMap = await this._getProviderRowsByFileIds(fileIds);
+    const providerMap = await this._getProviderRowsByFileIds(fileIds, { summary: options.summary });
     const providerIds = STATIC_PROVIDER_IDS;
     const providerCatalog = Array.isArray(options.providerCatalog)
       ? options.providerCatalog
@@ -2234,15 +2241,21 @@ class DatabaseHandler {
       `SELECT COUNT(*) AS count FROM files${whereSql}`,
       baseParams
     );
-    const [rows] = await this.pool.query(
-      `SELECT id, folder_id, name, original_url, local_path, size, duration, status,
-              progress_download, progress_processing, progress_upload, progress_extra,
-              sync_status, can_delete, created_at, updated_at
-         FROM files${whereSql}
-        ORDER BY created_at DESC
-        LIMIT ? OFFSET ?`,
-      [...baseParams, safeLimit, safeOffset]
-    );
+    const fileSelectSql = summary
+      ? `SELECT id, folder_id, name, size, duration, status,
+                progress_download, progress_processing, progress_upload, progress_extra,
+                sync_status, can_delete, created_at, updated_at
+           FROM files${whereSql}
+          ORDER BY created_at DESC
+          LIMIT ? OFFSET ?`
+      : `SELECT id, folder_id, name, original_url, local_path, size, duration, status,
+                progress_download, progress_processing, progress_upload, progress_extra,
+                sync_status, can_delete, created_at, updated_at
+           FROM files${whereSql}
+          ORDER BY created_at DESC
+          LIMIT ? OFFSET ?`;
+
+    const [rows] = await this.pool.query(fileSelectSql, [...baseParams, safeLimit, safeOffset]);
 
     return {
       items: await this._hydrateFiles(rows, { summary }),

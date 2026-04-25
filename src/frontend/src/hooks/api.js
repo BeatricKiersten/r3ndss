@@ -69,6 +69,13 @@ export const useFolders = () => {
   return useQuery('folders', async () => {
     const response = await api.get('/api/folders/tree');
     return response.data.data;
+  }, {
+    staleTime: Infinity,
+    cacheTime: 30 * 60 * 1000,
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
+    refetchOnReconnect: false
   });
 };
 
@@ -77,7 +84,10 @@ export const useFolder = (id = 'root') => {
     const response = await api.get(`/api/folders/${id}`);
     return response.data.data;
   }, {
-    keepPreviousData: true
+    keepPreviousData: true,
+    staleTime: 60000,
+    refetchInterval: false,
+    refetchOnWindowFocus: false
   });
 };
 
@@ -92,6 +102,7 @@ export const useCreateFolder = () => {
     {
       onSuccess: () => {
         queryClient.invalidateQueries('folders');
+        queryClient.refetchQueries('folders', { active: true });
         queryClient.invalidateQueries('folder');
       }
     }
@@ -109,6 +120,7 @@ export const useMoveFolder = () => {
     {
       onSuccess: () => {
         queryClient.invalidateQueries('folders');
+        queryClient.refetchQueries('folders', { active: true });
         queryClient.invalidateQueries('folder');
         queryClient.invalidateQueries('files');
       }
@@ -127,6 +139,7 @@ export const useDeleteFolder = () => {
     {
       onSuccess: () => {
         queryClient.invalidateQueries('folders');
+        queryClient.refetchQueries('folders', { active: true });
         queryClient.invalidateQueries('folder');
         queryClient.invalidateQueries('files');
       }
@@ -145,6 +158,7 @@ export const usePurgeFolder = () => {
     {
       onSuccess: () => {
         queryClient.invalidateQueries('folders');
+        queryClient.refetchQueries('folders', { active: true });
         queryClient.invalidateQueries('folder');
         queryClient.invalidateQueries('files');
         queryClient.invalidateQueries('dashboard');
@@ -164,6 +178,7 @@ export const useDeleteAllFolders = () => {
     {
       onSuccess: () => {
         queryClient.invalidateQueries('folders');
+        queryClient.refetchQueries('folders', { active: true });
         queryClient.invalidateQueries('files');
         queryClient.invalidateQueries('dashboard');
       }
@@ -571,6 +586,7 @@ export const useMoveFile = () => {
       onSuccess: () => {
         queryClient.invalidateQueries('files');
         queryClient.invalidateQueries('folders');
+        queryClient.refetchQueries('folders', { active: true });
         queryClient.invalidateQueries('folder');
       }
     }
