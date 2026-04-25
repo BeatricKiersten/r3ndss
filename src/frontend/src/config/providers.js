@@ -50,17 +50,6 @@ export const STATUS_CONFIG = {
   pending: { color: 'text-gray-400', bg: 'bg-gray-400/10', label: 'Pending', icon: 'Clock' }
 };
 
-export const NAV_ITEMS = [
-  { path: '/', icon: 'Upload', label: 'Upload', shortcut: '1' },
-  { path: '/files', icon: 'Folder', label: 'Files', shortcut: '2' },
-  { path: '/jobs', icon: 'ListChecks', label: 'Jobs', shortcut: '3' },
-  { path: '/providers', icon: 'Cloud', label: 'Providers', shortcut: '4' },
-  { path: '/rclone', icon: 'Server', label: 'Rclone', shortcut: '5' },
-  { path: '/player', icon: 'Play', label: 'Player', shortcut: '6' },
-  { path: '/status', icon: 'Activity', label: 'Status', shortcut: '7' },
-  { path: '/zenius', icon: 'BookOpen', label: 'Zenius', shortcut: '8' }
-];
-
 export function getProviderConfig(providerKey) {
   const key = String(providerKey || '');
   const isDynamicRclone = key.startsWith('rclone:');

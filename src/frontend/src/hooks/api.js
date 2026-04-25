@@ -92,6 +92,7 @@ export const useCreateFolder = () => {
     {
       onSuccess: () => {
         queryClient.invalidateQueries('folders');
+        queryClient.invalidateQueries('folder');
       }
     }
   );
@@ -108,6 +109,7 @@ export const useMoveFolder = () => {
     {
       onSuccess: () => {
         queryClient.invalidateQueries('folders');
+        queryClient.invalidateQueries('folder');
         queryClient.invalidateQueries('files');
       }
     }
@@ -125,6 +127,7 @@ export const useDeleteFolder = () => {
     {
       onSuccess: () => {
         queryClient.invalidateQueries('folders');
+        queryClient.invalidateQueries('folder');
         queryClient.invalidateQueries('files');
       }
     }
@@ -142,6 +145,7 @@ export const usePurgeFolder = () => {
     {
       onSuccess: () => {
         queryClient.invalidateQueries('folders');
+        queryClient.invalidateQueries('folder');
         queryClient.invalidateQueries('files');
         queryClient.invalidateQueries('dashboard');
       }
@@ -565,6 +569,7 @@ export const useMoveFile = () => {
       onSuccess: () => {
         queryClient.invalidateQueries('files');
         queryClient.invalidateQueries('folders');
+        queryClient.invalidateQueries('folder');
       }
     }
   );

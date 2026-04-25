@@ -5,6 +5,7 @@ import { usePlayerStore, IFRAME_PROVIDERS } from '../store/websocketStore';
 import { useFiles, useReuploadToProvider } from '../hooks/api';
 import { Play, CheckCircle, AlertCircle, Clock, HardDrive, Cloud, ChevronLeft, ExternalLink, AlertTriangle, Package, Film, Upload, RefreshCw, X, Server } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { PATHS } from '../config/routes.jsx';
 import { PROVIDERS, getProviderConfig } from '../config/providers';
 
 const providerIconMap = {
@@ -194,7 +195,7 @@ export default function VideoPlayerPage() {
         </div>
         <h2 className="text-lg font-medium text-white mb-2">No Video Selected</h2>
         <p className="text-sm text-[#666] mb-4">Select a file from the library</p>
-        <button onClick={() => navigate('/files')} className="btn btn-primary text-sm flex items-center gap-2">
+        <button onClick={() => navigate(PATHS.files)} className="btn btn-primary text-sm flex items-center gap-2">
           <ChevronLeft className="w-4 h-4" />
           Browse Files
         </button>
@@ -207,7 +208,7 @@ export default function VideoPlayerPage() {
 
   return (
     <div className="space-y-5">
-      <button onClick={() => navigate('/files')} className="flex items-center gap-1 text-[#888] hover:text-[#ccc] text-sm">
+      <button onClick={() => navigate(PATHS.files)} className="flex items-center gap-1 text-[#888] hover:text-[#ccc] text-sm">
         <ChevronLeft className="w-4 h-4" />
         Back to Files
       </button>

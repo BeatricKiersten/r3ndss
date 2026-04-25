@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { useFiles, useFolder, useFolders } from '../hooks/api';
 import { getProviderConfig } from '../config/providers';
+import { PATHS } from '../config/routes.jsx';
 
 const IFRAME_PROVIDERS = new Set(['seekstreaming', 'voesx', 'streamtape', 'mixdrop', 'catbox']);
 
@@ -275,7 +276,7 @@ export default function PublicFilesPage() {
               <span className="text-lg font-semibold text-white">Himel abdul rozak</span>
             </div>
             <div className="hidden items-center gap-6 md:flex">
-              <a href="/public" className="text-sm font-medium text-white hover:text-yellow-400">Beranda</a>
+              <a href={PATHS.public} className="text-sm font-medium text-white hover:text-yellow-400">Beranda</a>
               <a href="#" className="text-sm font-medium text-white/60 hover:text-white">Materi</a>
               <a href="#" className="text-sm font-medium text-white/60 hover:text-white">Tentang</a>
             </div>

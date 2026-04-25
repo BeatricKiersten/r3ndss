@@ -1,18 +1,9 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { Suspense, useEffect, useState, useCallback } from 'react';
 import { Routes, Route, useLocation, useNavigate } from 'react-router-dom';
 import { Upload, Folder, Play, Activity, Server, Menu, X, Cloud, ListChecks, Keyboard, BookOpen } from 'lucide-react';
 import { useWebSocketStore } from './store/websocketStore';
-import { NAV_ITEMS } from './config/providers';
+import { APP_ROUTES, NAV_ITEMS, PATHS, PUBLIC_ROUTES, isPublicPath } from './config/routes.jsx';
 import { ToastContainer } from './components/ui';
-import UploadPage from './pages/UploadPage.jsx';
-import FileListPage from './pages/FileListPage.jsx';
-import VideoPlayerPage from './pages/VideoPlayerPage.jsx';
-import BackupStatusPage from './pages/BackupStatusPage.jsx';
-import ProviderManagementPage from './pages/ProviderManagementPage.jsx';
-import JobsPage from './pages/JobsPage.jsx';
-import RcloneConfigPage from './pages/RcloneConfigPage.jsx';
-import ZeniusPage from './pages/ZeniusPage.jsx';
-import PublicFilesPage from './pages/PublicFilesPage.jsx';
 
 const iconMap = { Upload, Folder, Play, Activity, Server, Menu, X, Cloud, ListChecks, Keyboard, BookOpen };
 
@@ -29,6 +20,19 @@ const shortcuts = [
   { key: '?', description: 'Show shortcuts' },
   { key: 'Esc', description: 'Close modal/drawer' },
 ];
+
+function PageFallback() {
+  return (
+    <div className="space-y-3">
+      <div className="h-6 w-28 rounded bg-[#222] animate-pulse" />
+      <div className="card p-4 space-y-3">
+        <div className="h-4 w-2/3 rounded bg-[#222] animate-pulse" />
+        <div className="h-16 rounded bg-[#1a1a1a] animate-pulse" />
+        <div className="h-16 rounded bg-[#1a1a1a] animate-pulse" />
+      </div>
+    </div>
+  );
+}
 
 function ShortcutsModal({ onClose }) {
   return (
@@ -108,12 +112,13 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
 
-  const isPublicRoute = location.pathname === '/public' || location.pathname.startsWith('/public/');
+  const isPublicRoute = isPublicPath(location.pathname);
 
   useEffect(() => {
+    if (isPublicRoute) return undefined;
     connect();
     return () => disconnect();
-  }, [connect, disconnect]);
+  }, [connect, disconnect, isPublicRoute]);
 
   const handleKeyDown = useCallback((e) => {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
@@ -127,25 +132,25 @@ function App() {
         setShowShortcuts(false);
         break;
       case 'n':
-        if (!e.ctrlKey && !e.metaKey) navigate('/');
+        if (!e.ctrlKey && !e.metaKey) navigate(PATHS.upload);
         break;
       case 'f':
-        navigate('/files');
+        navigate(PATHS.files);
         break;
       case 'j':
-        navigate('/jobs');
+        navigate(PATHS.jobs);
         break;
       case 'p':
-        if (!e.ctrlKey && !e.metaKey) navigate('/providers');
+        if (!e.ctrlKey && !e.metaKey) navigate(PATHS.providers);
         break;
       case 's':
-        if (!e.ctrlKey && !e.metaKey) navigate('/status');
+        if (!e.ctrlKey && !e.metaKey) navigate(PATHS.status);
         break;
       case 'r':
-        if (!e.ctrlKey && !e.metaKey) navigate('/rclone');
+        if (!e.ctrlKey && !e.metaKey) navigate(PATHS.rclone);
         break;
       case 'z':
-        if (!e.ctrlKey && !e.metaKey) navigate('/zenius');
+        if (!e.ctrlKey && !e.metaKey) navigate(PATHS.zenius);
         break;
       case '1':
       case '2':
@@ -171,10 +176,13 @@ function App() {
   if (isPublicRoute) {
     return (
       <>
-        <Routes>
-          <Route path="/public" element={<PublicFilesPage />} />
-          <Route path="/public/:fileId" element={<PublicFilesPage />} />
-        </Routes>
+        <Suspense fallback={<PageFallback />}>
+          <Routes>
+            {PUBLIC_ROUTES.map((route) => (
+              <Route key={route.path} path={route.path} element={route.element} />
+            ))}
+          </Routes>
+        </Suspense>
         <ToastContainer />
       </>
     );
@@ -238,18 +246,13 @@ function App() {
         </aside>
 
         <main className="flex-1 p-4 lg:p-6 overflow-x-hidden">
-          <Routes>
-            <Route path="/" element={<UploadPage />} />
-            <Route path="/files" element={<FileListPage />} />
-            <Route path="/jobs" element={<JobsPage />} />
-            <Route path="/providers" element={<ProviderManagementPage />} />
-            <Route path="/rclone" element={<RcloneConfigPage />} />
-            <Route path="/player" element={<VideoPlayerPage />} />
-            <Route path="/status" element={<BackupStatusPage />} />
-            <Route path="/zenius" element={<ZeniusPage />} />
-            <Route path="/public" element={<PublicFilesPage />} />
-            <Route path="/public/:fileId" element={<PublicFilesPage />} />
-          </Routes>
+          <Suspense fallback={<PageFallback />}>
+            <Routes>
+              {APP_ROUTES.map((route) => (
+                <Route key={route.path} path={route.path} element={route.element} />
+              ))}
+            </Routes>
+          </Suspense>
         </main>
       </div>
 

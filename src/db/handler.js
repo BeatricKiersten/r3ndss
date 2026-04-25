@@ -1516,49 +1516,59 @@ class DatabaseHandler {
   async moveFolder(folderId, newParentId) {
     await this._ready();
 
-    const [folderRows] = await this.pool.query('SELECT * FROM folders WHERE id = ? LIMIT 1', [folderId]);
-    const folder = folderRows[0];
+    return this._withTransaction(async (connection) => {
+      const [folderRows] = await connection.query('SELECT * FROM folders WHERE id = ? LIMIT 1 FOR UPDATE', [folderId]);
+      const folder = folderRows[0];
 
-    if (!folder) {
-      throw new Error(`Folder ${folderId} not found`);
-    }
-
-    const [allRows] = await this.pool.query('SELECT id, parent_id FROM folders');
-    const parentLookup = new Map(allRows.map((row) => [row.id, row.parent_id]));
-
-    let currentId = newParentId;
-    while (currentId) {
-      if (currentId === folderId) {
-        throw new Error('Cannot move folder into its own subtree');
+      if (!folder) {
+        throw new Error(`Folder ${folderId} not found`);
       }
-      currentId = parentLookup.get(currentId) || null;
-    }
 
-    const [parentRows] = await this.pool.query('SELECT * FROM folders WHERE id = ? LIMIT 1', [newParentId]);
-    const newParent = parentRows[0];
+      const [allRows] = await connection.query('SELECT id, parent_id, path FROM folders FOR UPDATE');
+      const parentLookup = new Map(allRows.map((row) => [row.id, row.parent_id]));
 
-    if (!newParent) {
-      throw new Error(`Folder ${newParentId} not found`);
-    }
+      let currentId = newParentId;
+      while (currentId) {
+        if (currentId === folderId) {
+          throw new Error('Cannot move folder into its own subtree');
+        }
+        currentId = parentLookup.get(currentId) || null;
+      }
 
-    const now = this._now();
-    const nextPath = newParent.path === '/'
-      ? `/${folder.name}`
-      : `${newParent.path}/${folder.name}`;
+      const [parentRows] = await connection.query('SELECT * FROM folders WHERE id = ? LIMIT 1 FOR UPDATE', [newParentId]);
+      const newParent = parentRows[0];
 
-    await this.pool.query(
-      'UPDATE folders SET parent_id = ?, path = ?, updated_at = ? WHERE id = ?',
-      [newParentId, nextPath, now, folderId]
-    );
+      if (!newParent) {
+        throw new Error(`Folder ${newParentId} not found`);
+      }
 
-    return {
-      ...this._mapFolderRow({
+      const now = this._now();
+      const previousPath = folder.path;
+      const nextPath = newParent.path === '/'
+        ? `/${folder.name}`
+        : `${newParent.path}/${folder.name}`;
+
+      await connection.query(
+        'UPDATE folders SET parent_id = ?, path = ?, updated_at = ? WHERE id = ?',
+        [newParentId, nextPath, now, folderId]
+      );
+
+      const descendants = allRows.filter((row) => row.path.startsWith(`${previousPath}/`));
+      for (const descendant of descendants) {
+        const descendantPath = `${nextPath}${descendant.path.slice(previousPath.length)}`;
+        await connection.query(
+          'UPDATE folders SET path = ?, updated_at = ? WHERE id = ?',
+          [descendantPath, now, descendant.id]
+        );
+      }
+
+      return this._mapFolderRow({
         ...folder,
         parent_id: newParentId,
         path: nextPath,
         updated_at: now
-      })
-    };
+      });
+    });
   }
 
   async deleteFolder(folderId) {

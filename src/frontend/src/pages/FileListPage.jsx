@@ -45,13 +45,13 @@ import {
   HardDrive,
   Server,
   FolderInput,
-  ArrowRight,
-  GripVertical,
   AlertTriangle,
   ListX
 } from 'lucide-react';
 import { PROVIDERS, getProviderConfig, getStatusConfig } from '../config/providers';
 import { toast } from '../store/toastStore';
+import FolderPickerModal from '../components/FolderPickerModal.jsx';
+import { PATHS } from '../config/routes.jsx';
 
 const statusIconMap = {
   CheckCircle,
@@ -92,177 +92,6 @@ function parseRcloneFileId(fileId) {
     remoteName: raw.slice(0, separatorIndex),
     remotePath: raw.slice(separatorIndex + 1)
   };
-}
-
-function flattenFolderTreeForMove(folderTree, excludeFolderId) {
-  const result = [];
-
-  const walk = (node, parentPath = '', depth = 0) => {
-    (node?.folders || []).forEach((folder) => {
-      if (folder.id === excludeFolderId) return;
-      const currentPath = parentPath ? `${parentPath}/${folder.name}` : folder.name;
-      const hasSubfolders = (folder.children?.folders || []).length > 0;
-      const isDescendant = (() => {
-        const check = (n) => {
-          if (!n?.folders) return false;
-          return n.folders.some((f) => f.id === excludeFolderId || check(f.children));
-        };
-        return check(folder.children);
-      })();
-
-      if (!isDescendant) {
-        result.push({
-          id: folder.id,
-          name: folder.name,
-          path: currentPath,
-          depth,
-          hasSubfolders
-        });
-      }
-
-      walk(folder.children, currentPath, depth + 1);
-    });
-  };
-
-  walk(folderTree, '', 0);
-  return result;
-}
-
-function MoveFolderModal({ folder, folderTree, onClose, onMove }) {
-  const [selectedParentId, setSelectedParentId] = useState(null);
-  const [search, setSearch] = useState('');
-  const moveFolder = useMoveFolder();
-
-  const targetFolders = useMemo(() => {
-    if (!folderTree) return [];
-    const flat = flattenFolderTreeForMove(folderTree, folder?.id);
-    flat.unshift({ id: 'root', name: 'Root', path: '/', depth: -1, hasSubfolders: true });
-    return flat;
-  }, [folderTree, folder?.id]);
-
-  const filtered = useMemo(() => {
-    if (!search.trim()) return targetFolders;
-    const q = search.toLowerCase();
-    return targetFolders.filter((f) => f.name.toLowerCase().includes(q) || f.path.toLowerCase().includes(q));
-  }, [targetFolders, search]);
-
-  const handleMove = async () => {
-    if (!selectedParentId) return;
-    try {
-      await onMove({ folderId: folder.id, newParentId: selectedParentId });
-      toast.success('Folder Moved', `"${folder.name}" moved successfully`);
-      onClose();
-    } catch (error) {
-      toast.error('Move Failed', error?.response?.data?.error || error.message);
-    }
-  };
-
-  const selectedTarget = targetFolders.find((f) => f.id === selectedParentId);
-
-  return (
-    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div className="card p-5 max-w-md w-full max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h3 className="text-lg font-medium text-white flex items-center gap-2">
-              <FolderInput className="w-5 h-5 text-blue-400" />
-              Move Folder
-            </h3>
-            <p className="text-xs text-[#888] mt-1">
-              Pindahkan <strong className="text-white">{folder?.name}</strong> ke folder lain
-            </p>
-          </div>
-          <button onClick={onClose} className="p-1.5 hover:bg-[#222] rounded">
-            <X className="w-5 h-5 text-[#666]" />
-          </button>
-        </div>
-
-        <div className="mb-3">
-          <div className="relative">
-            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-[#555]" />
-            <input
-              type="text"
-              placeholder="Cari folder..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="w-full pl-9 pr-4 py-2.5 bg-[#0d0d0d] border border-[#2a2a2a] rounded-lg text-sm text-[#ccc] placeholder-[#555] focus:outline-none focus:border-[#444]"
-            />
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-y-auto border border-[#222] rounded-lg bg-[#0d0d0d] mb-4 min-h-[200px] max-h-[400px]">
-          {filtered.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-10">
-              <Folder className="w-8 h-8 text-[#333] mb-2" />
-              <p className="text-xs text-[#666]">Tidak ada folder ditemukan</p>
-            </div>
-          ) : (
-            <div className="py-1">
-              {filtered.map((f) => {
-                const isSelected = selectedParentId === f.id;
-                const isRoot = f.id === 'root';
-                return (
-                  <button
-                    key={f.id}
-                    onClick={() => setSelectedParentId(f.id)}
-                    className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                      isSelected
-                        ? 'bg-blue-500/10 text-blue-300 border-l-2 border-blue-400'
-                        : 'text-[#aaa] hover:bg-[#141414] hover:text-white border-l-2 border-transparent'
-                    }`}
-                    style={{ paddingLeft: `${(f.depth + 1) * 16 + 12}px` }}
-                  >
-                    {isRoot ? (
-                      <HomeIcon className="w-4 h-4 flex-shrink-0 text-[#666]" />
-                    ) : (
-                      <Folder className={`w-4 h-4 flex-shrink-0 ${isSelected ? 'text-blue-400' : 'text-[#555]'}`} />
-                    )}
-                    <span className="truncate flex-1">{f.name}</span>
-                    {f.hasSubfolders && !isRoot && (
-                      <span className="text-[10px] text-[#555] flex-shrink-0">📁</span>
-                    )}
-                    {isSelected && (
-                      <CheckCircle className="w-4 h-4 text-blue-400 flex-shrink-0" />
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        {selectedTarget && (
-          <div className="mb-4 p-3 rounded-lg bg-[#1a1a1a] border border-[#2a2a2a]">
-            <p className="text-xs text-[#888]">
-              <strong className="text-white">{folder?.name}</strong>
-              <ArrowRight className="w-3 h-3 inline mx-1.5 text-[#555]" />
-              <strong className="text-white">{selectedTarget.name}</strong>
-            </p>
-          </div>
-        )}
-
-        <div className="flex gap-3 justify-end">
-          <button
-            onClick={onClose}
-            className="px-4 py-2.5 text-sm text-[#888] hover:text-white rounded-lg hover:bg-[#222] transition-colors"
-          >
-            Batal
-          </button>
-          <button
-            onClick={handleMove}
-            disabled={!selectedParentId || moveFolder.isLoading}
-            className="px-5 py-2.5 text-sm rounded-lg font-medium bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 border border-blue-500/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
-          >
-            {moveFolder.isLoading ? (
-              <><RefreshCw className="w-4 h-4 animate-spin" /> Moving...</>
-            ) : (
-              <><FolderInput className="w-4 h-4" /> Pindahkan</>
-            )}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
 }
 
 // File Detail Modal Component
@@ -627,6 +456,7 @@ export default function FileListPage() {
   const [sortOrder, setSortOrder] = useState('desc');
   const [fileMenuOpen, setFileMenuOpen] = useState(null);
   const [showRemoveFailedModal, setShowRemoveFailedModal] = useState(false);
+  const [moveFileTarget, setMoveFileTarget] = useState(null);
 
   const {
     data: filesResponse,
@@ -869,8 +699,10 @@ export default function FileListPage() {
     try {
       await moveFile.mutateAsync({ fileId, folderId });
       setFileMenuOpen(null);
+      setMoveFileTarget(null);
+      toast.success('File dipindahkan');
     } catch (error) {
-      alert('Move file failed: ' + error.message);
+      toast.error('Move file failed', error?.response?.data?.error || error.message);
     }
   };
 
@@ -965,7 +797,7 @@ export default function FileListPage() {
                     e.stopPropagation();
                     setMoveFolderTarget(folder);
                   }}
-                  className="p-1 mr-1 rounded text-[#555] hover:text-blue-400 hover:bg-blue-500/10 opacity-0 group-hover/folder:opacity-100 transition-all flex-shrink-0"
+                  className="p-1 mr-1 rounded text-[#555] hover:text-blue-400 hover:bg-blue-500/10 opacity-100 sm:opacity-0 sm:group-hover/folder:opacity-100 transition-all flex-shrink-0"
                   title="Move folder"
                 >
                   <FolderInput className="w-3 h-3" />
@@ -1026,6 +858,13 @@ export default function FileListPage() {
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-medium text-[#666] uppercase tracking-wide">Folders</span>
               <div className="flex items-center gap-1">
+                <button
+                  onClick={() => navigate(PATHS.folderManagement)}
+                  className="px-2 py-1 hover:bg-[#333] rounded text-[11px] text-[#888] hover:text-white"
+                  title="Manage folders"
+                >
+                  Manage
+                </button>
                 <button
                   onClick={handlePurgeCurrentFolder}
                   disabled={currentFolderId === 'root' || purgeFolder.isLoading}
@@ -1180,7 +1019,7 @@ export default function FileListPage() {
 
                         <button
                           onClick={() => setMoveFolderTarget(child)}
-                          className="p-1.5 rounded text-[#555] hover:text-blue-400 hover:bg-blue-500/10 opacity-0 group-hover:opacity-100 transition-all"
+                          className="p-1.5 rounded text-[#555] hover:text-blue-400 hover:bg-blue-500/10 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all"
                           title="Pindahkan folder"
                         >
                           <FolderInput className="w-4 h-4" />
@@ -1387,6 +1226,15 @@ export default function FileListPage() {
                               </button>
                               <button
                                 onClick={() => {
+                                  setMoveFileTarget(file);
+                                  setFileMenuOpen(null);
+                                }}
+                                className="w-full text-left px-3 py-2 text-xs text-[#aaa] hover:bg-[#222] hover:text-white flex items-center gap-2"
+                              >
+                                <FolderInput className="w-3.5 h-3.5" /> Move...
+                              </button>
+                              <button
+                                onClick={() => {
                                   handleCheckCompleteness(file.id);
                                   setFileMenuOpen(null);
                                 }}
@@ -1395,20 +1243,6 @@ export default function FileListPage() {
                                 <ScanSearch className="w-3.5 h-3.5" /> Check Completeness
                               </button>
                                
-                              <div className="border-t border-[#222] px-3 py-1.5 text-[10px] text-[#555] uppercase">Move to</div>
-                              {allFolders
-                                .filter((folder) => folder.id !== file.folderId)
-                                .slice(0, 5)
-                                .map((folder) => (
-                                  <button
-                                    key={folder.id}
-                                    onClick={() => handleMoveFile(file.id, folder.id)}
-                                    className="w-full text-left px-3 py-1.5 text-xs text-[#aaa] hover:bg-[#222] hover:text-white"
-                                  >
-                                    {folder.path}
-                                  </button>
-                                ))}
-                              
                               {Object.values(file.providers).some((p) => p.url || p.embedUrl) && (
                                 <>
                                   <div className="border-t border-[#222] px-3 py-1.5 text-[10px] text-[#555] uppercase">External Links</div>
@@ -1453,11 +1287,41 @@ export default function FileListPage() {
       )}
 
       {moveFolderTarget && (
-        <MoveFolderModal
-          folder={moveFolderTarget}
+        <FolderPickerModal
+          isOpen={Boolean(moveFolderTarget)}
+          title="Move Folder"
+          description={`Pindahkan folder "${moveFolderTarget.name}" ke parent baru.`}
+          confirmText="Pindahkan Folder"
+          sourceLabel={moveFolderTarget.path || moveFolderTarget.name}
           folderTree={folderTree}
+          currentFolderId={moveFolderTarget.parentId}
+          excludeFolderId={moveFolderTarget.id}
+          isSubmitting={moveFolder.isLoading}
           onClose={() => setMoveFolderTarget(null)}
-          onMove={handleMoveFolder}
+          onConfirm={async (targetFolder) => {
+            try {
+              await handleMoveFolder({ folderId: moveFolderTarget.id, newParentId: targetFolder.id });
+              toast.success('Folder dipindahkan', `"${moveFolderTarget.name}" dipindahkan ke ${targetFolder.path}`);
+              setMoveFolderTarget(null);
+            } catch (error) {
+              toast.error('Move failed', error?.response?.data?.error || error.message);
+            }
+          }}
+        />
+      )}
+
+      {moveFileTarget && (
+        <FolderPickerModal
+          isOpen={Boolean(moveFileTarget)}
+          title="Move File"
+          description={`Pindahkan "${moveFileTarget.name}" ke folder lain.`}
+          confirmText="Pindahkan File"
+          sourceLabel={moveFileTarget.name}
+          folderTree={folderTree}
+          currentFolderId={moveFileTarget.folderId}
+          isSubmitting={moveFile.isLoading}
+          onClose={() => setMoveFileTarget(null)}
+          onConfirm={(targetFolder) => handleMoveFile(moveFileTarget.id, targetFolder.id)}
         />
       )}
 
