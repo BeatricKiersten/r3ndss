@@ -719,7 +719,7 @@ export default function ZeniusPage() {
   const [batchResult, setBatchResult] = useState(null);
   const savedPreviewSession = useMemo(() => loadSavedBatchPreviewSession(), []);
   const [previewRunId, setPreviewRunId] = useState(savedPreviewSession?.previewRunId || null);
-  const [downloadRunId, setDownloadRunId] = useState(null);
+  const [downloadRunId, setDownloadRunId] = useState(savedPreviewSession?.downloadRunId || null);
   const [batchSessionId, setBatchSessionId] = useState(savedPreviewSession?.batchSessionId || null);
   const [previewContextSignature, setPreviewContextSignature] = useState(savedPreviewSession?.contextSignature || null);
   const [batchBuildProgress, setBatchBuildProgress] = useState(null);
@@ -773,16 +773,17 @@ export default function ZeniusPage() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    if (!previewRunId && !batchSessionId) {
+    if (!previewRunId && !batchSessionId && !downloadRunId) {
       localStorage.removeItem(BATCH_PREVIEW_SESSION_STORAGE_KEY);
       return;
     }
     localStorage.setItem(BATCH_PREVIEW_SESSION_STORAGE_KEY, JSON.stringify({
       previewRunId,
+      downloadRunId,
       batchSessionId,
       contextSignature: previewContextSignature || null
     }));
-  }, [previewRunId, batchSessionId, previewContextSignature]);
+  }, [previewRunId, downloadRunId, batchSessionId, previewContextSignature]);
 
   useEffect(() => {
     previewPollErrorCountRef.current = previewPollErrorCount;
@@ -810,9 +811,21 @@ export default function ZeniusPage() {
 
   const trackedDownloadRun = useMemo(() => {
     const runs = Array.isArray(queueStatus?.backgroundBatches) ? queueStatus.backgroundBatches : [];
-    if (!downloadRunId) return null;
-    return runs.find((item) => item.id === downloadRunId && item.type !== 'preview') || null;
-  }, [queueStatus, downloadRunId]);
+    if (downloadRunId) {
+      const exactRun = runs.find((item) => item.id === downloadRunId && item.type !== 'preview') || null;
+      if (exactRun) return exactRun;
+    }
+
+    const matchingSessionRun = runs.find((item) => (
+      item.type !== 'preview'
+      && item.status === 'running'
+      && batchSessionId
+      && item.sessionId === batchSessionId
+    )) || null;
+    if (matchingSessionRun) return matchingSessionRun;
+
+    return runs.find((item) => item.type !== 'preview' && item.status === 'running') || null;
+  }, [queueStatus, downloadRunId, batchSessionId]);
 
   useEffect(() => {
     if (!trackedPreviewRun) return;
@@ -861,6 +874,8 @@ export default function ZeniusPage() {
 
   useEffect(() => {
     if (!trackedDownloadRun) return;
+    setDownloadRunId((prev) => trackedDownloadRun.id || prev || null);
+    setBatchSessionId((prev) => trackedDownloadRun.sessionId || prev || null);
     setBatchQueueProgress({
       containersProcessed: Number(trackedDownloadRun.scannedContainerCount || trackedDownloadRun.processedContainers || 0),
       containersTotal: Number.isFinite(Number(trackedDownloadRun.totalContainers)) ? Number(trackedDownloadRun.totalContainers) : null
