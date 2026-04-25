@@ -348,6 +348,18 @@ export const getZeniusBatchChainStatus = async (sessionId) => {
   return response.data.data;
 };
 
+export const getZeniusBatchSessionStatus = async (sessionId) => {
+  const response = await api.get(`/api/zenius/batch-sessions/${sessionId}`, {
+    headers: {
+      'Cache-Control': 'no-cache'
+    },
+    params: {
+      _: Date.now()
+    }
+  });
+  return response.data.data;
+};
+
 export const useZeniusBatchDownload = () => {
   const queryClient = useQueryClient();
 

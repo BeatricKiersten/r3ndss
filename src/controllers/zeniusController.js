@@ -1120,8 +1120,9 @@ function prepareBatchPlanForExecution(session) {
 
   for (const plannedItem of session.plannedItems) {
     if (plannedItem?.fastPreviewProviderValidation) {
-      plannedItem.action = 'pending-provider-validation';
-      plannedItem.reason = 'Provider validation deferred until execution';
+      plannedItem.action = 'skip';
+      plannedItem.reason = 'File exists; skipped by fast preview mode';
+      plannedItem.pendingProviders = [];
     }
   }
 }
@@ -3694,51 +3695,17 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
     totalInstances += 1;
 
     if (plannedItem.fastPreviewProviderValidation && plannedItem.fileId) {
-      const existingFile = await db.getFile(plannedItem.fileId).catch(() => null);
-      const existingStatus = String(existingFile?.status || plannedItem.existingStatus || '').trim().toLowerCase();
-
-      if (existingStatus === 'processing' || existingStatus === 'uploading') {
-        skipped.push({
-          urlShortId: plannedItem.urlShortId,
-          reason: 'File is already being processed',
-          path: plannedItem.path,
-          fileId: plannedItem.fileId,
-          outputName: plannedItem.outputName,
-          uploadQueue: null,
-          pendingProviders: []
-        });
-        continue;
-      }
-
-      if (existingStatus !== 'failed') {
-        const pendingProviderInfo = await uploaderService.getPendingUploadProviders(plannedItem.fileId, plannedItem.selectedProviders, {
-          verifyRemote: false
-        });
-
-        if (!pendingProviderInfo.hasPendingProviders) {
-          skipped.push({
-            urlShortId: plannedItem.urlShortId,
-            reason: 'File already exists on selected providers',
-            path: plannedItem.path,
-            fileId: plannedItem.fileId,
-            outputName: plannedItem.outputName,
-            uploadQueue: null,
-            pendingProviders: []
-          });
-          continue;
-        }
-
-        plannedItem.action = 'finalize';
-        plannedItem.reason = 'File already exists locally; queued missing providers only';
-        plannedItem.pendingProviders = pendingProviderInfo.pendingProviders || [];
-        if (!existingFile?.localPath || !await fs.pathExists(existingFile.localPath)) {
-          plannedItem.action = 'download';
-          plannedItem.reason = `Existing file ${plannedItem.fileId} is missing local source; re-downloading missing providers`;
-        }
-      } else {
-        plannedItem.action = 'retry';
-        plannedItem.reason = 'Retrying failed file';
-      }
+      skipped.push({
+        urlShortId: plannedItem.urlShortId,
+        reason: plannedItem.reason || 'File exists; skipped by fast preview mode',
+        path: plannedItem.path,
+        fileId: plannedItem.fileId,
+        outputName: plannedItem.outputName,
+        uploadQueue: null,
+        pendingProviders: [],
+        fastPreviewProviderValidation: true
+      });
+      continue;
     }
 
     if (plannedItem.executionDuplicateValidation) {
@@ -4237,6 +4204,9 @@ async function processBackgroundBatchRun(run, payload) {
               phase: run.phase,
               lastProgressAt: run.lastProgressAt || Date.now(),
               lastError: run.lastError || null,
+              discoveredVideoCount: Number(run.discoveredVideoCount || 0),
+              downloadCompletedCount: Number(run.downloadCompletedCount || 0),
+              downloadFailedCount: Number(run.downloadFailedCount || 0),
               queuedItemsTracked: Array.isArray(run.queued) ? run.queued.length : 0,
               skippedItemsTracked: Array.isArray(run.skipped) ? run.skipped.length : 0,
               queuedItemsOverflow: Number(run.queuedOverflow || 0),
@@ -4344,6 +4314,9 @@ async function processBackgroundBatchRun(run, payload) {
             phase: run.phase,
             lastProgressAt: run.lastProgressAt || Date.now(),
             lastError: run.lastError || run.error || null,
+            discoveredVideoCount: Number(run.discoveredVideoCount || 0),
+            downloadCompletedCount: Number(run.downloadCompletedCount || 0),
+            downloadFailedCount: Number(run.downloadFailedCount || 0),
             queuedItemsTracked: Array.isArray(run.queued) ? run.queued.length : 0,
             skippedItemsTracked: Array.isArray(run.skipped) ? run.skipped.length : 0,
             queuedItemsOverflow: Number(run.queuedOverflow || 0),

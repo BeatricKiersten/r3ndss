@@ -37,6 +37,7 @@ import {
 } from 'lucide-react';
 import {
   getZeniusBatchChainStatus,
+  getZeniusBatchSessionStatus,
   useDeleteAllFolders,
   useDeleteFolder,
   useFolders,
@@ -132,6 +133,50 @@ function loadSavedProviders() {
   } catch {
     return [];
   }
+}
+
+function normalizeBatchSessionRun(status) {
+  if (!status) return null;
+  if (status.inMemoryRun) return status.inMemoryRun;
+
+  const dbSession = status.dbSession;
+  if (!dbSession) return null;
+  const sessionData = dbSession.sessionData || {};
+  const queuedItems = Array.isArray(dbSession.queuedItems) ? dbSession.queuedItems : [];
+  const skippedItems = Array.isArray(dbSession.skippedItems) ? dbSession.skippedItems : [];
+
+  return {
+    id: dbSession.id,
+    type: sessionData.type || 'download',
+    status: dbSession.status,
+    error: dbSession.error || sessionData.lastError || null,
+    lastError: sessionData.lastError || dbSession.error || null,
+    phase: sessionData.phase || dbSession.status,
+    sessionId: sessionData.sessionId || dbSession.runId || dbSession.id,
+    rootCgId: dbSession.rootCgId,
+    rootCgName: dbSession.rootCgName,
+    targetCgSelector: dbSession.targetCgSelector,
+    parentContainerName: dbSession.parentContainerName,
+    totalContainers: Number(dbSession.totalContainers || 0),
+    scannedContainerCount: Number(dbSession.processedContainers || 0),
+    processedContainers: Number(dbSession.processedContainers || 0),
+    discoveredVideoCount: Number(sessionData.discoveredVideoCount || dbSession.queuedCount || 0),
+    queuedCount: Number(dbSession.queuedCount || 0),
+    skippedCount: Number(dbSession.skippedCount || 0),
+    downloadCompletedCount: Number(sessionData.downloadCompletedCount || 0),
+    downloadFailedCount: Number(sessionData.downloadFailedCount || 0),
+    queuedItemsTracked: Number(sessionData.queuedItemsTracked ?? queuedItems.length),
+    skippedItemsTracked: Number(sessionData.skippedItemsTracked ?? skippedItems.length),
+    queuedItemsOverflow: Number(sessionData.queuedItemsOverflow || 0),
+    skippedItemsOverflow: Number(sessionData.skippedItemsOverflow || 0),
+    hasMoreContainers: Boolean(dbSession.hasMore),
+    nextContainerOffset: Number(dbSession.nextContainerOffset || 0),
+    chainErrors: Array.isArray(dbSession.chainErrors) ? dbSession.chainErrors : [],
+    startedAt: dbSession.createdAt,
+    finishedAt: dbSession.finishedAt,
+    updatedAt: dbSession.updatedAt,
+    lastProgressAt: sessionData.lastProgressAt || dbSession.updatedAt
+  };
 }
 
 function StatusBadge({ status }) {
@@ -772,6 +817,7 @@ export default function ZeniusPage() {
   const deleteAllFolders = useDeleteAllFolders();
   const batchRootCgRef = useRef(null);
   const batchChainPollRef = useRef(null);
+  const batchDownloadPollRef = useRef(null);
   const previewPollErrorCountRef = useRef(0);
 
   useEffect(() => {
@@ -905,6 +951,69 @@ export default function ZeniusPage() {
   }, [trackedDownloadRun]);
 
   useEffect(() => {
+    if (!downloadRunId || typeof window === 'undefined') {
+      if (batchDownloadPollRef.current) {
+        window.clearInterval(batchDownloadPollRef.current);
+        batchDownloadPollRef.current = null;
+      }
+      return undefined;
+    }
+
+    const applyStatus = (status) => {
+      const run = normalizeBatchSessionRun(status);
+      if (!run) return;
+
+      setDownloadRunId((prev) => run.id || prev || null);
+      setBatchSessionId((prev) => run.sessionId || prev || null);
+      setBatchQueueProgress({
+        containersProcessed: Number(run.scannedContainerCount || run.processedContainers || 0),
+        containersTotal: Number.isFinite(Number(run.totalContainers)) ? Number(run.totalContainers) : null
+      });
+      setBatchResult((prev) => ({
+        ...(prev || {}),
+        ...run,
+        batchRunId: run.id || downloadRunId,
+        queuedCount: Number(run.queuedCount || 0),
+        skippedCount: Number(run.skippedCount || 0),
+        downloadCompletedCount: Number(run.downloadCompletedCount || 0),
+        downloadFailedCount: Number(run.downloadFailedCount || 0),
+        discoveredVideoCount: Number(run.discoveredVideoCount || 0)
+      }));
+
+      if (run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled') {
+        if (batchDownloadPollRef.current) {
+          window.clearInterval(batchDownloadPollRef.current);
+          batchDownloadPollRef.current = null;
+        }
+      }
+    };
+
+    const poll = async () => {
+      const status = await getZeniusBatchSessionStatus(downloadRunId);
+      applyStatus(status);
+    };
+
+    poll().catch((error) => {
+      console.error('Failed to fetch zenius batch session status:', error);
+    });
+
+    if (!batchDownloadPollRef.current) {
+      batchDownloadPollRef.current = window.setInterval(() => {
+        poll().catch((error) => {
+          console.error('Failed to poll zenius batch session status:', error);
+        });
+      }, BATCH_PREVIEW_POLL_INTERVAL_MS);
+    }
+
+    return () => {
+      if (batchDownloadPollRef.current) {
+        window.clearInterval(batchDownloadPollRef.current);
+        batchDownloadPollRef.current = null;
+      }
+    };
+  }, [downloadRunId]);
+
+  useEffect(() => {
     const hasActiveWork = Boolean(
       queueStatus?.active || queueStatus?.queued || queueStatus?.activeBackgroundBatchCount || trackedPreviewRun?.status === 'running' || trackedDownloadRun?.status === 'running'
     );
@@ -998,6 +1107,10 @@ export default function ZeniusPage() {
       if (batchChainPollRef.current) {
         window.clearInterval(batchChainPollRef.current);
         batchChainPollRef.current = null;
+      }
+      if (batchDownloadPollRef.current) {
+        window.clearInterval(batchDownloadPollRef.current);
+        batchDownloadPollRef.current = null;
       }
 
       setBatchChain(null);
@@ -1093,6 +1206,10 @@ export default function ZeniusPage() {
     if (batchChainPollRef.current) {
       window.clearInterval(batchChainPollRef.current);
       batchChainPollRef.current = null;
+    }
+    if (batchDownloadPollRef.current) {
+      window.clearInterval(batchDownloadPollRef.current);
+      batchDownloadPollRef.current = null;
     }
   }, []);
 
