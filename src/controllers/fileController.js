@@ -26,8 +26,8 @@ async function deleteFilesInBulk(files, options = {}) {
 const fileController = {
   async list(req, res) {
     try {
-      const { folderId, status, limit, offset } = req.query;
-      const result = await db.listFilesPage({ folderId, status, limit, offset });
+      const { folderId, status, limit, offset, view } = req.query;
+      const result = await db.listFilesPage({ folderId, status, limit, offset, summary: view !== 'full' });
       res.json(success(result.items, { pagination: result.pagination }));
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });

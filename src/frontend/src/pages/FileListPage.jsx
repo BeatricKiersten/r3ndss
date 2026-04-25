@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   useFiles,
+  useFile,
   useForceDeleteFile,
   useFolders,
   useFolder,
@@ -479,6 +480,9 @@ export default function FileListPage() {
   const checkAllFilesCompleteness = useCheckAllFilesCompleteness();
   const checkFileCompleteness = useCheckFileCompleteness();
   const [moveFolderTarget, setMoveFolderTarget] = useState(null);
+  const [fullFileId, setFullFileId] = useState(null);
+  const [pendingFullFileAction, setPendingFullFileAction] = useState(null);
+  const fullFileQuery = useFile(fullFileId);
 
   const files = filesResponse?.data || [];
   const problemFiles = problemFilesQuery.data?.data || [];
@@ -599,9 +603,28 @@ export default function FileListPage() {
     setFileMenuOpen(null);
   };
 
+  useEffect(() => {
+    if (!pendingFullFileAction || !fullFileQuery.data) return;
+
+    if (pendingFullFileAction === 'play') {
+      setCurrentFile(fullFileQuery.data);
+      navigate(PATHS.player);
+    }
+
+    if (pendingFullFileAction === 'detail') {
+      setSelectedFile(fullFileQuery.data);
+    }
+
+    setPendingFullFileAction(null);
+  }, [fullFileQuery.data, navigate, pendingFullFileAction, setCurrentFile]);
+
+  const loadFullFile = (fileId, action) => {
+    setFullFileId(fileId);
+    setPendingFullFileAction(action);
+  };
+
   const handlePlay = (file) => {
-    setCurrentFile(file);
-    navigate('/player');
+    loadFullFile(file.id, 'play');
   };
 
   const handleDelete = async (fileId, name) => {
@@ -975,7 +998,7 @@ export default function FileListPage() {
                     New Folder
                   </button>
                   <button
-                    onClick={() => navigate('/')}
+                    onClick={() => navigate(PATHS.upload)}
                     className="btn btn-primary flex items-center gap-2"
                   >
                     <Upload className="w-4 h-4" />
@@ -1104,7 +1127,7 @@ export default function FileListPage() {
                 </p>
                 {!searchQuery && (
                   <button
-                    onClick={() => navigate('/')}
+                    onClick={() => navigate(PATHS.upload)}
                     className="btn btn-primary flex items-center gap-2"
                   >
                     <Upload className="w-4 h-4" />
@@ -1156,7 +1179,7 @@ export default function FileListPage() {
                             title={`${getProviderConfig(p)?.name || p}: ${s.status}`}
                             onClick={(e) => {
                               e.stopPropagation();
-                              setSelectedFile(file);
+                              loadFullFile(file.id, 'detail');
                             }}
                           >
                             {(() => {
@@ -1219,7 +1242,7 @@ export default function FileListPage() {
                             />
                             <div className="absolute right-0 top-full mt-1 w-44 py-1 bg-[#1a1a1a] rounded-lg border border-[#333] shadow-xl z-20">
                               <button
-                                onClick={() => { setSelectedFile(file); setFileMenuOpen(null); }}
+                                onClick={() => { loadFullFile(file.id, 'detail'); setFileMenuOpen(null); }}
                                 className="w-full text-left px-3 py-2 text-xs text-[#aaa] hover:bg-[#222] hover:text-white flex items-center gap-2"
                               >
                                 <Eye className="w-3.5 h-3.5" /> View Details
@@ -1243,22 +1266,15 @@ export default function FileListPage() {
                                 <ScanSearch className="w-3.5 h-3.5" /> Check Completeness
                               </button>
                                
-                              {Object.values(file.providers).some((p) => p.url || p.embedUrl) && (
+                              {Object.values(file.providers).some((p) => p.hasUrl) && (
                                 <>
                                   <div className="border-t border-[#222] px-3 py-1.5 text-[10px] text-[#555] uppercase">External Links</div>
-                                  {Object.entries(file.providers)
-                                    .filter(([_, p]) => p.url || p.embedUrl)
-                                    .map(([name, p]) => (
-                                      <a
-                                        key={name}
-                                        href={p.embedUrl || p.url}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="block px-3 py-1.5 text-xs text-[#aaa] hover:bg-[#222] hover:text-white"
-                                      >
-                                        {getProviderConfig(name)?.name || name}
-                                      </a>
-                                    ))}
+                                  <button
+                                    onClick={() => { loadFullFile(file.id, 'detail'); setFileMenuOpen(null); }}
+                                    className="w-full text-left px-3 py-1.5 text-xs text-[#aaa] hover:bg-[#222] hover:text-white"
+                                  >
+                                    Open details for provider links
+                                  </button>
                                 </>
                               )}
                               

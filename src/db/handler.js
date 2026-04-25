@@ -567,6 +567,41 @@ class DatabaseHandler {
     };
   }
 
+  _mapFileSummaryRow(row, providerRows = [], providerCatalog = []) {
+    const providers = {};
+    const providerNames = new Map((providerCatalog || []).map((provider) => [provider.id, provider.name]));
+
+    for (const providerRow of providerRows) {
+      providers[providerRow.provider] = {
+        providerName: providerNames.get(providerRow.provider) || providerRow.provider,
+        status: providerRow.status || 'pending',
+        hasUrl: Boolean(providerRow.url || providerRow.embed_url),
+        hasEmbedUrl: Boolean(providerRow.embed_url),
+        updatedAt: providerRow.updated_at || null
+      };
+    }
+
+    return {
+      id: row.id,
+      folderId: row.folder_id,
+      name: row.name,
+      size: toInt(row.size),
+      duration: Number(row.duration) || 0,
+      status: row.status,
+      progress: {
+        download: toInt(row.progress_download),
+        processing: toInt(row.progress_processing),
+        upload: toInt(row.progress_upload),
+        ...(parseJson(row.progress_extra, {}) || {})
+      },
+      providers,
+      syncStatus: toInt(row.sync_status),
+      canDelete: toBool(row.can_delete),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   async _buildFileCompleteness(fileId, providerRows = null, options = {}) {
     const includeDisabled = options.includeDisabled === true;
     const providerCatalog = Array.isArray(options.providerCatalog)
@@ -1295,6 +1330,10 @@ class DatabaseHandler {
             updated_at: row.updated_at || null
           });
         }
+      }
+
+      if (options.summary) {
+        return this._mapFileSummaryRow(row, rows, providerCatalog);
       }
 
       return this._mapFileRow(row, rows, providerCatalog);
@@ -2163,7 +2202,8 @@ class DatabaseHandler {
       folderId = null,
       status = null,
       limit = 50,
-      offset = 0
+      offset = 0,
+      summary = false
     } = filters;
 
     const where = [];
@@ -2205,7 +2245,7 @@ class DatabaseHandler {
     );
 
     return {
-      items: await this._hydrateFiles(rows),
+      items: await this._hydrateFiles(rows, { summary }),
       pagination: {
         total: toInt(countRows[0]?.count),
         limit: safeLimit,

@@ -176,19 +176,21 @@ export const useFiles = (folderId, status, options = {}) => {
   const {
     limit = 50,
     offset = 0,
+    view = 'summary',
     enabled = true,
     refetchInterval = 15000,
     refetchIntervalInBackground = false
   } = options;
 
   return useQuery(
-    ['files', folderId, status, limit, offset],
+    ['files', folderId, status, limit, offset, view],
     async () => {
       const params = {};
       if (folderId) params.folderId = folderId;
       if (status) params.status = status;
       if (limit) params.limit = limit;
       if (offset) params.offset = offset;
+      if (view) params.view = view;
       
       const response = await api.get('/api/files', { params });
       return response.data;

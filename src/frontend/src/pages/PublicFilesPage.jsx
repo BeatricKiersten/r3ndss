@@ -144,8 +144,8 @@ export default function PublicFilesPage() {
 
   const { data: folderTree } = useFolders();
   const { data: currentFolder } = useFolder(currentFolderId);
-  const { data: allFilesResponse } = useFiles(undefined, undefined, { limit: 200, refetchInterval: 30000 });
-  const { data: folderFilesResponse } = useFiles(currentFolderId, undefined, { limit: 200, refetchInterval: 30000 });
+  const { data: allFilesResponse } = useFiles(undefined, undefined, { limit: 200, view: 'full', refetchInterval: 30000 });
+  const { data: folderFilesResponse } = useFiles(currentFolderId, undefined, { limit: 200, view: 'full', refetchInterval: 30000 });
   const allFiles = allFilesResponse?.data || [];
   const folderFiles = folderFilesResponse?.data || [];
 

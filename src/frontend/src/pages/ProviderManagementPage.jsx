@@ -42,7 +42,7 @@ export default function ProviderManagementPage() {
   const { data: providers, isLoading: providersLoading } = useProviders();
   const { data: providersStatus, isLoading: statusLoading, refetch: refetchStatus } = useProvidersStatus();
   const { data: providerSnapshots } = useProviderCheckSnapshots();
-  const { data: filesResponse } = useFiles(undefined, undefined, { limit: 200, refetchInterval: 30000 });
+  const { data: filesResponse } = useFiles(undefined, undefined, { limit: 200, view: 'full', refetchInterval: 30000 });
   const files = filesResponse?.data || [];
   const { data: lastCheck } = useLastCheck();
   const { data: primaryProviderData } = usePrimaryProvider();

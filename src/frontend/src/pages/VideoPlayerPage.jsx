@@ -37,7 +37,7 @@ export default function VideoPlayerPage() {
   const [reuploadSource, setReuploadSource] = useState('');
   const [reuploadProvider, setReuploadProvider] = useState('');
   const navigate = useNavigate();
-  const { data: filesResponse } = useFiles(undefined, undefined, { limit: 100, refetchInterval: 30000 });
+  const { data: filesResponse } = useFiles(undefined, undefined, { limit: 100, view: 'full', refetchInterval: 30000 });
   const files = filesResponse?.data || [];
   const reuploadToProvider = useReuploadToProvider();
 
