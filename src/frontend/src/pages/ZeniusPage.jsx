@@ -608,6 +608,8 @@ function BatchProgressCard({ batchResult, batchQueueProgress, trackedBatchRun, b
   const pct = total ? Math.round((processed / total) * 100) : 0;
   const isRunning = status === 'running';
   const runLabel = trackedBatchRun?.type === 'preview' ? 'Preview Build' : 'Batch Download';
+  const phase = trackedBatchRun?.phase || batchResult?.phase || null;
+  const lastError = trackedBatchRun?.lastError || batchResult?.lastError || trackedBatchRun?.error || batchResult?.error || null;
 
   return (
     <div className={`card p-5 space-y-4 ${isRunning ? 'border-blue-500/30' : status === 'completed' ? 'border-emerald-500/30' : 'border-amber-500/30'}`}>
@@ -633,6 +635,16 @@ function BatchProgressCard({ batchResult, batchQueueProgress, trackedBatchRun, b
             <p className="text-xs text-[#888]">
               {isRunning ? 'Videos are being processed in the background' : `${runLabel} finished with status: ${status}`}
             </p>
+            {phase && (
+              <p className="text-[11px] text-sky-300 mt-0.5">
+                Phase: <span className="font-mono">{phase}</span>
+              </p>
+            )}
+            {lastError && status !== 'completed' && (
+              <p className="text-[11px] text-red-300 mt-0.5">
+                Error: {lastError}
+              </p>
+            )}
           </div>
         </div>
         {isRunning && onCancelBatch && (

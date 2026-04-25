@@ -448,15 +448,28 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitForDownloadQueueCapacity({ cancelled = () => false, maxQueued = null, pollMs = 250 } = {}) {
+async function waitForDownloadQueueCapacity({ cancelled = () => false, maxQueued = null, pollMs = 250, onWait = null } = {}) {
   const normalizedMaxQueued = Number.isFinite(Number(maxQueued))
     ? Math.max(0, Number(maxQueued))
     : 0;
+  const startedAt = Date.now();
+  let lastWaitLogAt = 0;
 
   while (!cancelled()) {
     const status = downloadQueue.getStatus();
     if (!status.isProcessing && status.active < downloadQueue.maxConcurrent && status.queued <= normalizedMaxQueued) {
       return;
+    }
+    if (typeof onWait === 'function') {
+      const now = Date.now();
+      if (!lastWaitLogAt || now - lastWaitLogAt >= 10000) {
+        lastWaitLogAt = now;
+        onWait({
+          ...status,
+          maxQueued: normalizedMaxQueued,
+          waitedMs: now - startedAt
+        });
+      }
     }
     await sleep(pollMs);
   }
@@ -654,6 +667,8 @@ function createBackgroundBatchRun({ rootCgId, targetCgSelector, baseFolderInput,
     updatedAt: now,
     expiresAt: now + clampPositiveInt(BACKGROUND_BATCH_RUN_TTL_MS, 21600000),
     status: 'running',
+    type: 'download',
+    phase: 'created',
     error: null,
     rootCgId,
     targetCgSelector: String(targetCgSelector || '').trim() || null,
@@ -679,6 +694,8 @@ function createBackgroundBatchRun({ rootCgId, targetCgSelector, baseFolderInput,
     itemErrors: [],
     _itemErrorsOverflow: 0,
     chainErrors: [],
+    lastProgressAt: now,
+    lastError: null,
     hasMoreContainers: true,
     nextContainerOffset: 0,
     startedAt: new Date(now).toISOString(),
@@ -744,6 +761,23 @@ function touchBackgroundBatchRun(run) {
   const now = Date.now();
   run.updatedAt = now;
   run.expiresAt = now + clampPositiveInt(BACKGROUND_BATCH_RUN_TTL_MS, 21600000);
+}
+
+function markBackgroundBatchPhase(run, phase, details = {}) {
+  if (!run) return;
+  const now = Date.now();
+  run.phase = phase;
+  run.lastProgressAt = now;
+  if (details.error) {
+    run.lastError = details.error;
+  }
+  touchBackgroundBatchRun(run);
+
+  const detailText = Object.entries(details)
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .map(([key, value]) => `${key}=${value}`)
+    .join(' ');
+  console.log(`[Zenius][Batch] run=${run.id || '-'} phase=${phase} session=${run.sessionId || '-'} ${detailText}`.trim());
 }
 
 function safeArrayClone(value) {
@@ -928,6 +962,7 @@ function summarizeBackgroundBatchRun(run) {
     skippedItemsOverflow: Number(run.skippedOverflow || 0),
     itemErrorsTracked: Array.isArray(run.itemErrors) ? run.itemErrors.length : 0,
     itemErrorsOverflow: Number(run._itemErrorsOverflow || 0),
+    phase: run.phase || (run.type === 'preview' ? 'preview' : 'running'),
     downloadCompletedCount: run.downloadCompletedCount || 0,
     downloadFailedCount: run.downloadFailedCount || 0,
     hasMoreContainers: run.hasMoreContainers,
@@ -3792,7 +3827,19 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
       if (!hasLocalSource) {
         await waitForDownloadQueueCapacity({
           cancelled,
-          maxQueued: getBatchDownloadMaxQueued()
+          maxQueued: getBatchDownloadMaxQueued(),
+          onWait: (status) => {
+            if (runId && backgroundBatchRuns.has(runId)) {
+              const run = backgroundBatchRuns.get(runId);
+              markBackgroundBatchPhase(run, 'waiting-queue-capacity', {
+                active: status.active,
+                queued: status.queued,
+                max: status.max,
+                maxQueued: status.maxQueued,
+                waitedMs: status.waitedMs
+              });
+            }
+          }
         });
         if (cancelled()) {
           break;
@@ -3891,7 +3938,19 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
       : plannedItem.selectedProviders;
     await waitForDownloadQueueCapacity({
       cancelled,
-      maxQueued: getBatchDownloadMaxQueued()
+      maxQueued: getBatchDownloadMaxQueued(),
+      onWait: (status) => {
+        if (runId && backgroundBatchRuns.has(runId)) {
+          const run = backgroundBatchRuns.get(runId);
+          markBackgroundBatchPhase(run, 'waiting-queue-capacity', {
+            active: status.active,
+            queued: status.queued,
+            max: status.max,
+            maxQueued: status.maxQueued,
+            waitedMs: status.waitedMs
+          });
+        }
+      }
     });
     if (cancelled()) {
       break;
@@ -3972,6 +4031,11 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
 
 async function processBackgroundBatchRun(run, payload) {
   let dbSession = null;
+  markBackgroundBatchPhase(run, 'persisting-session', {
+    rootCgId: payload.rootCgId || DEFAULT_BATCH_ROOT_CGROUP_ID,
+    targetCgSelector: payload.targetCgSelector || '-',
+    folder: payload.baseFolderInput || 'root'
+  });
   try {
     dbSession = await db.createBatchSession({
       id: run.id,
@@ -3987,12 +4051,18 @@ async function processBackgroundBatchRun(run, payload) {
       skippedCount: 0,
       nextContainerOffset: 0,
       hasMore: true,
-      sessionData: {},
+      sessionData: {
+        type: 'download',
+        sessionId: run.sessionId || null,
+        phase: run.phase,
+        lastProgressAt: run.lastProgressAt || Date.now()
+      },
       queuedItems: [],
       skippedItems: [],
       chainErrors: [],
       expiresAt: run.expiresAt
     });
+    markBackgroundBatchPhase(run, 'session-persisted');
   } catch (dbError) {
     console.warn(`[Zenius] Failed to persist batch session to DB (will retry in background): ${dbError.message}`);
     // Schedule a retry after a brief delay — don't block the batch from starting
@@ -4026,6 +4096,7 @@ async function processBackgroundBatchRun(run, payload) {
   }
 
   try {
+    markBackgroundBatchPhase(run, 'validating-preview-plan');
     let currentSessionId = run.sessionId || null;
     let nextOffset = 0;
     let hasMore = true;
@@ -4034,11 +4105,17 @@ async function processBackgroundBatchRun(run, payload) {
     const planningContext = normalizePlanningContext(payload.baseFolderInput, payload.selectedProviders);
 
     if (!currentSessionId || !batchChainSessions.has(currentSessionId)) {
+      markBackgroundBatchPhase(run, 'failed', { error: 'Preview plan session is missing' });
       throw new Error('Preview plan session is missing');
     }
 
     const session = batchChainSessions.get(currentSessionId);
     if (!session || session.planContextKey !== planningContext.key || !session.planReady) {
+      markBackgroundBatchPhase(run, 'failed', {
+        error: 'Preview plan is not ready for the requested folder/providers context',
+        planReady: Boolean(session?.planReady),
+        plannedItems: Number(session?.plannedItems?.length || 0)
+      });
       throw new Error('Preview plan is not ready for the requested folder/providers context');
     }
 
@@ -4048,6 +4125,10 @@ async function processBackgroundBatchRun(run, payload) {
     run.hasMoreContainers = run.totalContainers > 0;
     run.nextContainerOffset = 0;
     run.chainErrors = Array.isArray(session.errors) ? [...session.errors] : [];
+    markBackgroundBatchPhase(run, 'plan-ready', {
+      plannedItems: run.totalContainers,
+      planReady: Boolean(session.planReady)
+    });
 
     while (hasMore) {
       if (run.status !== 'running') {
@@ -4061,6 +4142,7 @@ async function processBackgroundBatchRun(run, payload) {
 
       const planSession = batchChainSessions.get(currentSessionId);
       if (!planSession || planSession.planContextKey !== planningContext.key || !planSession.planReady) {
+        markBackgroundBatchPhase(run, 'failed', { error: 'Preview plan session is no longer available' });
         throw new Error('Preview plan session is no longer available');
       }
 
@@ -4085,6 +4167,12 @@ async function processBackgroundBatchRun(run, payload) {
       run.hasMoreContainers = Boolean(chain.hasMoreContainers);
       run.nextContainerOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : 0;
       run.chainErrors = Array.isArray(chain.errors) ? [...chain.errors] : [];
+      markBackgroundBatchPhase(run, 'queueing-chunk', {
+        iteration,
+        offset: chunkOffset,
+        limit: chunkLimit,
+        total: totalPlannedItems
+      });
 
       const chunkResult = await queueBatchDownloadChunk({
         chain,
@@ -4115,6 +4203,15 @@ async function processBackgroundBatchRun(run, payload) {
         : Number.isFinite(Number(chain.nextContainerOffset))
           ? Number(chain.nextContainerOffset)
           : Number(chain.totalContainers || run.processedContainers || 0);
+      markBackgroundBatchPhase(run, 'chunk-queued', {
+        iteration,
+        queued: chunkResult.queued.length,
+        skipped: chunkResult.skipped.length,
+        totalQueued: run.queuedCount,
+        totalSkipped: run.skippedCount,
+        processed: run.processedContainers,
+        total: run.totalContainers
+      });
 
       touchBackgroundBatchRun(run);
 
@@ -4135,7 +4232,11 @@ async function processBackgroundBatchRun(run, payload) {
             skippedItems: run.skipped,
             chainErrors: run.chainErrors,
             sessionData: {
+              type: 'download',
               sessionId: currentSessionId,
+              phase: run.phase,
+              lastProgressAt: run.lastProgressAt || Date.now(),
+              lastError: run.lastError || null,
               queuedItemsTracked: Array.isArray(run.queued) ? run.queued.length : 0,
               skippedItemsTracked: Array.isArray(run.skipped) ? run.skipped.length : 0,
               queuedItemsOverflow: Number(run.queuedOverflow || 0),
@@ -4199,18 +4300,29 @@ async function processBackgroundBatchRun(run, payload) {
 
     if (run.status === 'running') {
       const pendingDownloadPromises = Array.from(run.downloadPromises || []);
+      markBackgroundBatchPhase(run, 'waiting-downloads', {
+        pendingDownloads: pendingDownloadPromises.length,
+        queued: run.queuedCount,
+        skipped: run.skippedCount
+      });
       if (pendingDownloadPromises.length > 0) {
         await Promise.allSettled(pendingDownloadPromises);
       }
 
       run.status = 'completed';
       run.finishedAt = new Date().toISOString();
+      markBackgroundBatchPhase(run, 'completed', {
+        completed: run.downloadCompletedCount || 0,
+        failed: run.downloadFailedCount || 0
+      });
       touchBackgroundBatchRun(run);
     }
   } catch (error) {
     run.status = 'failed';
     run.error = error.message;
+    run.lastError = error.message;
     run.finishedAt = new Date().toISOString();
+    markBackgroundBatchPhase(run, 'failed', { error: error.message });
     touchBackgroundBatchRun(run);
     console.error(`[Zenius] Background batch run ${run.id} failed:`, error.message);
   } finally {
@@ -4225,7 +4337,20 @@ async function processBackgroundBatchRun(run, payload) {
           hasMore: false,
           queuedItems: run.queued,
           skippedItems: run.skipped,
-          chainErrors: run.chainErrors
+          chainErrors: run.chainErrors,
+          sessionData: {
+            type: 'download',
+            sessionId: run.sessionId || null,
+            phase: run.phase,
+            lastProgressAt: run.lastProgressAt || Date.now(),
+            lastError: run.lastError || run.error || null,
+            queuedItemsTracked: Array.isArray(run.queued) ? run.queued.length : 0,
+            skippedItemsTracked: Array.isArray(run.skipped) ? run.skipped.length : 0,
+            queuedItemsOverflow: Number(run.queuedOverflow || 0),
+            skippedItemsOverflow: Number(run.skippedOverflow || 0),
+            itemErrorsTracked: Array.isArray(run.itemErrors) ? run.itemErrors.length : 0,
+            itemErrorsOverflow: Number(run._itemErrorsOverflow || 0)
+          }
         }),
         `batch-session-finalize[${run.id}]`
       );
@@ -4730,6 +4855,12 @@ const zeniusController = {
       run.sessionId = session.id;
 
       backgroundBatchRuns.set(run.id, run);
+      markBackgroundBatchPhase(run, 'accepted', {
+        previewRunId: previewRunId || '-',
+        plannedItems: Number(session.plannedItems?.length || 0),
+        folder: baseFolderInput || 'root',
+        providers: Array.isArray(selectedProviders) ? selectedProviders.join(',') : 'enabled'
+      });
       ensureBackgroundBatchKeepalive(keepaliveUrl);
 
       eventEmitter.emit('zenius:batch:started', {

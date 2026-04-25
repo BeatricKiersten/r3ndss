@@ -349,21 +349,10 @@ export const getZeniusBatchChainStatus = async (sessionId) => {
 };
 
 export const useZeniusBatchDownload = () => {
-  return useMutation(async ({
-    rootCgId,
-    targetCgSelector,
-    parentContainerName,
-    headersRaw,
-    refererPath,
-    folderId,
-    providers,
-    previewRunId,
-    sessionId,
-    containerOffset,
-    containerLimit,
-    timeBudgetMs
-  }) => {
-    const response = await api.post('/api/zenius/batch-download', {
+  const queryClient = useQueryClient();
+
+  return useMutation(
+    async ({
       rootCgId,
       targetCgSelector,
       parentContainerName,
@@ -376,12 +365,33 @@ export const useZeniusBatchDownload = () => {
       containerOffset,
       containerLimit,
       timeBudgetMs
-    }, {
-      timeout: 90000
-    });
+    }) => {
+      const response = await api.post('/api/zenius/batch-download', {
+        rootCgId,
+        targetCgSelector,
+        parentContainerName,
+        headersRaw,
+        refererPath,
+        folderId,
+        providers,
+        previewRunId,
+        sessionId,
+        containerOffset,
+        containerLimit,
+        timeBudgetMs
+      }, {
+        timeout: 90000
+      });
 
-    return response.data;
-  });
+      return response.data;
+    },
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('zenius-queue-status');
+        queryClient.refetchQueries('zenius-queue-status', { active: true });
+      }
+    }
+  );
 };
 
 export const useZeniusCancelAll = () => {
