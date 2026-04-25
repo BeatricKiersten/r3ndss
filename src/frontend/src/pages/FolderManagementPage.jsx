@@ -1,32 +1,34 @@
 import React, { useMemo, useState } from 'react';
-import { AlertTriangle, ArrowLeft, Folder, Home as HomeIcon, RefreshCw, Search, Trash2, X } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, ChevronDown, ChevronRight, Folder, Home as HomeIcon, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useFolders, usePurgeFolder } from '../hooks/api';
 import { toast } from '../store/toastStore';
 import { PATHS } from '../config/routes.jsx';
 
-function collectFolders(folderTree) {
+function buildFolderRows(folderTree) {
   const result = [];
 
-  const walk = (node, parentPath = '', depth = 0) => {
-    (node?.folders || []).forEach((folder) => {
+  const walk = (node, parentPath = '', depth = 0, parentId = null) => {
+    return (node?.folders || []).map((folder) => {
       const path = parentPath ? `${parentPath}/${folder.name}` : `/${folder.name}`;
-      const children = folder.children?.folders || [];
+      const childRows = walk(folder.children, path, depth + 1, folder.id);
       const directFileCount = Number(folder.fileCount || 0);
-      const nested = collectFolders(folder.children);
-      const recursiveFileCount = directFileCount + nested.reduce((sum, child) => sum + child.directFileCount, 0);
-
-      result.push({
+      const descendantFolderCount = childRows.reduce((sum, child) => sum + child.descendantFolderCount + 1, 0);
+      const recursiveFileCount = directFileCount + childRows.reduce((sum, child) => sum + child.recursiveFileCount, 0);
+      const row = {
         ...folder,
         path,
         depth,
-        childFolderCount: children.length,
-        descendantFolderCount: nested.length,
+        parentId,
+        childFolderCount: childRows.length,
+        descendantFolderCount,
         directFileCount,
-        recursiveFileCount
-      });
+        recursiveFileCount,
+        childIds: childRows.map((child) => child.id)
+      };
 
-      walk(folder.children, path, depth + 1);
+      result.push(row);
+      return row;
     });
   };
 
@@ -34,8 +36,36 @@ function collectFolders(folderTree) {
   return result;
 }
 
-function DeleteFolderModal({ folder, isDeleting, onClose, onConfirm }) {
-  if (!folder) return null;
+function getVisibleFolders(folders, collapsedIds, search) {
+  const query = search.trim().toLowerCase();
+  const matches = (folder) => folder.name.toLowerCase().includes(query) || folder.path.toLowerCase().includes(query);
+
+  if (query) {
+    return folders.filter(matches);
+  }
+
+  const hiddenParentIds = new Set();
+
+  return folders.filter((folder) => {
+    if (folder.parentId && hiddenParentIds.has(folder.parentId)) {
+      hiddenParentIds.add(folder.id);
+      return false;
+    }
+
+    if (collapsedIds.has(folder.id)) {
+      hiddenParentIds.add(folder.id);
+    }
+
+    return true;
+  });
+}
+
+function DeleteFolderModal({ folders, isDeleting, onClose, onConfirm }) {
+  if (!folders.length) return null;
+
+  const totalFolders = folders.reduce((sum, folder) => sum + folder.descendantFolderCount + 1, 0);
+  const totalFiles = folders.reduce((sum, folder) => sum + folder.recursiveFileCount, 0);
+  const title = folders.length === 1 ? 'Hapus folder permanen?' : `Hapus ${folders.length} folder terpilih?`;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4" onClick={onClose}>
@@ -45,8 +75,8 @@ function DeleteFolderModal({ folder, isDeleting, onClose, onConfirm }) {
             <AlertTriangle className="w-5 h-5 text-red-400" />
           </div>
           <div className="min-w-0 flex-1">
-            <h3 className="text-base font-medium text-white">Hapus folder permanen?</h3>
-            <p className="text-xs text-[#888] mt-1 break-all">{folder.path}</p>
+            <h3 className="text-base font-medium text-white">{title}</h3>
+            <p className="text-xs text-[#888] mt-1">Aksi ini tidak bisa dibatalkan.</p>
           </div>
           <button onClick={onClose} disabled={isDeleting} className="p-1 text-[#666] hover:text-white disabled:opacity-50">
             <X className="w-4 h-4" />
@@ -56,17 +86,25 @@ function DeleteFolderModal({ folder, isDeleting, onClose, onConfirm }) {
         <div className="p-5 space-y-4">
           <div className="grid grid-cols-3 gap-2">
             <div className="rounded-lg bg-[#0d0d0d] border border-[#222] p-3">
-              <p className="text-lg font-semibold text-white">{folder.descendantFolderCount + 1}</p>
+              <p className="text-lg font-semibold text-white">{totalFolders}</p>
               <p className="text-[11px] text-[#666]">folder</p>
             </div>
             <div className="rounded-lg bg-[#0d0d0d] border border-[#222] p-3">
-              <p className="text-lg font-semibold text-white">{folder.recursiveFileCount}</p>
+              <p className="text-lg font-semibold text-white">{totalFiles}</p>
               <p className="text-[11px] text-[#666]">file</p>
             </div>
             <div className="rounded-lg bg-[#0d0d0d] border border-[#222] p-3">
-              <p className="text-lg font-semibold text-white">{folder.childFolderCount}</p>
-              <p className="text-[11px] text-[#666]">child</p>
+              <p className="text-lg font-semibold text-white">{folders.length}</p>
+              <p className="text-[11px] text-[#666]">dipilih</p>
             </div>
+          </div>
+
+          <div className="max-h-40 overflow-y-auto rounded-lg bg-[#0d0d0d] border border-[#222] divide-y divide-[#1f1f1f]">
+            {folders.map((folder) => (
+              <div key={folder.id} className="px-3 py-2 text-xs text-[#aaa] break-all">
+                {folder.path}
+              </div>
+            ))}
           </div>
 
           <div className="rounded-lg bg-red-500/10 border border-red-500/20 p-3 text-xs text-red-200">
@@ -101,25 +139,66 @@ export default function FolderManagementPage() {
   const { data: folderTree, isLoading, isFetching } = useFolders();
   const purgeFolder = usePurgeFolder();
   const [search, setSearch] = useState('');
-  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteTargets, setDeleteTargets] = useState([]);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [collapsedIds, setCollapsedIds] = useState(() => new Set());
 
-  const folders = useMemo(() => collectFolders(folderTree), [folderTree]);
-  const filteredFolders = useMemo(() => {
-    const query = search.trim().toLowerCase();
-    if (!query) return folders;
-    return folders.filter((folder) => folder.name.toLowerCase().includes(query) || folder.path.toLowerCase().includes(query));
-  }, [folders, search]);
+  const folders = useMemo(() => buildFolderRows(folderTree), [folderTree]);
+  const folderById = useMemo(() => new Map(folders.map((folder) => [folder.id, folder])), [folders]);
+  const visibleFolders = useMemo(() => getVisibleFolders(folders, collapsedIds, search), [folders, collapsedIds, search]);
+  const selectedFolders = useMemo(() => [...selectedIds].map((id) => folderById.get(id)).filter(Boolean), [folderById, selectedIds]);
+  const allVisibleSelected = visibleFolders.length > 0 && visibleFolders.every((folder) => selectedIds.has(folder.id));
+
+  const toggleCollapsed = (folderId) => {
+    setCollapsedIds((current) => {
+      const next = new Set(current);
+      if (next.has(folderId)) next.delete(folderId);
+      else next.add(folderId);
+      return next;
+    });
+  };
+
+  const toggleSelected = (folderId) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(folderId)) next.delete(folderId);
+      else next.add(folderId);
+      return next;
+    });
+  };
+
+  const toggleVisibleSelection = () => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (allVisibleSelected) {
+        visibleFolders.forEach((folder) => next.delete(folder.id));
+      } else {
+        visibleFolders.forEach((folder) => next.add(folder.id));
+      }
+      return next;
+    });
+  };
 
   const handleDelete = async () => {
-    if (!deleteTarget) return;
+    if (!deleteTargets.length) return;
 
     try {
-      const result = await purgeFolder.mutateAsync(deleteTarget.id);
+      const results = [];
+      for (const folder of deleteTargets) {
+        results.push(await purgeFolder.mutateAsync(folder.id));
+      }
+      const summary = results.reduce((acc, result) => ({
+        removedFolders: acc.removedFolders + Number(result.removedFolders || 0),
+        removedFiles: acc.removedFiles + Number(result.removedFiles || 0),
+        removedJobs: acc.removedJobs + Number(result.removedJobs || 0)
+      }), { removedFolders: 0, removedFiles: 0, removedJobs: 0 });
+
       toast.success(
-        'Folder dihapus',
-        `${result.removedFolders} folder, ${result.removedFiles} file, ${result.removedJobs} jobs dihapus`
+        deleteTargets.length === 1 ? 'Folder dihapus' : 'Folder terpilih dihapus',
+        `${summary.removedFolders} folder, ${summary.removedFiles} file, ${summary.removedJobs} jobs dihapus`
       );
-      setDeleteTarget(null);
+      setSelectedIds(new Set());
+      setDeleteTargets([]);
     } catch (error) {
       toast.error('Gagal menghapus folder', error?.response?.data?.error || error.message);
     }
@@ -133,7 +212,7 @@ export default function FolderManagementPage() {
             <ArrowLeft className="w-3.5 h-3.5" /> Back to Files
           </button>
           <h2 className="text-xl font-semibold text-white">Folder Management</h2>
-          <p className="text-sm text-[#888] mt-1">Cari, review, dan hapus folder beserta seluruh isinya dengan lebih aman.</p>
+          <p className="text-sm text-[#888] mt-1">Pilih banyak folder, collapse parent, lalu hapus yang diperlukan.</p>
         </div>
         {isFetching && (
           <div className="flex items-center gap-2 text-xs text-[#888]">
@@ -143,56 +222,105 @@ export default function FolderManagementPage() {
       </div>
 
       <div className="card p-4">
-        <div className="relative mb-4">
-          <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-[#555]" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Cari folder atau path..."
-            className="w-full pl-9 pr-4 py-2.5 bg-[#0d0d0d] border border-[#2a2a2a] rounded-lg text-sm text-[#ccc] placeholder-[#555] focus:outline-none focus:border-[#444]"
-          />
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center mb-4">
+          <div className="relative flex-1">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-[#555]" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Cari folder atau path..."
+              className="w-full pl-9 pr-4 py-2.5 bg-[#0d0d0d] border border-[#2a2a2a] rounded-lg text-sm text-[#ccc] placeholder-[#555] focus:outline-none focus:border-[#444]"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={toggleVisibleSelection}
+              disabled={visibleFolders.length === 0}
+              className="px-3 py-2.5 text-xs rounded-lg bg-[#151515] border border-[#2a2a2a] text-[#aaa] hover:text-white hover:border-[#444] disabled:opacity-40"
+            >
+              {allVisibleSelected ? 'Unselect visible' : 'Select visible'}
+            </button>
+            <button
+              onClick={() => setDeleteTargets(selectedFolders)}
+              disabled={selectedFolders.length === 0}
+              className="px-3 py-2.5 text-xs rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 disabled:opacity-40 flex items-center gap-1.5"
+            >
+              <Trash2 className="w-3.5 h-3.5" /> Delete {selectedFolders.length || ''}
+            </button>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between text-xs text-[#666] mb-2">
+          <span>{visibleFolders.length} shown / {folders.length} total</span>
+          <span>{selectedFolders.length} selected</span>
         </div>
 
         {isLoading ? (
           <div className="space-y-2">
             {[1, 2, 3].map((item) => <div key={item} className="h-16 rounded-lg bg-[#1a1a1a] animate-pulse" />)}
           </div>
-        ) : filteredFolders.length === 0 ? (
+        ) : visibleFolders.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16">
             <Folder className="w-10 h-10 text-[#333] mb-2" />
             <p className="text-sm text-[#777]">Tidak ada folder ditemukan</p>
           </div>
         ) : (
-          <div className="space-y-2">
-            {filteredFolders.map((folder) => (
-              <div key={folder.id} className="group flex items-center gap-3 rounded-xl bg-[#141414] border border-[#222] p-3 hover:border-[#333] transition-colors">
-                <div className="w-10 h-10 rounded-lg bg-[#222] flex items-center justify-center flex-shrink-0">
-                  {folder.depth === 0 ? <HomeIcon className="w-4 h-4 text-blue-400" /> : <Folder className="w-4 h-4 text-yellow-500/80" />}
+          <div className="overflow-hidden rounded-xl border border-[#222] bg-[#0d0d0d] divide-y divide-[#1f1f1f]">
+            {visibleFolders.map((folder) => {
+              const hasChildren = folder.childFolderCount > 0;
+              const isCollapsed = collapsedIds.has(folder.id);
+              const isSelected = selectedIds.has(folder.id);
+
+              return (
+                <div key={folder.id} className={`group flex items-center gap-2 px-3 py-2.5 hover:bg-[#151515] ${isSelected ? 'bg-blue-500/5' : ''}`}>
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    onChange={() => toggleSelected(folder.id)}
+                    className="h-4 w-4 rounded border-[#333] bg-[#111] accent-blue-500 flex-shrink-0"
+                    aria-label={`Pilih ${folder.path}`}
+                  />
+
+                  <button
+                    onClick={() => hasChildren && toggleCollapsed(folder.id)}
+                    disabled={!hasChildren || search.trim() !== ''}
+                    className="w-6 h-6 rounded flex items-center justify-center text-[#666] hover:text-white disabled:opacity-30 disabled:hover:text-[#666] flex-shrink-0"
+                    aria-label={isCollapsed ? 'Expand folder' : 'Collapse folder'}
+                  >
+                    {hasChildren ? (isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />) : <span className="w-4" />}
+                  </button>
+
+                  <div className="flex items-center gap-2 min-w-0 flex-1" style={{ paddingLeft: search.trim() ? 0 : `${folder.depth * 16}px` }}>
+                    {folder.depth === 0 ? <HomeIcon className="w-4 h-4 text-blue-400 flex-shrink-0" /> : <Folder className="w-4 h-4 text-yellow-500/80 flex-shrink-0" />}
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium text-[#ddd] truncate">{folder.name}</p>
+                      <p className="text-[11px] text-[#666] truncate">{folder.path}</p>
+                    </div>
+                  </div>
+
+                  <div className="hidden sm:flex items-center gap-2 text-[11px] text-[#777] flex-shrink-0">
+                    <span>{folder.descendantFolderCount + 1} folder</span>
+                    <span>{folder.recursiveFileCount} file</span>
+                  </div>
+
+                  <button
+                    onClick={() => setDeleteTargets([folder])}
+                    className="p-2 rounded-lg text-red-400 hover:bg-red-500/10 opacity-80 group-hover:opacity-100 flex-shrink-0"
+                    aria-label={`Hapus ${folder.path}`}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
                 </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium text-[#ddd] truncate">{folder.name}</p>
-                  <p className="text-xs text-[#666] truncate">{folder.path}</p>
-                </div>
-                <div className="hidden sm:flex items-center gap-2 text-xs text-[#777]">
-                  <span className="px-2 py-1 rounded bg-[#0d0d0d] border border-[#222]">{folder.descendantFolderCount + 1} folder</span>
-                  <span className="px-2 py-1 rounded bg-[#0d0d0d] border border-[#222]">{folder.recursiveFileCount} file</span>
-                </div>
-                <button
-                  onClick={() => setDeleteTarget(folder)}
-                  className="px-3 py-2 rounded-lg text-xs bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 flex items-center gap-1.5"
-                >
-                  <Trash2 className="w-3.5 h-3.5" /> Delete
-                </button>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
 
       <DeleteFolderModal
-        folder={deleteTarget}
+        folders={deleteTargets}
         isDeleting={purgeFolder.isLoading}
-        onClose={() => setDeleteTarget(null)}
+        onClose={() => setDeleteTargets([])}
         onConfirm={handleDelete}
       />
     </div>
