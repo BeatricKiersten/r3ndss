@@ -36,7 +36,7 @@ function buildFolderRows(folderTree) {
   return result;
 }
 
-function getVisibleFolders(folders, collapsedIds, search) {
+function getVisibleFolders(folders, expandedIds, search) {
   const query = search.trim().toLowerCase();
   const matches = (folder) => folder.name.toLowerCase().includes(query) || folder.path.toLowerCase().includes(query);
 
@@ -44,18 +44,13 @@ function getVisibleFolders(folders, collapsedIds, search) {
     return folders.filter(matches);
   }
 
-  const hiddenParentIds = new Set();
+  const hiddenFolderIds = new Set();
 
   return folders.filter((folder) => {
-    if (folder.parentId && hiddenParentIds.has(folder.parentId)) {
-      hiddenParentIds.add(folder.id);
+    if (folder.parentId && (!expandedIds.has(folder.parentId) || hiddenFolderIds.has(folder.parentId))) {
+      hiddenFolderIds.add(folder.id);
       return false;
     }
-
-    if (collapsedIds.has(folder.id)) {
-      hiddenParentIds.add(folder.id);
-    }
-
     return true;
   });
 }
@@ -141,16 +136,16 @@ export default function FolderManagementPage() {
   const [search, setSearch] = useState('');
   const [deleteTargets, setDeleteTargets] = useState([]);
   const [selectedIds, setSelectedIds] = useState(() => new Set());
-  const [collapsedIds, setCollapsedIds] = useState(() => new Set());
+  const [expandedIds, setExpandedIds] = useState(() => new Set());
 
   const folders = useMemo(() => buildFolderRows(folderTree), [folderTree]);
   const folderById = useMemo(() => new Map(folders.map((folder) => [folder.id, folder])), [folders]);
-  const visibleFolders = useMemo(() => getVisibleFolders(folders, collapsedIds, search), [folders, collapsedIds, search]);
+  const visibleFolders = useMemo(() => getVisibleFolders(folders, expandedIds, search), [folders, expandedIds, search]);
   const selectedFolders = useMemo(() => [...selectedIds].map((id) => folderById.get(id)).filter(Boolean), [folderById, selectedIds]);
   const allVisibleSelected = visibleFolders.length > 0 && visibleFolders.every((folder) => selectedIds.has(folder.id));
 
-  const toggleCollapsed = (folderId) => {
-    setCollapsedIds((current) => {
+  const toggleExpanded = (folderId) => {
+    setExpandedIds((current) => {
       const next = new Set(current);
       if (next.has(folderId)) next.delete(folderId);
       else next.add(folderId);
@@ -268,7 +263,7 @@ export default function FolderManagementPage() {
           <div className="overflow-hidden rounded-xl border border-[#222] bg-[#0d0d0d] divide-y divide-[#1f1f1f]">
             {visibleFolders.map((folder) => {
               const hasChildren = folder.childFolderCount > 0;
-              const isCollapsed = collapsedIds.has(folder.id);
+              const isExpanded = expandedIds.has(folder.id);
               const isSelected = selectedIds.has(folder.id);
 
               return (
@@ -282,12 +277,12 @@ export default function FolderManagementPage() {
                   />
 
                   <button
-                    onClick={() => hasChildren && toggleCollapsed(folder.id)}
+                    onClick={() => hasChildren && toggleExpanded(folder.id)}
                     disabled={!hasChildren || search.trim() !== ''}
                     className="w-6 h-6 rounded flex items-center justify-center text-[#666] hover:text-white disabled:opacity-30 disabled:hover:text-[#666] flex-shrink-0"
-                    aria-label={isCollapsed ? 'Expand folder' : 'Collapse folder'}
+                    aria-label={isExpanded ? 'Collapse folder' : 'Expand folder'}
                   >
-                    {hasChildren ? (isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />) : <span className="w-4" />}
+                    {hasChildren ? (isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />) : <span className="w-4" />}
                   </button>
 
                   <div className="flex items-center gap-2 min-w-0 flex-1" style={{ paddingLeft: search.trim() ? 0 : `${folder.depth * 16}px` }}>
