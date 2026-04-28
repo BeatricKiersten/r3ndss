@@ -496,7 +496,7 @@ class UploaderService extends EventEmitter {
   }
 
   async waitForFileUploadCompletion(fileId, selectedProviders = null, options = {}) {
-    const defaultTimeoutMs = 30 * 60 * 1000;
+    const defaultTimeoutMs = 60 * 60 * 1000;
     const timeoutMs = Math.max(0, Number(options.timeoutMs) || defaultTimeoutMs);
     const pollIntervalMs = Math.max(250, Number(options.pollIntervalMs) || 1000);
     const abortSignal = options.abortSignal || null;
@@ -2279,10 +2279,12 @@ class UploaderService extends EventEmitter {
     }
 
     for (let attempt = 1; attempt <= UPLOAD_RETRY_ATTEMPTS; attempt++) {
+      let timedOut = false;
       try {
         // Create abort controller for timeout handling
         const controller = new AbortController();
         const timeoutId = setTimeout(() => {
+          timedOut = true;
           controller.abort();
         }, UPLOAD_TIMEOUT);
 
@@ -2306,6 +2308,19 @@ class UploaderService extends EventEmitter {
 
       } catch (error) {
         lastError = error;
+
+        if (timedOut) {
+          this._logUpload('error', 'upload.timeout', {
+            jobId,
+            fileId,
+            provider,
+            attempt,
+            timeoutMs: UPLOAD_TIMEOUT,
+            error: error.message
+          });
+          break;
+        }
+
         this._logUpload('warn', 'upload.retry.failed', {
           jobId,
           fileId,

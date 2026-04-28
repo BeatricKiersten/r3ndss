@@ -32,9 +32,9 @@ module.exports = {
   upload: {
     maxConcurrentUploads: 2,
     maxConcurrentProviders: 4,
-    retryAttempts: 2,
+    retryAttempts: 3,
     retryDelay: 5000,
-    timeout: 30 * 60 * 1000,
+    timeout: 60 * 60 * 1000,
     probeTimeout: 15000,
     downloadTimeout: 30 * 60 * 1000
   },
