@@ -32,6 +32,7 @@ const UPSTREAM_MAX_RETRIES = Number.parseInt(process.env.ZENIUS_UPSTREAM_MAX_RET
 const UPSTREAM_RETRY_BASE_DELAY_MS = Number.parseInt(process.env.ZENIUS_UPSTREAM_RETRY_BASE_DELAY_MS || '500', 10);
 const BATCH_CG_FETCH_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_CG_FETCH_CONCURRENCY || '20', 10);
 const BATCH_INSTANCE_METADATA_CONCURRENCY = Number.parseInt(process.env.ZENIUS_BATCH_INSTANCE_METADATA_CONCURRENCY || '28', 10);
+const INSTANCE_DETAIL_DOWNLOAD_CONCURRENCY = Number.parseInt(process.env.ZENIUS_INSTANCE_DETAIL_DOWNLOAD_CONCURRENCY || '1', 10);
 const MAX_BATCH_ERRORS = Number.parseInt(process.env.ZENIUS_MAX_BATCH_ERRORS || '100', 10);
 const DEFAULT_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_CHUNK_SIZE || '32', 10);
 const MAX_BATCH_CHAIN_CHUNK_SIZE = Number.parseInt(process.env.ZENIUS_BATCH_CHAIN_MAX_CHUNK_SIZE || '128', 10);
@@ -69,6 +70,7 @@ const MAX_SKIPPED_ITEMS_IN_MEMORY = Number.parseInt(process.env.ZENIUS_MAX_SKIPP
 const MAX_ITEM_ERRORS_IN_MEMORY = Number.parseInt(process.env.ZENIUS_MAX_ITEM_ERRORS_IN_MEMORY || '200', 10);
 const batchChainSessions = new Map();
 const backgroundBatchRuns = new Map();
+const instanceDetailDownloadLimit = pLimit(clampPositiveInt(INSTANCE_DETAIL_DOWNLOAD_CONCURRENCY, 1));
 let backgroundBatchKeepaliveTimer = null;
 let backgroundBatchKeepaliveUrl = String(process.env.ZENIUS_BATCH_KEEPALIVE_URL || '').trim();
 
@@ -3469,12 +3471,12 @@ async function resolveQueuedDownloadTask(task) {
   const requestContext = task.requestContext || buildRequestContext({});
   let details;
   try {
-    details = await getInstanceDetails({
+    details = await instanceDetailDownloadLimit(() => getInstanceDetails({
       urlShortId,
       refererPath: task.refererPath,
       fallbackRefererPath: task.fallbackRefererPath,
       requestContext
-    });
+    }));
   } catch (error) {
     console.warn(`[Zenius] Skipping ${urlShortId}: failed to fetch instance details after retries (${error.message})`);
     return null;
@@ -5270,6 +5272,7 @@ if (process.env.NODE_ENV === 'test') {
       DEFAULT_MAX_CONCURRENT_DOWNLOADS,
       BATCH_CG_FETCH_CONCURRENCY,
       BATCH_INSTANCE_METADATA_CONCURRENCY,
+      INSTANCE_DETAIL_DOWNLOAD_CONCURRENCY,
       BATCH_PREVIEW_STEPS_PER_POLL,
       BATCH_PREVIEW_CONTAINER_LIMIT,
       BATCH_PREVIEW_RETRY_LIMIT,

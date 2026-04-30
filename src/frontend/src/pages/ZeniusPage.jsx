@@ -904,11 +904,11 @@ export default function ZeniusPage() {
       : null);
 
     if (trackedPreviewRun.chainPreview) {
-      setBatchChain(trackedPreviewRun.chainPreview);
+      setBatchChain((prev) => ({ ...(prev || {}), ...trackedPreviewRun.chainPreview }));
     }
 
     if (trackedPreviewRun.status === 'completed' && trackedPreviewRun.chainPreview) {
-      setBatchChain(trackedPreviewRun.chainPreview);
+      setBatchChain((prev) => ({ ...(prev || {}), ...trackedPreviewRun.chainPreview }));
     }
 
     if (trackedPreviewRun.status === 'cancelled') {
@@ -1158,11 +1158,11 @@ export default function ZeniusPage() {
         });
 
         if (status.chainPreview) {
-          setBatchChain(status.chainPreview);
+          setBatchChain((prev) => ({ ...(prev || {}), ...status.chainPreview }));
         }
 
         if (status.status === 'completed') {
-          setBatchChain(status.chainPreview || null);
+          setBatchChain((prev) => status.chainPreview ? ({ ...(prev || {}), ...status.chainPreview }) : prev || null);
           setBatchBuildProgress(null);
           if (batchChainPollRef.current) {
             window.clearInterval(batchChainPollRef.current);
@@ -1236,7 +1236,7 @@ export default function ZeniusPage() {
       setPreviewRunId(status.id || previewRunId);
       setBatchSessionId((prev) => status.chainPreview?.sessionId || status.sessionId || prev || null);
       if (status.chainPreview) {
-        setBatchChain(status.chainPreview);
+        setBatchChain((prev) => ({ ...(prev || {}), ...status.chainPreview }));
       }
       if (status.status === 'completed' && status.chainPreview?.planReady) {
         setBatchBuildProgress(null);
@@ -1410,9 +1410,13 @@ export default function ZeniusPage() {
       : 'text-sky-300';
   const allBatchPreviewRows = useMemo(() => {
     const trackedPreviewItems = Array.isArray(trackedPreviewRun?.previewItems) ? trackedPreviewRun.previewItems : [];
-    const plannedItems = trackedPreviewItems.length > 0
-      ? trackedPreviewItems
-      : (Array.isArray(batchChain?.plannedItems) ? batchChain.plannedItems : []);
+    const chainPlannedItems = Array.isArray(batchChain?.plannedItems) ? batchChain.plannedItems : [];
+    const trackedPlannedItems = Array.isArray(trackedPreviewRun?.chainPreview?.plannedItems) ? trackedPreviewRun.chainPreview.plannedItems : [];
+    const plannedItems = chainPlannedItems.length > 0
+      ? chainPlannedItems
+      : trackedPlannedItems.length > 0
+        ? trackedPlannedItems
+        : trackedPreviewItems;
     if (plannedItems.length > 0) {
       return plannedItems.map((item, index) => ({
         key: item.planKey || `${item.urlShortId || 'unknown'}-${index}`,
@@ -1428,6 +1432,10 @@ export default function ZeniusPage() {
         selectedProviders: Array.isArray(item.selectedProviders) ? item.selectedProviders : [],
         instanceName: item.instance?.name || item.instanceName || '-'
       }));
+    }
+
+    if (batchChain?.planReady) {
+      return [];
     }
 
     return (batchChain?.containerDetails || []).flatMap((container, ci) =>

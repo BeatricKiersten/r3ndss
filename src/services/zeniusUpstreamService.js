@@ -236,9 +236,10 @@ async function getInstanceDetails({ urlShortId, refererPath, fallbackRefererPath
   const headers = buildUpstreamHeaders({ requestContext, referer });
 
   const effectiveTimeout = clampPositiveInt(timeoutMs, 30000);
-  const maxAttempts = clampPositiveInt(maxRetries, INSTANCE_DETAIL_MAX_RETRIES);
+  const maxRetriesCount = clampPositiveInt(maxRetries, INSTANCE_DETAIL_MAX_RETRIES);
+  const maxAttempts = maxRetriesCount + 1;
 
-  for (let attempt = 0; attempt <= maxAttempts; attempt += 1) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const response = await axios.get(endpoint, {
       headers,
       timeout: effectiveTimeout,
@@ -261,14 +262,14 @@ async function getInstanceDetails({ urlShortId, refererPath, fallbackRefererPath
     }
 
     if (response.status === 202) {
-      if (attempt < maxAttempts) {
+      if (attempt < maxRetriesCount) {
         const delayMs = INSTANCE_DETAIL_RETRY_DELAY_MS * (attempt + 1);
         console.log(`[ZeniusUpstream] Instance details returned 202 for ${urlShortId}, retrying in ${delayMs}ms (attempt ${attempt + 1}/${maxAttempts})`);
         await sleep(delayMs);
         continue;
       }
 
-      console.warn(`[ZeniusUpstream] Instance details 202 after ${maxAttempts} retries for ${urlShortId}, giving up`);
+      console.warn(`[ZeniusUpstream] Instance details 202 after ${maxAttempts} attempts for ${urlShortId}, giving up`);
     }
 
     throw new Error(`Instance details request failed (HTTP ${response.status}) for ${endpoint}. Body: ${bodyPreview(response.data)}`);
