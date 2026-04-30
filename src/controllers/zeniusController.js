@@ -195,6 +195,16 @@ class DownloadQueue {
       };
     }
 
+    if (resolvedTask.unsupported) {
+      return {
+        success: true,
+        id: task.id,
+        urlShortId: resolvedTask.urlShortId || task.urlShortId,
+        skipped: true,
+        reason: resolvedTask.reason || 'unsupported-video-url'
+      };
+    }
+
     const { urlShortId, videoUrl, folderId, outputName, ffmpegHeaders, selectedProviders } = resolvedTask;
 
     console.log(`[DownloadQueue] Starting #${task.id} ${urlShortId} (active: ${this._active.size}/${this._maxConcurrent}, queued: ${this._queue.length})`);
@@ -3453,6 +3463,11 @@ function getQueueStatus() {
   };
 }
 
+function isUnsupportedYoutubeUrl(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized.includes('youtube.com') || normalized.includes('youtu.be');
+}
+
 function getZeniusStatusSnapshot() {
   const backgroundBatches = getBackgroundBatchRunsSummary();
   return {
@@ -3491,6 +3506,19 @@ async function resolveQueuedDownloadTask(task) {
   const videoUrl = String(instanceValue['video-url'] || '').trim();
   if (!videoUrl) {
     throw new Error('Instance does not contain video-url');
+  }
+
+  if (isUnsupportedYoutubeUrl(videoUrl)) {
+    console.log(`[Zenius] Skipping unsupported YouTube video ${urlShortId}: ${videoUrl}`);
+    return {
+      ...task,
+      urlShortId,
+      unsupported: true,
+      skipped: true,
+      reason: 'unsupported-youtube-url',
+      videoUrl,
+      details: instanceValue
+    };
   }
 
   const outputName = sanitizeOutputName(
