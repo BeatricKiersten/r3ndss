@@ -2176,6 +2176,63 @@ class DatabaseHandler {
     });
   }
 
+  async purgeProblemFiles(statuses = ['processing', 'failed', 'cancelled']) {
+    await this._ready();
+
+    const normalizedStatuses = Array.isArray(statuses)
+      ? statuses.map((status) => String(status || '').trim().toLowerCase()).filter(Boolean)
+      : [];
+
+    if (normalizedStatuses.length === 0) {
+      return { total: 0, removedFiles: 0, removedJobs: 0, removedProviders: 0, results: [] };
+    }
+
+    return this._withTransaction(async (connection) => {
+      const placeholders = normalizedStatuses.map(() => '?').join(',');
+      const [fileRows] = await connection.query(
+        `SELECT id, name, status
+           FROM files
+          WHERE LOWER(status) IN (${placeholders})
+          FOR UPDATE`,
+        normalizedStatuses
+      );
+
+      if (!fileRows.length) {
+        return { total: 0, removedFiles: 0, removedJobs: 0, removedProviders: 0, results: [] };
+      }
+
+      const fileIds = fileRows.map((file) => file.id);
+      const filePlaceholders = fileIds.map(() => '?').join(',');
+
+      const [providerDelete] = await connection.query(
+        `DELETE FROM file_providers WHERE file_id IN (${filePlaceholders})`,
+        fileIds
+      );
+      const [jobDelete] = await connection.query(
+        `DELETE FROM jobs WHERE file_id IN (${filePlaceholders})`,
+        fileIds
+      );
+      const [fileDelete] = await connection.query(
+        `DELETE FROM files WHERE id IN (${filePlaceholders})`,
+        fileIds
+      );
+
+      return {
+        total: fileRows.length,
+        removedFiles: fileDelete.affectedRows || 0,
+        removedJobs: jobDelete.affectedRows || 0,
+        removedProviders: providerDelete.affectedRows || 0,
+        results: fileRows.map((file) => ({
+          fileId: file.id,
+          name: file.name,
+          status: file.status,
+          deleted: true,
+          skippedRemoteDelete: true
+        }))
+      };
+    });
+  }
+
   async listFiles(folderId = null, status = null) {
     await this._ready();
 

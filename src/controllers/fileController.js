@@ -158,10 +158,7 @@ const fileController = {
 
   async deleteAllProblemFiles(req, res) {
     try {
-      const files = await db.listFiles();
-      const statuses = new Set(['processing', 'failed', 'cancelled']);
-      const targetFiles = files.filter((file) => statuses.has(String(file.status || '').toLowerCase()));
-      const result = await deleteFilesInBulk(targetFiles, { skipRemoteDelete: true });
+      const result = await db.purgeProblemFiles(['processing', 'failed', 'cancelled']);
       res.json({ success: true, data: result });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
