@@ -1121,7 +1121,7 @@ function prepareBatchPlanForExecution(session) {
   for (const plannedItem of session.plannedItems) {
     if (plannedItem?.fastPreviewProviderValidation) {
       plannedItem.action = 'skip';
-      plannedItem.reason = 'File exists; skipped by fast preview mode';
+      plannedItem.reason = 'File exists; provider validation was not available in preview';
       plannedItem.pendingProviders = [];
     }
   }
@@ -2758,8 +2758,10 @@ function collectExistingFileIds(existingByFolderId) {
   return unique(fileIds);
 }
 
-async function buildProviderStatusLookup(existingByFolderId, chunkSize = BATCH_PROVIDER_PREFETCH_CHUNK_SIZE, selectedProviders = null) {
-  const fileIds = collectExistingFileIds(existingByFolderId);
+async function buildProviderStatusLookup(existingByFolderId, chunkSize = BATCH_PROVIDER_PREFETCH_CHUNK_SIZE, selectedProviders = null, fileIdsOverride = null) {
+  const fileIds = Array.isArray(fileIdsOverride)
+    ? unique(fileIdsOverride.map((fileId) => String(fileId || '').trim()).filter(Boolean))
+    : collectExistingFileIds(existingByFolderId);
   const providerStatusByFileId = new Map();
   const providerFilter = Array.isArray(selectedProviders) && selectedProviders.length > 0
     ? unique(selectedProviders.map((provider) => String(provider || '').trim()).filter(Boolean))
@@ -2919,9 +2921,8 @@ async function buildPlannedBatchItem({
 
   if (fastPreview) {
     plannedItem.action = 'skip';
-    plannedItem.reason = 'File exists; provider validation deferred until execution';
+    plannedItem.reason = 'File already exists; skipped by fast duplicate check';
     plannedItem.pendingProviders = [];
-    plannedItem.fastPreviewProviderValidation = true;
     return {
       counted: true,
       planned: plannedItem,
@@ -2932,8 +2933,7 @@ async function buildPlannedBatchItem({
         fileId: existingFile.id,
         outputName: outputFileName,
         uploadQueue: null,
-        pendingProviders: [],
-        fastPreviewProviderValidation: true
+        pendingProviders: []
       }
     };
   }
@@ -3620,34 +3620,17 @@ async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, sel
     }
   }
 
-  if (!fastPreview && !ultraFastPreview) {
-    for (const fileIdChunk of chunkArray(newFileIds, clampPositiveInt(BATCH_PROVIDER_PREFETCH_CHUNK_SIZE, 200))) {
-      if (fileIdChunk.length === 0) {
-        continue;
-      }
+  if (!fastPreview && !ultraFastPreview && newFileIds.length > 0) {
+    const providerLookup = await buildProviderStatusLookup(
+      null,
+      clampPositiveInt(BATCH_PROVIDER_PREFETCH_CHUNK_SIZE, 200),
+      cache.selectedProviders,
+      newFileIds
+    );
 
-      const placeholders = fileIdChunk.map(() => '?').join(', ');
-      const rows = await runDbQuery(
-        `SELECT file_id, provider, status
-           FROM file_providers
-          WHERE file_id IN (${placeholders})${cache.selectedProviders?.length ? ` AND provider IN (${cache.selectedProviders.map(() => '?').join(', ')})` : ''}`,
-        cache.selectedProviders?.length ? [...fileIdChunk, ...cache.selectedProviders] : fileIdChunk
-      );
-      cache.stats.providerRowCount = Number(cache.stats.providerRowCount || 0) + (Array.isArray(rows) ? rows.length : 0);
-
-      for (const row of rows || []) {
-        const fileId = String(row?.file_id || '').trim();
-        const provider = String(row?.provider || '').trim();
-        const status = String(row?.status || '').trim().toLowerCase() || 'pending';
-        if (!fileId || !provider) {
-          continue;
-        }
-
-        if (!cache.providerStatusByFileId.has(fileId)) {
-          cache.providerStatusByFileId.set(fileId, new Map());
-        }
-        cache.providerStatusByFileId.get(fileId).set(provider, status);
-      }
+    cache.stats.providerRowCount = Number(cache.stats.providerRowCount || 0) + Number(providerLookup.providerRowCount || 0);
+    for (const [fileId, providerStatus] of providerLookup.providerStatusByFileId.entries()) {
+      cache.providerStatusByFileId.set(fileId, providerStatus);
     }
   }
 
