@@ -810,6 +810,18 @@ function createPreviewItemSnapshot(item = {}) {
   };
 }
 
+function createSkippedPlanSnapshot(item = {}) {
+  return {
+    urlShortId: item.urlShortId,
+    reason: item.reason || 'Skipped by preview plan',
+    path: item.path,
+    fileId: item.fileId || null,
+    outputName: item.outputName,
+    uploadQueue: null,
+    pendingProviders: Array.isArray(item.pendingProviders) ? [...item.pendingProviders] : []
+  };
+}
+
 function resetPreviewRunSamples(run) {
   run.previewItems = [];
   run.previewItemsOverflow = 0;
@@ -882,6 +894,17 @@ function buildPreviewItemsSummary(run) {
     retryItemsOverflow: Number(run.retryItemsOverflow || 0),
     finalizeItemsTracked: Array.isArray(run.finalizeItems) ? run.finalizeItems.length : 0,
     finalizeItemsOverflow: Number(run.finalizeItemsOverflow || 0)
+  };
+}
+
+function getPreviewActionCounts(run) {
+  const byAction = buildPreviewItemsSummary(run).byAction || {};
+  return {
+    download: Number(byAction.download || 0),
+    retry: Number(byAction.retry || 0),
+    finalize: Number(byAction.finalize || 0),
+    skip: Number(byAction.skip || 0),
+    unknown: Number(byAction.unknown || 0)
   };
 }
 
@@ -1576,17 +1599,6 @@ async function continueBackgroundBatchPreviewRun(run, { requestContext, refererP
       throw new Error(`Preview session mismatch: expected ${boundSessionId}, got ${chain.sessionId}`);
     }
 
-    const stepElapsedMs = Math.max(1, Date.now() - stepStartedAt);
-    const stepProcessed = Number(chain.processedContainerCount || 0);
-    const stepThroughput = (stepProcessed / (stepElapsedMs / 1000)).toFixed(2);
-    console.log(
-      `[Zenius][Preview][Step] run=${run.id} session=${chain.sessionId} step=${step + 1}/${stepsPerPoll} `
-      + `offset=${stepOffset}->${chain.nextContainerOffset ?? 'done'} processed=${stepProcessed} `
-      + `plannedVideos=${Number(chain.plannedItemCount || 0)} previewContainers=${Number(chain.previewSummary?.previewContainerCount || chain.containerDetails?.length || 0)} `
-      + `discoveredContainers=${Number(chain.totalContainers || chain.containerList?.totalContainers || 0)} hasMore=${Boolean(chain.hasMoreContainers)} `
-      + `fastPreview=${fastPreview} durationMs=${stepElapsedMs} throughput=${stepThroughput}/s errors=${Array.isArray(chain.errors) ? chain.errors.length : 0}`
-    );
-
     totalProcessedThisPoll += Number(chain.processedContainerCount || 0);
     latestDiscoveredVideos = Number(chain.plannedItemCount || latestDiscoveredVideos || 0);
 
@@ -1613,6 +1625,18 @@ async function continueBackgroundBatchPreviewRun(run, { requestContext, refererP
       prefetch: chain.prefetch
     }) || chain;
     rebuildPreviewRunSamples(run);
+    const stepElapsedMs = Math.max(1, Date.now() - stepStartedAt);
+    const stepProcessed = Number(chain.processedContainerCount || 0);
+    const stepThroughput = (stepProcessed / (stepElapsedMs / 1000)).toFixed(2);
+    const actionCounts = getPreviewActionCounts(run);
+    console.log(
+      `[Zenius][Preview][Step] run=${run.id} session=${chain.sessionId} step=${step + 1}/${stepsPerPoll} `
+      + `offset=${stepOffset}->${chain.nextContainerOffset ?? 'done'} processed=${stepProcessed} `
+      + `plannedVideos=${Number(chain.plannedItemCount || 0)} download=${actionCounts.download} skip=${actionCounts.skip} `
+      + `retry=${actionCounts.retry} finalize=${actionCounts.finalize} previewContainers=${Number(chain.previewSummary?.previewContainerCount || chain.containerDetails?.length || 0)} `
+      + `discoveredContainers=${Number(chain.totalContainers || chain.containerList?.totalContainers || 0)} hasMore=${Boolean(chain.hasMoreContainers)} `
+      + `fastPreview=${fastPreview} durationMs=${stepElapsedMs} throughput=${stepThroughput}/s errors=${Array.isArray(chain.errors) ? chain.errors.length : 0}`
+    );
 
     hasMore = Boolean(chain.hasMoreContainers);
     nextOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : nextOffset;
@@ -1631,7 +1655,12 @@ async function continueBackgroundBatchPreviewRun(run, { requestContext, refererP
 
   const elapsedMs = Math.max(1, Date.now() - startedAt);
   const throughput = (totalProcessedThisPoll / (elapsedMs / 1000)).toFixed(2);
-  console.log(`[Zenius][Preview] processed=${totalProcessedThisPoll} discoveredVideos=${latestDiscoveredVideos} offset=${run.nextContainerOffset}/${run.totalContainers} hasMore=${hasMore} throughput=${throughput}/s elapsed=${elapsedMs}ms`);
+  const actionCounts = getPreviewActionCounts(run);
+  console.log(
+    `[Zenius][Preview] processed=${totalProcessedThisPoll} discoveredVideos=${latestDiscoveredVideos} `
+    + `download=${actionCounts.download} skip=${actionCounts.skip} retry=${actionCounts.retry} finalize=${actionCounts.finalize} `
+    + `offset=${run.nextContainerOffset}/${run.totalContainers} hasMore=${hasMore} throughput=${throughput}/s elapsed=${elapsedMs}ms`
+  );
 
   if (run.status !== 'running' || run.finishedAt) {
     await persistPreviewRunSnapshot(run);
@@ -3656,7 +3685,7 @@ async function prefetchBatchPlanContext({ containerDetails, baseFolderInput, sel
   };
 }
 
-async function queueBatchDownloadChunk({ chain, requestContext, refererPath, baseFolderInput, selectedProviders, runId = null, cancelled = () => false }) {
+async function queueBatchDownloadChunk({ chain, plannedItemsOverride = null, requestContext, refererPath, baseFolderInput, selectedProviders, runId = null, cancelled = () => false }) {
   const queued = [];
   const skipped = [];
   let totalInstances = 0;
@@ -3666,9 +3695,10 @@ async function queueBatchDownloadChunk({ chain, requestContext, refererPath, bas
     throw new Error('Preview plan is not available for the requested folder/providers context');
   }
 
-  const normalizedOffset = Math.min(normalizeChunkOffset(chain.containerOffset), session.plannedItems.length);
+  const plannedItems = Array.isArray(plannedItemsOverride) ? plannedItemsOverride : session.plannedItems;
+  const normalizedOffset = Math.min(normalizeChunkOffset(chain.containerOffset), plannedItems.length);
   const normalizedLimit = normalizeChunkLimit(chain.containerLimit) || clampPositiveInt(BACKGROUND_BATCH_CHUNK_SIZE, 6);
-  const planChunk = session.plannedItems.slice(normalizedOffset, normalizedOffset + normalizedLimit);
+  const planChunk = plannedItems.slice(normalizedOffset, normalizedOffset + normalizedLimit);
 
   for (const plannedItem of planChunk) {
     if (cancelled()) {
@@ -4071,14 +4101,62 @@ async function processBackgroundBatchRun(run, payload) {
 
     run.rootCgName = session.rootCgName || run.rootCgName;
     run.parentContainerName = resolveBatchParentContainerName(session) || run.parentContainerName;
-    run.totalContainers = Number(session.plannedItems?.length || 0);
-    run.hasMoreContainers = run.totalContainers > 0;
+    const plannedItems = Array.isArray(session.plannedItems) ? session.plannedItems : [];
+    const skippedPlanItems = plannedItems.filter((item) => item?.action === 'skip');
+    const actionablePlanItems = plannedItems.filter((item) => item?.action !== 'skip');
+    hasMore = actionablePlanItems.length > 0;
+    run.totalContainers = plannedItems.length;
+    run.discoveredVideoCount = plannedItems.length;
+    run.skippedCount = skippedPlanItems.length;
+    run.hasMoreContainers = actionablePlanItems.length > 0;
     run.nextContainerOffset = 0;
     run.chainErrors = Array.isArray(session.errors) ? [...session.errors] : [];
+    for (const skippedItem of skippedPlanItems) {
+      pushCappedItem(run.skipped, createSkippedPlanSnapshot(skippedItem), MAX_SKIPPED_ITEMS_IN_MEMORY, 'skippedOverflow', run);
+    }
     markBackgroundBatchPhase(run, 'plan-ready', {
       plannedItems: run.totalContainers,
+      queuedCandidates: actionablePlanItems.length,
+      skippedFromPreview: skippedPlanItems.length,
       planReady: Boolean(session.planReady)
     });
+
+    if (dbSession) {
+      const updatedSession = await withDbRetry(
+        () => db.updateBatchSession(run.id, {
+          status: 'running',
+          rootCgName: run.rootCgName,
+          parentContainerName: run.parentContainerName,
+          totalContainers: run.totalContainers,
+          processedContainers: run.processedContainers,
+          queuedCount: run.queuedCount,
+          skippedCount: run.skippedCount,
+          nextContainerOffset: run.nextContainerOffset,
+          hasMore: run.hasMoreContainers,
+          queuedItems: run.queued,
+          skippedItems: run.skipped,
+          chainErrors: run.chainErrors,
+          sessionData: {
+            type: 'download',
+            sessionId: currentSessionId,
+            phase: run.phase,
+            lastProgressAt: run.lastProgressAt || Date.now(),
+            lastError: run.lastError || null,
+            discoveredVideoCount: Number(run.discoveredVideoCount || 0),
+            downloadCompletedCount: Number(run.downloadCompletedCount || 0),
+            downloadFailedCount: Number(run.downloadFailedCount || 0),
+            queuedItemsTracked: Array.isArray(run.queued) ? run.queued.length : 0,
+            skippedItemsTracked: Array.isArray(run.skipped) ? run.skipped.length : 0,
+            queuedItemsOverflow: Number(run.queuedOverflow || 0),
+            skippedItemsOverflow: Number(run.skippedOverflow || 0),
+            itemErrorsTracked: Array.isArray(run.itemErrors) ? run.itemErrors.length : 0,
+            itemErrorsOverflow: Number(run._itemErrorsOverflow || 0)
+          }
+        }),
+        `batch-session-preview-skips[${run.id}]`
+      );
+      if (updatedSession) dbSession = updatedSession;
+    }
 
     while (hasMore) {
       if (run.status !== 'running') {
@@ -4096,7 +4174,7 @@ async function processBackgroundBatchRun(run, payload) {
         throw new Error('Preview plan session is no longer available');
       }
 
-      const totalPlannedItems = Number(planSession.plannedItems?.length || 0);
+      const totalPlannedItems = actionablePlanItems.length;
       const chunkLimit = normalizeChunkLimit(payload.containerLimit) || clampPositiveInt(BACKGROUND_BATCH_CHUNK_SIZE, 6);
       const chunkOffset = Math.min(nextOffset, totalPlannedItems);
       const nextChunkOffset = Math.min(chunkOffset + chunkLimit, totalPlannedItems);
@@ -4113,19 +4191,21 @@ async function processBackgroundBatchRun(run, payload) {
       run.sessionId = currentSessionId;
       run.rootCgName = planSession.rootCgName || run.rootCgName;
       run.parentContainerName = resolveBatchParentContainerName(planSession) || run.parentContainerName;
-      run.totalContainers = totalPlannedItems;
+      run.totalContainers = plannedItems.length;
       run.hasMoreContainers = Boolean(chain.hasMoreContainers);
       run.nextContainerOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : 0;
       run.chainErrors = Array.isArray(chain.errors) ? [...chain.errors] : [];
-      markBackgroundBatchPhase(run, 'queueing-chunk', {
+      markBackgroundBatchPhase(run, 'queueing-actions', {
         iteration,
         offset: chunkOffset,
         limit: chunkLimit,
-        total: totalPlannedItems
+        actionable: totalPlannedItems,
+        skippedFromPreview: skippedPlanItems.length
       });
 
       const chunkResult = await queueBatchDownloadChunk({
         chain,
+        plannedItemsOverride: actionablePlanItems,
         requestContext: payload.requestContext,
         refererPath: payload.refererPath,
         baseFolderInput: payload.baseFolderInput,
@@ -4134,7 +4214,7 @@ async function processBackgroundBatchRun(run, payload) {
         cancelled: () => run.status !== 'running'
       });
 
-      run.discoveredVideoCount += Number(chunkResult.totalInstances || 0);
+      run.discoveredVideoCount = plannedItems.length;
       run.queuedCount += chunkResult.queued.length;
       run.skippedCount += chunkResult.skipped.length;
       for (const queuedItem of chunkResult.queued) {
@@ -4143,20 +4223,21 @@ async function processBackgroundBatchRun(run, payload) {
       for (const skippedItem of chunkResult.skipped) {
         pushCappedItem(run.skipped, skippedItem, MAX_SKIPPED_ITEMS_IN_MEMORY, 'skippedOverflow', run);
       }
-      run.scannedContainerCount = chain.nextContainerOffset === null
-        ? Number(chain.totalContainers || run.scannedContainerCount || 0)
+      const processedActions = chain.nextContainerOffset === null
+        ? Number(chain.totalContainers || 0)
         : Number.isFinite(Number(chain.nextContainerOffset))
           ? Number(chain.nextContainerOffset)
-          : Number(chain.totalContainers || run.scannedContainerCount || 0);
-      run.processedContainers = chain.nextContainerOffset === null
-        ? Number(chain.totalContainers || run.processedContainers || 0)
-        : Number.isFinite(Number(chain.nextContainerOffset))
-          ? Number(chain.nextContainerOffset)
-          : Number(chain.totalContainers || run.processedContainers || 0);
-      markBackgroundBatchPhase(run, 'chunk-queued', {
+          : Number(chain.totalContainers || 0);
+      run.scannedContainerCount = skippedPlanItems.length + processedActions;
+      run.processedContainers = run.scannedContainerCount;
+      run.nextContainerOffset = run.hasMoreContainers
+        ? processedActions
+        : 0;
+      markBackgroundBatchPhase(run, 'actions-queued', {
         iteration,
         queued: chunkResult.queued.length,
-        skipped: chunkResult.skipped.length,
+        runtimeSkipped: chunkResult.skipped.length,
+        previewSkipped: skippedPlanItems.length,
         totalQueued: run.queuedCount,
         totalSkipped: run.skippedCount,
         processed: run.processedContainers,
@@ -4249,6 +4330,48 @@ async function processBackgroundBatchRun(run, payload) {
 
       hasMore = Boolean(chain.hasMoreContainers);
       nextOffset = Number.isFinite(Number(chain.nextContainerOffset)) ? Number(chain.nextContainerOffset) : 0;
+    }
+
+    if (actionablePlanItems.length === 0) {
+      run.scannedContainerCount = run.totalContainers;
+      run.processedContainers = run.totalContainers;
+      run.hasMoreContainers = false;
+      run.nextContainerOffset = 0;
+      if (dbSession) {
+        const updatedSession = await withDbRetry(
+          () => db.updateBatchSession(run.id, {
+            status: 'running',
+            totalContainers: run.totalContainers,
+            processedContainers: run.processedContainers,
+            queuedCount: run.queuedCount,
+            skippedCount: run.skippedCount,
+            nextContainerOffset: run.nextContainerOffset,
+            hasMore: false,
+            queuedItems: run.queued,
+            skippedItems: run.skipped,
+            chainErrors: run.chainErrors,
+            sessionData: {
+              type: 'download',
+              sessionId: currentSessionId,
+              phase: run.phase,
+              lastProgressAt: run.lastProgressAt || Date.now(),
+              lastError: run.lastError || null,
+              discoveredVideoCount: Number(run.discoveredVideoCount || 0),
+              downloadCompletedCount: Number(run.downloadCompletedCount || 0),
+              downloadFailedCount: Number(run.downloadFailedCount || 0),
+              queuedItemsTracked: Array.isArray(run.queued) ? run.queued.length : 0,
+              skippedItemsTracked: Array.isArray(run.skipped) ? run.skipped.length : 0,
+              queuedItemsOverflow: Number(run.queuedOverflow || 0),
+              skippedItemsOverflow: Number(run.skippedOverflow || 0),
+              itemErrorsTracked: Array.isArray(run.itemErrors) ? run.itemErrors.length : 0,
+              itemErrorsOverflow: Number(run._itemErrorsOverflow || 0)
+            }
+          }),
+          `batch-session-skip-only[${run.id}]`
+        );
+        if (updatedSession) dbSession = updatedSession;
+      }
+      touchBackgroundBatchRun(run);
     }
 
     if (run.status === 'running') {

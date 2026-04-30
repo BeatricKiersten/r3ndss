@@ -892,14 +892,15 @@ export default function ZeniusPage() {
     setPreviewPollErrorCount(0);
 
     setBatchBuildProgress(trackedPreviewRun.status === 'running'
-      ? {
-          processed: Number(trackedPreviewRun.scannedContainerCount || trackedPreviewRun.processedContainers || 0),
-          total: Number.isFinite(Number(trackedPreviewRun.totalContainers)) ? Number(trackedPreviewRun.totalContainers) : null,
-          discoveredVideos: Number(trackedPreviewRun.discoveredVideoCount || 0),
-          previewContainers: Number(trackedPreviewRun.previewSummary?.previewContainerCount || 0),
-          discoveredContainers: Number(trackedPreviewRun.previewSummary?.discoveredContainerCount || trackedPreviewRun.totalContainers || 0),
-          hasMore: Boolean(trackedPreviewRun.hasMoreContainers)
-        }
+        ? {
+            processed: Number(trackedPreviewRun.scannedContainerCount || trackedPreviewRun.processedContainers || 0),
+            total: Number.isFinite(Number(trackedPreviewRun.totalContainers)) ? Number(trackedPreviewRun.totalContainers) : null,
+            discoveredVideos: Number(trackedPreviewRun.discoveredVideoCount || 0),
+            actions: trackedPreviewRun.previewItemsSummary?.byAction || null,
+            previewContainers: Number(trackedPreviewRun.previewSummary?.previewContainerCount || 0),
+            discoveredContainers: Number(trackedPreviewRun.previewSummary?.discoveredContainerCount || trackedPreviewRun.totalContainers || 0),
+            hasMore: Boolean(trackedPreviewRun.hasMoreContainers)
+          }
       : null);
 
     if (trackedPreviewRun.chainPreview) {
@@ -1150,6 +1151,7 @@ export default function ZeniusPage() {
           processed: Number(status.containerProgress?.processed || status.processedContainers || 0),
           total: Number.isFinite(Number(status.containerProgress?.total)) ? Number(status.containerProgress.total) : null,
           discoveredVideos: Number(status.discoveredVideoCount || 0),
+          actions: status.previewItemsSummary?.byAction || null,
           previewContainers: Number(status.previewSummary?.previewContainerCount || 0),
           discoveredContainers: Number(status.previewSummary?.discoveredContainerCount || status.totalContainers || 0),
           hasMore: Boolean(status.hasMoreContainers)
@@ -1258,6 +1260,7 @@ export default function ZeniusPage() {
             processed: Number(status.containerProgress?.processed || status.processedContainers || 0),
             total: Number.isFinite(Number(status.containerProgress?.total)) ? Number(status.containerProgress.total) : null,
             discoveredVideos: Number(status.discoveredVideoCount || 0),
+            actions: status.previewItemsSummary?.byAction || null,
             previewContainers: Number(status.previewSummary?.previewContainerCount || 0),
             discoveredContainers: Number(status.previewSummary?.discoveredContainerCount || status.totalContainers || 0),
             hasMore: Boolean(status.hasMoreContainers)
@@ -1399,6 +1402,7 @@ export default function ZeniusPage() {
   );
   const previewCancelRunId = trackedPreviewRun?.id || previewRunId || batchSessionId || null;
   const previewItemsSummary = trackedPreviewRun?.previewItemsSummary || null;
+  const livePreviewActions = previewItemsSummary?.byAction || batchBuildProgress?.actions || null;
   const previewStatusTone = trackedPreviewRun?.status === 'failed'
     ? 'text-red-300'
     : previewPollErrorCount > 0
@@ -2069,7 +2073,7 @@ export default function ZeniusPage() {
               <div className="flex items-start gap-2 p-3 rounded-lg bg-sky-500/5 border border-sky-500/20">
                 <Loader2 className="w-4 h-4 text-sky-400 mt-0.5 flex-shrink-0 animate-spin" />
                 <p className="text-xs text-sky-300">
-                  Preview masih diproses — saat ini <strong>{batchVideoCount} video</strong> dari <strong>{batchPreviewContainerCount} container</strong> (discovered: <strong>{batchDiscoveredContainerCount}</strong>). Tunggu hingga plan selesai sebelum start batch download.
+                  Preview masih diproses — <strong>{Number(livePreviewActions?.download || 0)}</strong> download, <strong>{Number(livePreviewActions?.skip || 0)}</strong> skip dari <strong>{batchVideoCount}</strong> video. Tunggu hingga plan selesai sebelum start batch download.
                 </p>
               </div>
             )}
@@ -2102,20 +2106,20 @@ export default function ZeniusPage() {
                 </div>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
                   <div className="bg-[#0d0d0d] rounded px-2 py-1 border border-[#1f1f1f]">
+                    <span className="text-[#666]">Download</span>
+                    <p className="text-emerald-300 font-mono">{Number(livePreviewActions?.download || 0)}</p>
+                  </div>
+                  <div className="bg-[#0d0d0d] rounded px-2 py-1 border border-[#1f1f1f]">
+                    <span className="text-[#666]">Skip</span>
+                    <p className="text-amber-300 font-mono">{Number(livePreviewActions?.skip || 0)}</p>
+                  </div>
+                  <div className="bg-[#0d0d0d] rounded px-2 py-1 border border-[#1f1f1f]">
                     <span className="text-[#666]">Discovered videos</span>
                     <p className="text-sky-200 font-mono">{Number(batchBuildProgress.discoveredVideos || 0)}</p>
                   </div>
                   <div className="bg-[#0d0d0d] rounded px-2 py-1 border border-[#1f1f1f]">
-                    <span className="text-[#666]">Preview containers</span>
-                    <p className="text-sky-200 font-mono">{Number(batchBuildProgress.previewContainers || 0)}</p>
-                  </div>
-                  <div className="bg-[#0d0d0d] rounded px-2 py-1 border border-[#1f1f1f]">
-                    <span className="text-[#666]">Discovered containers</span>
-                    <p className="text-sky-200 font-mono">{Number(batchBuildProgress.discoveredContainers || 0)}</p>
-                  </div>
-                  <div className="bg-[#0d0d0d] rounded px-2 py-1 border border-[#1f1f1f]">
-                    <span className="text-[#666]">Status</span>
-                    <p className="text-sky-200 font-mono">{batchBuildProgress.hasMore ? 'running' : 'finalizing'}</p>
+                    <span className="text-[#666]">Containers</span>
+                    <p className="text-sky-200 font-mono">{Number(batchBuildProgress.previewContainers || 0)} / {Number(batchBuildProgress.discoveredContainers || 0)}</p>
                   </div>
                 </div>
               </div>

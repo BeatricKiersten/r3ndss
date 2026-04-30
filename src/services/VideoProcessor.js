@@ -435,19 +435,7 @@ class VideoProcessor {
    * Build yt-dlp arguments
    */
   _buildYtDlpArgs(hlsUrl, outputPath) {
-    const args = [
-      '--no-playlist',
-      '--newline',
-      '--no-warnings',
-      '--downloader', 'ffmpeg',
-      '--hls-use-mpegts',
-      '-f', 'bestvideo*+bestaudio/best',
-      '--merge-output-format', 'mp4',
-      '-o', outputPath
-    ];
-
-    args.push(hlsUrl);
-    return args;
+    return ['-o', outputPath, hlsUrl];
   }
 
   _resolveOutputDir(outputDir) {
