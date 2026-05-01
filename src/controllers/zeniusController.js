@@ -269,6 +269,30 @@ class DownloadQueue {
         };
       }
 
+      if (pipelineResult.pipeline?.skipped) {
+        console.warn(`[DownloadQueue] #${task.id} ${urlShortId} skipped after download: ${pipelineResult.pipeline.reason}`);
+
+        broadcastDownloadComplete({
+          urlShortId,
+          taskId: task.id,
+          fileId,
+          skipped: true,
+          reason: pipelineResult.pipeline.reason,
+          durationMs: Date.now() - startTime
+        });
+
+        return {
+          success: true,
+          id: task.id,
+          fileId,
+          urlShortId,
+          skipped: true,
+          reason: pipelineResult.pipeline.reason,
+          uploadQueue: pipelineResult.uploadQueue,
+          pipeline: pipelineResult.pipeline
+        };
+      }
+
       console.log(`[DownloadQueue] #${task.id} ${urlShortId} downloaded, fileId=${fileId}, upload completed`);
 
       broadcastDownloadComplete({

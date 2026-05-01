@@ -29,6 +29,11 @@ function normalizePipelineError(error, fallbackCode = 'PIPELINE_FAILED') {
   };
 }
 
+function isUploadWaitTimeoutError(error) {
+  return error?.code === 'UPLOAD_WAIT_TIMEOUT'
+    || String(error?.message || '').includes('Timed out waiting for upload completion');
+}
+
 function buildPipelineState({
   fileId = null,
   processJobId = null,
@@ -57,23 +62,33 @@ async function finalizeExistingFilePipeline(fileId, folderId = 'root', selectedP
   const pendingProviderInfo = await uploaderService.getPendingUploadProviders(fileId, selectedProviders);
   let uploadQueue = null;
   let uploadStatus = null;
+  let uploadWaitError = null;
 
   if (pendingProviderInfo.hasPendingProviders && file.localPath) {
     uploadQueue = await uploaderService.queueFileUpload(fileId, file.localPath, folderId, selectedProviders);
     if (waitForUpload && Array.isArray(uploadQueue?.jobs) && uploadQueue.jobs.length > 0) {
-      uploadStatus = await uploaderService.waitForFileUploadCompletion(fileId, selectedProviders, options.waitOptions || {});
+      try {
+        uploadStatus = await uploaderService.waitForFileUploadCompletion(fileId, selectedProviders, options.waitOptions || {});
+      } catch (error) {
+        if (!isUploadWaitTimeoutError(error)) throw error;
+        uploadWaitError = error;
+      }
     }
   } else if (waitForUpload && !pendingProviderInfo.hasPendingProviders) {
     uploadStatus = await uploaderService.getUploadStatus(fileId);
   }
 
   const hasQueuedUploads = Array.isArray(uploadQueue?.jobs) && uploadQueue.jobs.length > 0;
-  const state = pendingProviderInfo.hasPendingProviders
+  const state = uploadWaitError
+    ? 'queued'
+    : pendingProviderInfo.hasPendingProviders
     ? (waitForUpload ? (hasQueuedUploads ? 'uploaded' : 'queued') : 'queued')
     : 'uploaded';
 
   let reason = null;
-  if (!pendingProviderInfo.hasPendingProviders) {
+  if (uploadWaitError) {
+    reason = 'upload-wait-timeout';
+  } else if (!pendingProviderInfo.hasPendingProviders) {
     reason = 'File already exists on selected providers';
   } else if (!file.localPath) {
     reason = 'Existing file is missing local source';
@@ -92,7 +107,8 @@ async function finalizeExistingFilePipeline(fileId, folderId = 'root', selectedP
       uploadStatus,
       state,
       skipped: true,
-      reason
+      reason,
+      error: uploadWaitError
     })
   };
 }
@@ -151,9 +167,17 @@ async function runProcessUploadPipeline(hlsUrl, options = {}) {
     selectedProviders
   );
 
-  const uploadStatus = waitForUpload
-    ? await uploaderService.waitForFileUploadCompletion(processResult.fileId, selectedProviders, waitOptions)
-    : null;
+  let uploadStatus = null;
+  let uploadWaitError = null;
+
+  if (waitForUpload) {
+    try {
+      uploadStatus = await uploaderService.waitForFileUploadCompletion(processResult.fileId, selectedProviders, waitOptions);
+    } catch (error) {
+      if (!isUploadWaitTimeoutError(error)) throw error;
+      uploadWaitError = error;
+    }
+  }
 
   return {
     process: processResult,
@@ -164,7 +188,10 @@ async function runProcessUploadPipeline(hlsUrl, options = {}) {
       processJobId: processResult.jobId || null,
       uploadQueue,
       uploadStatus,
-      state: waitForUpload ? 'uploaded' : 'queued'
+      state: uploadWaitError ? 'queued' : (waitForUpload ? 'uploaded' : 'queued'),
+      skipped: Boolean(uploadWaitError),
+      reason: uploadWaitError ? 'upload-wait-timeout' : null,
+      error: uploadWaitError
     })
   };
 }

@@ -519,7 +519,10 @@ class UploaderService extends EventEmitter {
           timeoutMs,
           elapsedMs: Date.now() - startedAt
         });
-        throw new Error(`Timed out waiting for upload completion for file ${fileId}`);
+        const error = new Error(`Timed out waiting for upload completion for file ${fileId}`);
+        error.code = 'UPLOAD_WAIT_TIMEOUT';
+        error.fileId = fileId;
+        throw error;
       }
 
       const pendingInfo = await this.getPendingUploadProviders(fileId, selectedProviders);
